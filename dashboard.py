@@ -558,6 +558,8 @@ def api_snapshot():
                     "put_call_direction":    mc.get("put_call_direction"),
                     "eth_netflow_4h":        mc.get("eth_netflow_4h"),
                     "eth_netflow_direction": mc.get("eth_netflow_direction"),
+                    "dxy_value":             mc.get("dxy_value"),
+                    "yield_10y":             mc.get("yield_10y"),
                 }
 
         # ── MAGI ──────────────────────────────────────────────────

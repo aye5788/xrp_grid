@@ -150,6 +150,8 @@ def initialize_database():
         ("put_call_direction",    "TEXT"),
         ("eth_netflow_4h",        "REAL"),
         ("eth_netflow_direction", "TEXT"),
+        ("dxy_value",             "REAL"),
+        ("yield_10y",             "REAL"),
     ]
     existing_cols = {row[1] for row in cursor.execute("PRAGMA table_info(market_context)").fetchall()}
     for col, col_type in _new_cols:

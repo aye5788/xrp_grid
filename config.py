@@ -67,6 +67,9 @@ DERIBIT_POLL_MINUTES = 60
 # How often to poll Etherscan exchange netflow (minutes)
 NETFLOW_POLL_MINUTES = 60
 
+# How often to poll FRED macro data (minutes) — FRED updates once daily
+FRED_POLL_MINUTES = 240
+
 # ----- DERIBIT -----
 DERIBIT_DVOL_URL      = "https://www.deribit.com/api/v2/public/get_index_price"
 DERIBIT_DVOL_INDEX    = "ethdvol_usdc"  # Deribit's name for the ETH implied vol index
@@ -100,3 +103,4 @@ def load_env_vars():
 
 _env = load_env_vars()
 ETHERSCAN_API_KEY = os.environ.get('ETHERSCAN_API_KEY') or _env.get('ETHERSCAN_API_KEY', '')
+FRED_API_KEY      = os.environ.get('FRED_API_KEY')      or _env.get('FRED_API_KEY', '')

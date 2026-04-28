@@ -633,6 +633,65 @@ def poll_etherscan_netflow():
 
 
 # =============================================================
+# FRED MACRO DATA POLLER (DXY + 10Y TREASURY YIELD)
+# =============================================================
+_FRED_SERIES = {
+    "dxy_value": "DTWEXBGS",
+    "yield_10y": "DGS10",
+}
+_FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
+
+
+def _fetch_fred_macro():
+    """Fetch DXY and 10Y yield from FRED and write to market_context."""
+    results = {}
+    for col, series_id in _FRED_SERIES.items():
+        resp = requests.get(
+            _FRED_BASE,
+            params={
+                "series_id":  series_id,
+                "api_key":    config.FRED_API_KEY,
+                "sort_order": "desc",
+                "limit":      10,
+                "file_type":  "json",
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        observations = resp.json().get("observations", [])
+        # FRED uses "." for missing values — take the first valid float
+        value = None
+        for obs in observations:
+            raw = obs.get("value", ".")
+            if raw != ".":
+                try:
+                    value = float(raw)
+                    break
+                except ValueError:
+                    continue
+        results[col] = value
+
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:00")
+    database.upsert_market_context(ts, results)
+    logger.info(
+        "FRED macro: DXY=%.4f | 10Y yield=%.4f",
+        results.get("dxy_value") or 0.0,
+        results.get("yield_10y") or 0.0,
+    )
+    return results
+
+
+def poll_fred_macro():
+    """Background thread: poll FRED macro data every FRED_POLL_MINUTES."""
+    while True:
+        try:
+            _fetch_fred_macro()
+        except Exception as e:
+            logger.warning("FRED macro poll failed: %s", e)
+        time.sleep(config.FRED_POLL_MINUTES * 60)
+
+
+# =============================================================
 # MAIN
 # =============================================================
 def main():
@@ -658,6 +717,12 @@ def main():
             _fetch_etherscan_netflow()
         except Exception as e:
             logger.error("Etherscan fetch failed: %s", e)
+
+        logger.info("--- FRED macro poll ---")
+        try:
+            _fetch_fred_macro()
+        except Exception as e:
+            logger.error("FRED fetch failed: %s", e)
 
         logger.info("--- Last market_context row ---")
         row = database.get_last_market_context()
@@ -710,6 +775,12 @@ def main():
     )
     netflow_thread.start()
     logger.info("Etherscan netflow poller started")
+
+    fred_thread = threading.Thread(
+        target=poll_fred_macro, daemon=True, name="FredPoller"
+    )
+    fred_thread.start()
+    logger.info("FRED macro poller started (DXY + 10Y yield)")
 
     # Give pollers 5 seconds to get first readings before starting WebSocket
     time.sleep(5)
