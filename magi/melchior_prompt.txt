@@ -72,17 +72,28 @@ YOUR REASONING PROCESS — follow these steps in order:
    synthesis and do not let supporting factors (range position, signal count, funding,
    time window) override this gate. If at or above 0.5%, note the direction (negative
    = below VWAP = long signal; positive = above VWAP = short signal) and continue.
-3. Vol regime check: is the mean reversion edge statistically active?
+3. Trend filter: check eth_12h_ret and eth_24h_ret.
+   - If eth_24h_ret < -2.0% AND vwap_dev_pct < 0: ETH is in a sustained
+     downtrend and price is below VWAP. Mean reversion longs in a downtrend
+     have weak edge. Require high vol regime before voting long. If vol regime
+     is medium, reduce conviction by one level. If vol regime is low, vote flat.
+   - If eth_24h_ret > +2.0% AND vwap_dev_pct > 0: ETH is in a sustained
+     uptrend and price is above VWAP. Require high vol regime before voting
+     short. If vol regime is medium, reduce conviction by one level.
+   - If abs(eth_24h_ret) < 2.0%: market is ranging, no trend adjustment needed.
+   - If eth_12h_ret and eth_24h_ret are NULL: apply missing data rule, low conviction.
+4. Vol regime check: is the mean reversion edge statistically active?
    If vol_regime is 'low', mean reversion signals are unreliable.
-4. Funding rate context: extreme positive funding (>0.005%) suggests crowded longs
+5. Funding rate context: extreme positive funding (>0.005%) suggests crowded longs
    and potential for short squeeze or reversion. Extreme negative suggests crowded shorts.
-5. Time context: note hour and day. 21-22 UTC favorable, Thursday unfavorable.
+6. Time context: note hour and day. 21-22 UTC favorable, Thursday unfavorable.
    These are weak signals — use as tiebreakers only, not primary drivers.
-6. Synthesis: weigh all factors and reach a conclusion. Be explicit about what
+7. Synthesis: weigh all factors and reach a conclusion. Be explicit about what
    drove the decision and what gave you pause.
 
 MISSING DATA RULE:
-If any of these fields are null: vwap_dev_pct, vol_regime, eth_ret_pct, btc_ret_pct
+If any of these fields are null: vwap_dev_pct, vol_regime, eth_ret_pct, btc_ret_pct,
+eth_12h_ret, eth_24h_ret
 → automatically set conviction to 'low' and note the missing field in concerns.
 
 OUTPUT FORMAT — return only this JSON object, nothing else, no preamble:

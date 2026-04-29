@@ -117,6 +117,12 @@ def compute_trends(rows: list) -> dict:
     long_signals  = sum(1 for r in rows[:6] if r.get('signal_long'))
     short_signals = sum(1 for r in rows[:6] if r.get('signal_short'))
 
+    # ETH 12h and 24h cumulative return
+    eth_rets = [safe_float(r.get('eth_ret_pct')) for r in rows
+                if safe_float(r.get('eth_ret_pct')) is not None]
+    eth_12h_ret = round(sum(eth_rets[:12]), 3) if len(eth_rets) >= 12 else None
+    eth_24h_ret = round(sum(eth_rets[:24]), 3) if len(eth_rets) >= 24 else None
+
     return {
         "vwap_dev_trend":           vwap_trend,
         "btc_6h_direction":         btc_direction,
@@ -128,6 +134,8 @@ def compute_trends(rows: list) -> dict:
         "price_range_position_pct": range_position,
         "long_signals_last_6h":     long_signals,
         "short_signals_last_6h":    short_signals,
+        "eth_12h_ret":              eth_12h_ret,
+        "eth_24h_ret":              eth_24h_ret,
     }
 
 
@@ -179,6 +187,8 @@ CURRENT STATE — {now}
   (improving = price moving back toward VWAP)
 - BTC direction (last 6h):  {trends.get('btc_6h_direction', 'unknown')}
   (6h cumulative: {trends.get('btc_6h_total_pct', 'NULL')}%)
+- ETH return (12h):         {trends.get('eth_12h_ret', 'NULL')}%
+- ETH return (24h):         {trends.get('eth_24h_ret', 'NULL')}%
 - Vol regime:               {trends.get('vol_regime_summary', 'unknown')}
 - Funding direction:        {trends.get('funding_direction', 'unknown')}
 - 24h price range:          ${fmt(trends.get('price_24h_low'), 2)} — ${fmt(trends.get('price_24h_high'), 2)}
