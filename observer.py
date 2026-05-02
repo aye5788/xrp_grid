@@ -484,6 +484,141 @@ def poll_kraken_price():
 
 
 # =============================================================
+# COINGLASS LIQUIDATION MONITOR (4h failed-squeeze detection)
+# =============================================================
+def _coinglass_call(tool_name: str, arguments: dict) -> dict:
+    """Call the CoinGlass MCP HTTP endpoint for a named tool."""
+    import json as _json
+    payload = {
+        "jsonrpc": "2.0",
+        "id":      1,
+        "method":  "tools/call",
+        "params":  {"name": tool_name, "arguments": arguments},
+    }
+    resp = requests.post(
+        config.COINGLASS_MCP_URL,
+        json=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Accept":        "application/json, text/event-stream",
+            "CG-API-KEY":    config.COINGLASS_API_KEY,
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    result = resp.json()
+    if "error" in result:
+        raise RuntimeError(f"CoinGlass error: {result['error']}")
+    text = result["result"]["content"][0]["text"]
+    return _json.loads(text)
+
+
+def _run_liquidation_check() -> dict | None:
+    """
+    Fetch the latest ETH 4h liquidation candle and OI-weighted funding rate.
+    Detect failed squeeze. Log to liquidation_signals table.
+    Returns the signal dict when signal_confirmed=True, else None.
+    """
+    now = datetime.now(timezone.utc)
+    ts  = now.strftime("%Y-%m-%d %H:00")
+
+    liq_data = _coinglass_call("get_futures_aggregated_liquidation_history", {
+        "exchange_list": config.COINGLASS_ALL_EXCHANGES,
+        "symbol":        "ETH",
+        "interval":      "4h",
+        "limit":         5,
+        "unit":          "usd",
+    })
+    if liq_data.get("code") != "0" or not liq_data.get("data"):
+        logger.warning("Liquidation monitor: no data from CoinGlass")
+        return None
+
+    latest_liq = liq_data["data"][-1]
+    short_usd  = float(latest_liq.get("aggregated_short_liquidation_usd", 0) or 0)
+    long_usd   = float(latest_liq.get("aggregated_long_liquidation_usd", 0) or 0)
+    ratio      = (short_usd / long_usd) if long_usd > 0 else None
+
+    price_4h_return = None
+    try:
+        conn_liq = database.get_connection()
+        rows_4h  = conn_liq.execute("""
+            SELECT eth_close FROM hourly ORDER BY timestamp DESC LIMIT 5
+        """).fetchall()
+        conn_liq.close()
+        if len(rows_4h) >= 5 and rows_4h[0]["eth_close"] and rows_4h[4]["eth_close"]:
+            price_4h_return = (
+                (rows_4h[0]["eth_close"] - rows_4h[4]["eth_close"])
+                / rows_4h[4]["eth_close"] * 100
+            )
+    except Exception as e:
+        logger.warning("Liquidation monitor: price fetch failed: %s", e)
+
+    funding_rate = None
+    try:
+        fr_data = _coinglass_call("get_futures_funding_rate_oi_weight_history", {
+            "symbol": "ETH", "interval": "4h", "limit": 3,
+        })
+        if fr_data.get("code") == "0" and fr_data.get("data"):
+            funding_rate = float(fr_data["data"][-1].get("c", 0) or 0)
+    except Exception as e:
+        logger.warning("Liquidation monitor: funding rate fetch failed: %s", e)
+
+    confirmed = (
+        short_usd  >= config.LIQ_P90_USD
+        and ratio is not None and ratio > config.LIQ_SHORT_DOMINANCE
+        and price_4h_return is not None and price_4h_return < config.LIQ_FOLLOWTHROUGH
+    )
+    elevated = funding_rate is not None and funding_rate > config.LIQ_FUNDING_MEDIAN
+
+    signal = {
+        "timestamp":        ts,
+        "short_liq_usd":    short_usd,
+        "long_liq_usd":     long_usd,
+        "short_long_ratio": ratio,
+        "price_4h_return":  price_4h_return,
+        "funding_rate":     funding_rate,
+        "funding_elevated": 1 if elevated  else 0,
+        "signal_confirmed": 1 if confirmed else 0,
+        "magi_triggered":   0,
+    }
+    database.write_liquidation_signal(signal)
+
+    logger.info(
+        "Liq check | short=$%.0f long=$%.0f ratio=%s | "
+        "4h_ret=%s%% | fr=%s%% | confirmed=%s elevated=%s",
+        short_usd, long_usd,
+        f"{ratio:.2f}"          if ratio           is not None else "NULL",
+        f"{price_4h_return:.3f}" if price_4h_return is not None else "NULL",
+        f"{funding_rate:.6f}"   if funding_rate    is not None else "NULL",
+        confirmed, elevated,
+    )
+    return signal if confirmed else None
+
+
+def poll_liquidation_monitor():
+    """
+    Background thread: every 4h, check for a failed short squeeze signal.
+    If signal_confirmed AND funding_elevated, wake MAGI in a child thread.
+    """
+    while True:
+        try:
+            signal = _run_liquidation_check()
+            if signal and signal.get("funding_elevated"):
+                logger.info("LIQUIDATION SIGNAL CONFIRMED — waking MAGI deliberation...")
+                from magi.orchestrator import run as _magi_run
+                magi_thread = threading.Thread(
+                    target=_magi_run,
+                    kwargs={"force": True},
+                    daemon=True,
+                    name="MAGILiquidation",
+                )
+                magi_thread.start()
+        except Exception as e:
+            logger.warning("Liquidation monitor error: %s", e)
+        time.sleep(config.LIQ_POLL_HOURS * 3600)
+
+
+# =============================================================
 # DERIBIT IMPLIED VOL + PUT/CALL RATIO POLLER
 # =============================================================
 def _fetch_deribit_vol():
@@ -731,6 +866,16 @@ def main():
                 logger.info("  %-25s %s", k, v)
         else:
             logger.warning("No market_context rows found")
+
+        logger.info("--- Liquidation monitor test ---")
+        try:
+            sig = _run_liquidation_check()
+            if sig:
+                logger.info("Liquidation signal confirmed: %s", sig)
+            else:
+                logger.info("No confirmed liquidation signal this cycle")
+        except Exception as e:
+            logger.error("Liquidation check failed: %s", e)
         return
 
     logger.info("=" * 55)
@@ -781,6 +926,12 @@ def main():
     )
     fred_thread.start()
     logger.info("FRED macro poller started (DXY + 10Y yield)")
+
+    liq_thread = threading.Thread(
+        target=poll_liquidation_monitor, daemon=True, name="LiquidationMonitor"
+    )
+    liq_thread.start()
+    logger.info("Liquidation monitor started (4h failed-squeeze detection)")
 
     # Give pollers 5 seconds to get first readings before starting WebSocket
     time.sleep(5)

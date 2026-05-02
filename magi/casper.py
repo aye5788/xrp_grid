@@ -302,8 +302,23 @@ COINBASE CONTEXT (from live observer):
 - Data status:      {observer.get('status', 'unknown')}
 """
 
+    liq_block = ""
+    if observer.get("liq_signal_confirmed"):
+        liq_block = f"""
+LIQUIDATION SIGNAL CONTEXT (trigger for this MAGI activation):
+- Strategy:           LIQUIDATION SQUEEZE SHORT
+- Short liquidations: ${observer.get('liq_short_usd', 0):,.0f}
+- Long liquidations:  ${observer.get('liq_long_usd', 0):,.0f}
+- Short/Long ratio:   {fmt(observer.get('liq_ratio'), 2)}x
+- 4h price return:    {fmt(observer.get('liq_4h_return'), 3)}% (failed to bounce)
+- Funding elevated:   {'YES' if observer.get('liq_funding_elevated') else 'NO'}
+
+IMPORTANT: Check Fear & Greed. In 31 historical events, F&G was always <= 60.
+If current F&G > 60, this is historically anomalous — flag it prominently.
+"""
+
     return (
-        macro_block + crypto_block + coinbase_block +
+        macro_block + crypto_block + coinbase_block + liq_block +
         "\nSynthesize these signals and return your vote."
     ).strip()
 
@@ -366,10 +381,10 @@ class Casper:
             raw = raw.strip()
         return json.loads(raw)
 
-    def assess(self) -> dict:
+    def assess(self, liq_signal: dict = None) -> dict:
         """
         Main entry point. Fetches all macro data, builds context,
-        calls Gemini 2.5 Pro with thinking mode, returns a vote dict.
+        calls Gemini 2.5 Flash, returns a vote dict.
         Always returns a valid dict even if the API call fails.
         Retries once on JSON parse error before returning error vote.
         """
@@ -380,6 +395,15 @@ class Casper:
             dxy        = get_dxy_data()
             yields     = get_yield_data()
             observer   = get_observer_context()
+
+            # Append liquidation context to observer dict if provided
+            if liq_signal:
+                observer["liq_short_usd"]      = liq_signal.get("short_liq_usd")
+                observer["liq_long_usd"]        = liq_signal.get("long_liq_usd")
+                observer["liq_ratio"]           = liq_signal.get("short_long_ratio")
+                observer["liq_4h_return"]       = liq_signal.get("price_4h_return")
+                observer["liq_funding_elevated"] = liq_signal.get("funding_elevated", 0)
+                observer["liq_signal_confirmed"] = liq_signal.get("signal_confirmed", 0)
 
             # Build context string
             context = build_context(

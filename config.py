@@ -104,3 +104,42 @@ def load_env_vars():
 _env = load_env_vars()
 ETHERSCAN_API_KEY = os.environ.get('ETHERSCAN_API_KEY') or _env.get('ETHERSCAN_API_KEY', '')
 FRED_API_KEY      = os.environ.get('FRED_API_KEY')      or _env.get('FRED_API_KEY', '')
+
+# ----- COINGLASS -----
+COINGLASS_MCP_URL  = "https://api-mcp.coinglass.com/mcp"
+COINGLASS_API_KEY  = os.environ.get('COINGLASS_API_KEY') or _env.get('COINGLASS_API_KEY', '')
+COINGLASS_ALL_EXCHANGES = (
+    "OKX,Binance,HTX,Bitmex,Bitfinex,Bybit,Deribit,Gate,Kraken,"
+    "KuCoin,Bitget,dYdX,CoinEx,BingX,Coinbase,Crypto.com,Hyperliquid,"
+    "Bitunix,MEXC"
+)
+
+# ----- LIQUIDATION SIGNAL PARAMETERS -----
+# How often the liquidation monitor polls CoinGlass (hours)
+LIQ_POLL_HOURS = 4
+
+# Historical 90th-percentile short liquidation threshold (from 165-day research dataset)
+LIQ_P90_USD = 6_330_461
+
+# OI-weighted funding rate median threshold (from research: 0.00202%)
+LIQ_FUNDING_MEDIAN = 0.00202
+
+# Failed squeeze detection thresholds
+LIQ_SHORT_DOMINANCE = 2.0   # short_liq_usd must exceed this × long_liq_usd
+LIQ_FOLLOWTHROUGH   = 0.5   # price 4h return must be below this % to classify as failed
+
+# ----- LIQUIDATION TRADE PARAMETERS -----
+# Calibrated via stop_calibration.py / stop_calibration2.py against 20 MAGI-approved signals.
+#
+# Finding: immediate entry is NOT viable regardless of stop width — 80-90% of signals
+# touch +0.75-1.5% within the first 4h before the intended -2% move materializes.
+# The correct approach is a +3h delayed entry with a 36h hold window, which achieves
+# +0.18% expectancy and 60% win rate (vs -2.0% with immediate entry).
+#
+# ARCHITECTURE NOTE: Delayed entry requires execution.py to schedule the fill
+# 3 hours after the MAGI decision rather than immediately. Until that is implemented,
+# live trades will underperform the backtested expectancy.
+LIQ_ENTRY_DELAY_HOURS = 3       # hours to wait after signal before entering
+LIQ_STOP_PCT          = 0.0150  # +1.50% above entry (stop for short)
+LIQ_TARGET_PCT        = 0.0200  # -2.00% below entry (target for short)
+LIQ_MAX_HOLD_HOURS    = 36      # exit at time stop if neither level hit

@@ -375,7 +375,8 @@ class Balthasar:
         self._last_output_tokens = 0
 
     def build_context(self, rows, acct, time_anal,
-                      acct_anal, friction, drawdown) -> str:
+                      acct_anal, friction, drawdown,
+                      liq_signal: dict = None) -> str:
         """
         Build Balthasar's full context string with pre-computed
         analysis blocks clearly labeled.
@@ -468,13 +469,32 @@ CURRENT MARKET STATE — {now}
             )
         history = f"\nLAST 24 HOURLY ROWS (most recent first):{header}{row_lines}"
 
+        liq_block = ""
+        if liq_signal:
+            short_usd = liq_signal.get('short_liq_usd', 0) or 0
+            long_usd  = liq_signal.get('long_liq_usd', 0) or 0
+            ratio     = liq_signal.get('short_long_ratio')
+            ret_4h    = liq_signal.get('price_4h_return')
+            fr_elev   = liq_signal.get('funding_elevated', 0)
+            liq_block = f"""
+LIQUIDATION SIGNAL (trigger for this MAGI activation):
+- Signal confirmed:    YES (all three conditions met)
+- Strategy:           LIQUIDATION SQUEEZE — direction is SHORT
+- Short liquidations: ${short_usd:,.0f}
+- Long liquidations:  ${long_usd:,.0f}
+- Short/Long ratio:   {fmt(ratio, 2) if ratio else 'NULL'}x
+- 4h price return:    {fmt(ret_4h, 3) if ret_4h is not None else 'NULL'}% (failed to follow through)
+- Funding elevated:   {'YES (+amplified bearish signal)' if fr_elev else 'NO'}
+Trade parameters: stop +0.75% above entry, target -2.0% below entry.
+"""
+
         return (
-            time_block + acct_block + friction_block +
+            liq_block + time_block + acct_block + friction_block +
             drawdown_block + market_block + history +
             "\nAssess these conditions and return your vote."
         ).strip()
 
-    def assess(self, rows: list = None) -> dict:
+    def assess(self, rows: list = None, liq_signal: dict = None) -> dict:
         """
         Main entry point.
         Pulls account data, pre-computes analysis blocks,
@@ -520,7 +540,7 @@ CURRENT MARKET STATE — {now}
 
             # Build context and call GPT-4o with structured output
             context = self.build_context(
-                rows, acct, time_anal, acct_anal, friction, drawdown
+                rows, acct, time_anal, acct_anal, friction, drawdown, liq_signal
             )
 
             completion = self.client.beta.chat.completions.parse(

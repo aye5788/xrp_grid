@@ -25,6 +25,7 @@ from dotenv import load_dotenv
 from magi.melchior import Melchior, get_24h_rows as melchior_get_rows, compute_trends
 from magi.balthasar import Balthasar, get_24h_rows as balthasar_get_rows
 from magi.casper import Casper
+import config as cfg
 
 load_dotenv(os.path.expanduser("~/eth_observer/.env"))
 logger = logging.getLogger(__name__)
@@ -152,19 +153,49 @@ def ensure_tables(conn: sqlite3.Connection):
                 f"ALTER TABLE magi_decisions ADD COLUMN {col} {col_type}"
             )
             logger.info("Migrated magi_decisions: added column %s", col)
+
+    # Migrate strategy_type column
+    existing_cols_d = {row[1] for row in conn.execute(
+        "PRAGMA table_info(magi_decisions)"
+    ).fetchall()}
+    if "strategy_type" not in existing_cols_d:
+        conn.execute("ALTER TABLE magi_decisions ADD COLUMN strategy_type TEXT")
+        logger.info("Migrated magi_decisions: added column strategy_type")
+
     conn.commit()
 
 
 # ── Trigger logic ──────────────────────────────────────────────
 
+def get_latest_liq_signal(conn: sqlite3.Connection) -> dict | None:
+    """
+    Return the most recent confirmed+elevated liquidation signal
+    that has not yet triggered MAGI, or None.
+    Only returns signals created in the last 4 hours to avoid stale fires.
+    """
+    try:
+        row = conn.execute("""
+            SELECT * FROM liquidation_signals
+            WHERE signal_confirmed = 1
+              AND funding_elevated  = 1
+              AND magi_triggered    = 0
+              AND created_at >= datetime('now', '-4 hours')
+            ORDER BY timestamp DESC LIMIT 1
+        """).fetchone()
+        return dict(row) if row else None
+    except Exception as e:
+        logger.warning("get_latest_liq_signal failed: %s", e)
+        return None
+
+
 def check_triggers(conn: sqlite3.Connection) -> list:
     """
     Check whether conditions have changed enough to wake MAGI.
-    Reads directly from the hourly table (signals.py not built yet).
     Returns a list of trigger reason strings — empty means no trigger.
 
     Trigger conditions (any one sufficient):
-    - VWAP deviation crosses +/- 0.5% threshold
+    - Confirmed liquidation squeeze signal (primary — new strategy)
+    - VWAP deviation crosses +/- 0.5% threshold (legacy)
     - BTC moved more than 0.8% in the last hour
     - Funding rate changed direction vs 2 hours ago
     - Vol regime changed in last 2 hours
@@ -173,6 +204,17 @@ def check_triggers(conn: sqlite3.Connection) -> list:
     triggers = []
 
     try:
+        # Primary: liquidation squeeze signal
+        liq = get_latest_liq_signal(conn)
+        if liq:
+            triggers.append(
+                f"liquidation_squeeze_confirmed|"
+                f"ratio={liq.get('short_long_ratio', 0):.2f}x|"
+                f"short=${liq.get('short_liq_usd', 0):,.0f}|"
+                f"4h_ret={liq.get('price_4h_return', 0):.3f}%"
+            )
+            return triggers  # liquidation signal is sufficient alone
+
         rows = conn.execute("""
             SELECT timestamp, vwap_dev_pct, btc_ret_pct,
                    funding_rate, vol_regime
@@ -262,10 +304,10 @@ def was_run_recently(conn: sqlite3.Connection) -> bool:
 
 # ── Agent runner ───────────────────────────────────────────────
 
-def run_agents_parallel(rows: list) -> dict:
+def run_agents_parallel(rows: list, liq_signal: dict = None) -> dict:
     """
     Fire all three agents simultaneously using ThreadPoolExecutor.
-    Each agent gets the same data snapshot.
+    Each agent gets the same data snapshot plus optional liquidation signal.
     Returns dict with melchior, balthasar, casper results.
     Each result includes _input_tokens and _output_tokens for cost logging.
     These private keys are stripped before any external use.
@@ -273,13 +315,13 @@ def run_agents_parallel(rows: list) -> dict:
     results = {}
 
     def run_melchior():
-        result = Melchior().assess(rows=rows)
+        result = Melchior().assess(rows=rows, liq_signal=liq_signal)
         result.setdefault("_input_tokens", 0)
         result.setdefault("_output_tokens", 0)
         return "melchior", result
 
     def run_balthasar():
-        result = Balthasar().assess(rows=rows)
+        result = Balthasar().assess(rows=rows, liq_signal=liq_signal)
         result.setdefault("_input_tokens", 0)
         result.setdefault("_output_tokens", 0)
         return "balthasar", result
@@ -287,7 +329,7 @@ def run_agents_parallel(rows: list) -> dict:
     def run_casper():
         try:
             # Casper is free tier — log zero tokens, always $0
-            result = Casper().assess()
+            result = Casper().assess(liq_signal=liq_signal)
             result["_input_tokens"]  = 0
             result["_output_tokens"] = 0
             return "casper", result
@@ -565,7 +607,8 @@ def extract_assumption_fields(latest_row: dict, rows: list,
 def write_decision(conn: sqlite3.Connection, timestamp: str,
                    trigger_reasons: list, latest_row: dict,
                    votes: dict, consensus: dict,
-                   assumptions: dict) -> int:
+                   assumptions: dict,
+                   strategy_type: str = None) -> int:
     """
     Write the full MAGI decision to magi_decisions table.
     Returns the new row id for use in execution_queue and api_costs.
@@ -602,7 +645,8 @@ def write_decision(conn: sqlite3.Connection, timestamp: str,
             balthasar_risk_assessment, balthasar_account_health,
             casper_macro_regime, casper_btc_direction_assumed,
 
-            consensus_result, consensus_reason, contracts_decided
+            consensus_result, consensus_reason, contracts_decided,
+            strategy_type
         ) VALUES (
             ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?,
@@ -611,7 +655,8 @@ def write_decision(conn: sqlite3.Connection, timestamp: str,
             ?, ?, ?,
             ?, ?,
             ?, ?,
-            ?, ?, ?
+            ?, ?, ?,
+            ?
         )
     """, (
         timestamp,
@@ -644,6 +689,7 @@ def write_decision(conn: sqlite3.Connection, timestamp: str,
         consensus["consensus_result"],
         consensus["consensus_reason"],
         consensus["contracts_decided"],
+        strategy_type,
     ))
     conn.commit()
     return cursor.lastrowid
@@ -651,27 +697,35 @@ def write_decision(conn: sqlite3.Connection, timestamp: str,
 
 def write_execution_queue(conn: sqlite3.Connection, decision_id: int,
                           timestamp: str, consensus: dict,
-                          latest_row: dict):
+                          latest_row: dict, strategy_type: str = "mean_reversion"):
     """
     Write a trade instruction to execution_queue.
     Only called when consensus_result is long or short.
     """
-    direction = consensus["consensus_result"]
-    contracts = consensus["contracts_decided"]
-    eth_price = latest_row.get("eth_close") or 0
-    spread    = latest_row.get("avg_spread_pct") or 0
+    direction    = consensus["consensus_result"]
+    contracts    = consensus["contracts_decided"]
+    eth_price    = latest_row.get("eth_close") or 0
+    spread       = latest_row.get("avg_spread_pct") or 0
+    strategy     = strategy_type
 
-    if direction == "long":
+    if strategy == "liquidation_squeeze":
+        stop_loss = eth_price * (1 + cfg.LIQ_STOP_PCT)
+        target    = eth_price * (1 - cfg.LIQ_TARGET_PCT)
+    elif direction == "long":
         stop_loss = eth_price * (1 - STOP_LOSS_PCT)
         target    = eth_price * (1 + PROFIT_TARGET_PCT)
     else:
         stop_loss = eth_price * (1 + STOP_LOSS_PCT)
         target    = eth_price * (1 - PROFIT_TARGET_PCT)
 
-    now_et    = datetime.now(ET)
-    time_stop = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
-    if now_et >= time_stop:
-        time_stop = time_stop + timedelta(days=1)
+    now_et = datetime.now(ET)
+    if strategy == "liquidation_squeeze":
+        # Liquidation squeeze: hold up to LIQ_MAX_HOLD_HOURS (not tied to market close)
+        time_stop = now_et + timedelta(hours=cfg.LIQ_MAX_HOLD_HOURS)
+    else:
+        time_stop = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        if now_et >= time_stop:
+            time_stop = time_stop + timedelta(days=1)
 
     conn.execute("""
         INSERT INTO execution_queue (
@@ -800,6 +854,23 @@ def run(force: bool = False) -> dict:
 
         logger.info("MAGI triggered: %s", ", ".join(triggers))
 
+        # Detect strategy type from trigger
+        is_liq_trigger = any("liquidation_squeeze" in t for t in triggers)
+        strategy_type  = "liquidation_squeeze" if is_liq_trigger else "mean_reversion"
+
+        # Load the liquidation signal if this is a squeeze trigger
+        liq_signal = get_latest_liq_signal(conn) if is_liq_trigger else None
+        if liq_signal:
+            logger.info(
+                "Liquidation signal: short=$%.0f long=$%.0f ratio=%.2fx "
+                "4h_ret=%.3f%% funding_elevated=%s",
+                liq_signal.get("short_liq_usd", 0),
+                liq_signal.get("long_liq_usd", 0),
+                liq_signal.get("short_long_ratio", 0) or 0,
+                liq_signal.get("price_4h_return", 0) or 0,
+                bool(liq_signal.get("funding_elevated")),
+            )
+
         rows = melchior_get_rows()
         if not rows:
             logger.error("No hourly data available — aborting")
@@ -808,8 +879,9 @@ def run(force: bool = False) -> dict:
         latest    = rows[0]
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-        logger.info("Firing Melchior, Balthasar, Casper in parallel...")
-        votes = run_agents_parallel(rows)
+        logger.info("Firing Melchior, Balthasar, Casper in parallel [strategy=%s]...",
+                    strategy_type)
+        votes = run_agents_parallel(rows, liq_signal=liq_signal)
 
         for agent, vote in votes.items():
             logger.info(
@@ -834,8 +906,14 @@ def run(force: bool = False) -> dict:
         assumptions = extract_assumption_fields(dict(latest), rows, votes, triggers)
 
         decision_id = write_decision(
-            conn, timestamp, triggers, dict(latest), votes, consensus, assumptions
+            conn, timestamp, triggers, dict(latest), votes, consensus,
+            assumptions, strategy_type=strategy_type
         )
+
+        # Mark the liquidation signal as triggered so it won't re-fire
+        if liq_signal and liq_signal.get("timestamp"):
+            from database import mark_liq_signal_magi_triggered
+            mark_liq_signal_magi_triggered(liq_signal["timestamp"])
 
         # Log API costs — always after decision is written, never blocks it
         log_api_costs(conn, timestamp, decision_id, votes)
@@ -869,7 +947,8 @@ def run(force: bool = False) -> dict:
 
         if consensus["consensus_result"] in ("long", "short"):
             write_execution_queue(
-                conn, decision_id, timestamp, consensus, dict(latest)
+                conn, decision_id, timestamp, consensus, dict(latest),
+                strategy_type=strategy_type
             )
         else:
             logger.info("No trade — execution queue not written")

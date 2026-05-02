@@ -148,11 +148,12 @@ class Melchior:
         self._last_input_tokens = 0
         self._last_output_tokens = 0
 
-    def build_context(self, rows: list, trends: dict) -> str:
+    def build_context(self, rows: list, trends: dict,
+                      liq_signal: dict = None) -> str:
         """
-        Format 24h of rows plus pre-computed trends into a
-        readable context string for Melchior.
-        Most recent row first. Null values shown explicitly.
+        Format liquidation signal + market context for Melchior.
+        When liq_signal is provided, it leads the context.
+        Falls back to VWAP-based context when liq_signal is None.
         """
         def fmt(val, decimals=4):
             if val is None:
@@ -165,42 +166,73 @@ class Melchior:
         now    = datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
         latest = rows[0] if rows else {}
 
+        if liq_signal:
+            short_usd  = liq_signal.get('short_liq_usd', 0) or 0
+            long_usd   = liq_signal.get('long_liq_usd', 0) or 0
+            ratio      = liq_signal.get('short_long_ratio')
+            ret_4h     = liq_signal.get('price_4h_return')
+            fr         = liq_signal.get('funding_rate')
+            fr_elev    = liq_signal.get('funding_elevated', 0)
+            confirmed  = liq_signal.get('signal_confirmed', 0)
+
+            # Build 4h BTC return from trend data
+            btc_4h = trends.get('btc_6h_total_pct')
+
+            liq_block = f"""
+LIQUIDATION SIGNAL — {now}
+Signal confirmed by Python gate: {'YES' if confirmed else 'NO (one or more conditions failed)'}
+
+Liquidation imbalance (current 4h candle):
+- Short liquidations:  ${short_usd:,.0f}
+- Long liquidations:   ${long_usd:,.0f}
+- Short/Long ratio:    {fmt(ratio, 2)}x
+- p90 threshold:       $6,330,461
+- Short >= p90:        {'YES' if short_usd >= 6_330_461 else 'NO'}
+- Short > 2x long:     {'YES' if ratio and ratio > 2.0 else 'NO'}
+
+Price follow-through:
+- 4h price return:     {fmt(ret_4h, 3)}%
+- Failed (<+0.5%):     {'YES' if ret_4h is not None and ret_4h < 0.5 else 'NO'}
+
+OI-weighted funding rate:
+- Current rate:        {fmt(fr, 6)}%
+- Elevated (>0.00202%): {'YES — crowded longs, amplified bearish signal' if fr_elev else 'NO — signal weaker'}
+
+BTC context (last 6h cumulative):
+- BTC 6h return:       {fmt(btc_4h, 3)}%
+- BTC direction:       {trends.get('btc_6h_direction', 'unknown')}
+"""
+
+            market_block = f"""
+CURRENT MARKET STATE:
+- ETH price:     ${fmt(latest.get('eth_close'), 2)}
+- Vol regime:    {latest.get('vol_regime') or 'NULL'}
+- Hour (UTC):    {latest.get('hour_of_day') or 'NULL'}
+- Funding (obs): {fmt(latest.get('funding_rate'), 8)}
+"""
+            return (liq_block + market_block +
+                    "\nAssess this liquidation signal and return your vote.").strip()
+
+        # Fallback: VWAP-based context (for backward compatibility with tests)
         current = f"""
 CURRENT STATE — {now}
 - ETH price:         ${fmt(latest.get('eth_close'), 2)}
 - ETH ret (1h):      {fmt(latest.get('eth_ret_pct'))}%
 - BTC ret (1h):      {fmt(latest.get('btc_ret_pct'))}%
-- ETH/BTC ratio ret: {fmt(latest.get('eth_btc_ratio_ret'))}%
-- VWAP (24h):        ${fmt(latest.get('vwap_24h'), 2)}
 - VWAP dev:          {fmt(latest.get('vwap_dev_pct'))}%
 - Vol regime:        {latest.get('vol_regime') or 'NULL'}
-- Vol std (24h):     {fmt(latest.get('vol_24h_std'))}%
-- Avg spread:        {fmt(latest.get('avg_spread_pct'))}%
 - Funding rate:      {fmt(latest.get('funding_rate'), 8)}
 - Hour (UTC):        {latest.get('hour_of_day') or 'NULL'}
-- Day of week:       {latest.get('day_of_week') or 'NULL'} (0=Mon, 6=Sun)
 """
-
         trend_section = f"""
-24H TREND SUMMARY (pre-computed):
-- VWAP deviation trend:     {trends.get('vwap_dev_trend', 'unknown')}
-  (improving = price moving back toward VWAP)
-- BTC direction (last 6h):  {trends.get('btc_6h_direction', 'unknown')}
-  (6h cumulative: {trends.get('btc_6h_total_pct', 'NULL')}%)
-- ETH return (12h):         {trends.get('eth_12h_ret', 'NULL')}%
-- ETH return (24h):         {trends.get('eth_24h_ret', 'NULL')}%
-- Vol regime:               {trends.get('vol_regime_summary', 'unknown')}
-- Funding direction:        {trends.get('funding_direction', 'unknown')}
-- 24h price range:          ${fmt(trends.get('price_24h_low'), 2)} — ${fmt(trends.get('price_24h_high'), 2)}
-- Position in 24h range:    {trends.get('price_range_position_pct', 'NULL')}%
-  (0% = at 24h low, 100% = at 24h high)
-- Signal flags (last 6h):   {trends.get('long_signals_last_6h', 0)} long, {trends.get('short_signals_last_6h', 0)} short
+24H TREND SUMMARY:
+- BTC direction (last 6h): {trends.get('btc_6h_direction', 'unknown')} ({trends.get('btc_6h_total_pct', 'NULL')}%)
+- ETH return (24h):        {trends.get('eth_24h_ret', 'NULL')}%
+- Vol regime:              {trends.get('vol_regime_summary', 'unknown')}
 """
-
         header = (f"\n{'Timestamp':<20} {'ETH':>8} {'ETH%':>7} "
                   f"{'BTC%':>7} {'VWAP dev%':>10} {'Vol':>8} "
                   f"{'Funding':>12}\n" + "─" * 76 + "\n")
-
         row_lines = ""
         for r in rows:
             row_lines += (
@@ -212,18 +244,18 @@ CURRENT STATE — {now}
                 f"{str(r.get('vol_regime') or 'N/A'):>8} "
                 f"{fmt(r.get('funding_rate'), 8):>12}\n"
             )
-
         history = f"\nLAST 24 HOURLY ROWS (most recent first):{header}{row_lines}"
-
         return (current + trend_section + history +
                 "\nAssess these signals and return your vote.").strip()
 
-    def assess(self, rows: list = None, signals: dict = None) -> dict:
+    def assess(self, rows: list = None, signals: dict = None,
+               liq_signal: dict = None) -> dict:
         """
         Main entry point.
 
         Accepts either:
-        - rows: list of hourly dicts from the database (preferred)
+        - rows + liq_signal: liquidation squeeze mode (primary path)
+        - rows: hourly rows only (backward compat, VWAP fallback)
         - signals: single dict (used by synthetic test harness)
 
         Always returns a valid vote dict even if the API call fails.
@@ -231,7 +263,7 @@ CURRENT STATE — {now}
         try:
             if rows is not None:
                 trends  = compute_trends(rows)
-                context = self.build_context(rows, trends)
+                context = self.build_context(rows, trends, liq_signal)
             elif signals is not None:
                 trends  = {}
                 context = self._build_single_row_context(signals)

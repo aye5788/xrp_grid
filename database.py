@@ -159,9 +159,99 @@ def initialize_database():
             cursor.execute(f"ALTER TABLE market_context ADD COLUMN {col} {col_type}")
             logger.info("Added column market_context.%s", col)
 
+    # Migrate: add strategy_type to magi_decisions if not present.
+    existing_md = {row[1] for row in cursor.execute(
+        "PRAGMA table_info(magi_decisions)"
+    ).fetchall()}
+    if "strategy_type" not in existing_md:
+        try:
+            cursor.execute("ALTER TABLE magi_decisions ADD COLUMN strategy_type TEXT")
+            logger.info("Added column magi_decisions.strategy_type")
+        except Exception:
+            pass  # table may not exist yet on first run — orchestrator creates it
+
+    # --- LIQUIDATION SIGNALS TABLE ---
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS liquidation_signals (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp         TEXT NOT NULL UNIQUE,
+            short_liq_usd     REAL,
+            long_liq_usd      REAL,
+            short_long_ratio  REAL,
+            price_4h_return   REAL,
+            funding_rate      REAL,
+            funding_elevated  INTEGER DEFAULT 0,
+            signal_confirmed  INTEGER DEFAULT 0,
+            magi_triggered    INTEGER DEFAULT 0,
+            created_at        TEXT
+        )
+    """)
+
     conn.commit()
     conn.close()
     logger.info("Database initialized successfully at %s", DB_PATH)
+
+
+def write_liquidation_signal(signal: dict) -> int:
+    """Write or update one liquidation signal row. Returns the row id."""
+    from datetime import datetime, timezone
+    conn = get_connection()
+    try:
+        cursor = conn.execute("""
+            INSERT OR REPLACE INTO liquidation_signals (
+                timestamp, short_liq_usd, long_liq_usd, short_long_ratio,
+                price_4h_return, funding_rate, funding_elevated,
+                signal_confirmed, magi_triggered, created_at
+            ) VALUES (
+                :timestamp, :short_liq_usd, :long_liq_usd, :short_long_ratio,
+                :price_4h_return, :funding_rate, :funding_elevated,
+                :signal_confirmed, :magi_triggered, :created_at
+            )
+        """, {
+            **signal,
+            "created_at": signal.get(
+                "created_at",
+                datetime.now(timezone.utc).isoformat()
+            ),
+        })
+        conn.commit()
+        return cursor.lastrowid
+    except Exception as e:
+        logger.error("Error writing liquidation signal: %s", e)
+        return -1
+    finally:
+        conn.close()
+
+
+def get_latest_liquidation_signal() -> dict | None:
+    """Return the most recent liquidation_signals row, or None."""
+    conn = get_connection()
+    try:
+        row = conn.execute("""
+            SELECT * FROM liquidation_signals
+            ORDER BY timestamp DESC LIMIT 1
+        """).fetchone()
+        return dict(row) if row else None
+    except Exception as e:
+        logger.error("Error fetching latest liquidation signal: %s", e)
+        return None
+    finally:
+        conn.close()
+
+
+def mark_liq_signal_magi_triggered(timestamp: str):
+    """Set magi_triggered=1 for the given signal timestamp."""
+    conn = get_connection()
+    try:
+        conn.execute(
+            "UPDATE liquidation_signals SET magi_triggered=1 WHERE timestamp=?",
+            (timestamp,)
+        )
+        conn.commit()
+    except Exception as e:
+        logger.error("Error marking liq signal triggered: %s", e)
+    finally:
+        conn.close()
 
 
 def write_tick(tick_data: dict):
