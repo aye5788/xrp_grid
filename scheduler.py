@@ -11,14 +11,20 @@ from magi.orchestrator import run_cycle
 from grid.engine import GridEngine
 from guardrails import check_all_guardrails
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s %(levelname)s %(name)s — %(message)s',
-    handlers=[
-        logging.FileHandler('/root/xrp_grid/magi.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
+# observer.py installs a StreamHandler on the root logger at import time, making
+# basicConfig() a no-op. Override explicitly so magi.log actually gets written.
+_fmt = logging.Formatter('%(asctime)s %(levelname)s %(name)s — %(message)s')
+_root = logging.getLogger()
+_root.setLevel(logging.INFO)
+for _h in _root.handlers[:]:
+    _root.removeHandler(_h)
+_fh = logging.FileHandler('/root/xrp_grid/magi.log')
+_fh.setFormatter(_fmt)
+_sh = logging.StreamHandler(sys.stdout)
+_sh.setFormatter(_fmt)
+_root.addHandler(_fh)
+_root.addHandler(_sh)
+
 log = logging.getLogger('scheduler')
 
 # Schedule config (EST)
