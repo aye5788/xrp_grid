@@ -11,7 +11,6 @@ MODEL_PRICING = {
 # Fixed monthly subscriptions — edit as needed
 FIXED_SUBSCRIPTIONS = {
     'DigitalOcean droplet': 6.00,
-    'Claude Max plan': 100.00,
     'Domain': 0.00,
 }
 

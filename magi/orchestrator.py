@@ -19,10 +19,10 @@ def build_empty_inventory():
 
 
 def build_empty_grid():
-    from config import GRID_SPACING_PCT, GRID_LEVELS
+    from config import GRID_SPACING_PCT, GRID_LEVELS_DEFAULT
     return {
         'centre_price': None, 'spacing_pct': GRID_SPACING_PCT,
-        'levels': GRID_LEVELS, 'pause_longs': 0,
+        'levels': GRID_LEVELS_DEFAULT, 'pause_longs': 0,
         'pause_shorts': 0, 'halt': 0
     }
 

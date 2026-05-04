@@ -10,7 +10,7 @@ from typing import Optional
 import requests
 from config import (
     COINBASE_API_KEY, COINBASE_API_SECRET,
-    SYMBOL, GRID_LEVELS, GRID_SPACING_PCT,
+    SYMBOL, GRID_LEVELS_DEFAULT, GRID_SPACING_PCT,
     TAKER_FEE, MAKER_FEE, MAX_INVENTORY_USD,
     DB_PATH
 )
@@ -33,10 +33,117 @@ class GridEngine:
         self.paper = paper
         self.paper_orders = {}  # Simulated order book {order_id: order_dict}
         self.paper_inventory = {'xrp': 0.0, 'usd': 100.0}  # Start with $100 USD paper
+        self.level_count = GRID_LEVELS_DEFAULT
+        self.shadow_sim = None
+        self._shadow_tick_count = 0
         if not self.paper:
             log.warning("LIVE MODE ACTIVE — real orders will be placed")
         else:
             log.info("Paper mode active — no real orders will be placed")
+
+    # --- State loading ---
+
+    def load_state(self):
+        """Load shadow simulator and level_count from DB. Call after init_db()."""
+        from config import GRID_LEVEL_VARIANTS
+        from grid.shadow_simulator import ShadowSimulator
+        self.shadow_sim = ShadowSimulator(GRID_LEVEL_VARIANTS)
+        self.shadow_sim.load_from_db()
+        grid_state = get_current_grid_state()
+        if grid_state and grid_state.get('levels'):
+            self.level_count = grid_state['levels']
+        # Ensure all variant rows exist in DB (fill_count=0 for brand-new variants)
+        self.shadow_sim.persist_all()
+        log.info(f"Engine state loaded — level_count={self.level_count}")
+
+    # --- Shadow simulation ---
+
+    def process_shadow_tick(self, price: float):
+        """Pass a price tick to shadow simulator; persist every 10 ticks."""
+        if not self.shadow_sim or price <= 0:
+            return
+        self.shadow_sim.process_tick(price)
+        self._shadow_tick_count += 1
+        if self._shadow_tick_count % 10 == 0:
+            try:
+                self.shadow_sim.persist_all()
+            except Exception as e:
+                log.warning(f"Shadow persist failed: {e}")
+
+    def evaluate_and_maybe_switch_levels(self) -> Optional[int]:
+        """Evaluate shadow variants; switch level_count and rebuild if warranted."""
+        if not self.shadow_sim:
+            return None
+        from config import (GRID_SWITCH_THRESHOLD_PCT, GRID_SWITCH_MIN_FILLS,
+                            GRID_SWITCH_MIN_HOURS)
+        eval_data = self.shadow_sim.get_evaluation()
+        variants = eval_data['variants']
+        if not variants:
+            return None
+
+        current_stats = variants.get(self.level_count, {})
+        current_pnl = current_stats.get('rolling_pnl_pct', 0.0)
+        current_fills = current_stats.get('fills', 0)
+
+        # Gate 1: fills count on current variant
+        if current_fills < GRID_SWITCH_MIN_FILLS:
+            log.info(f"Shadow eval: insufficient fills "
+                     f"(current lc={self.level_count} fills={current_fills} "
+                     f"< min={GRID_SWITCH_MIN_FILLS}) — no switch")
+            return None
+
+        best_lc = max(variants.keys(), key=lambda k: variants[k]['rolling_pnl_pct'])
+        best_pnl = variants[best_lc]['rolling_pnl_pct']
+        best_fills = variants[best_lc]['fills']
+
+        if best_lc == self.level_count:
+            log.info(f"Shadow eval: current lc={self.level_count} is best "
+                     f"(pnl={current_pnl:.4f}%)")
+            return None
+
+        # Gate 2: fills count on best candidate
+        if best_fills < GRID_SWITCH_MIN_FILLS:
+            log.info(f"Shadow eval: insufficient fills on best candidate "
+                     f"(lc={best_lc} fills={best_fills} < min={GRID_SWITCH_MIN_FILLS}) "
+                     f"— no switch")
+            return None
+
+        # Gate 3: time window — both variants need GRID_SWITCH_MIN_HOURS of history
+        current_sg = self.shadow_sim.variants.get(self.level_count)
+        best_sg = self.shadow_sim.variants.get(best_lc)
+        current_age = current_sg.get_oldest_fill_age_hours() if current_sg else 0.0
+        best_age = best_sg.get_oldest_fill_age_hours() if best_sg else 0.0
+
+        if current_age < GRID_SWITCH_MIN_HOURS or best_age < GRID_SWITCH_MIN_HOURS:
+            log.info(f"Shadow eval: insufficient time window "
+                     f"(current={current_age:.1f}h, best={best_age:.1f}h, "
+                     f"min={GRID_SWITCH_MIN_HOURS}h) — no switch")
+            return None
+
+        # Gate 4: P&L margin
+        margin = best_pnl - current_pnl
+        if margin < GRID_SWITCH_THRESHOLD_PCT:
+            log.info(f"Shadow eval: margin={margin:.4f}% < "
+                     f"threshold={GRID_SWITCH_THRESHOLD_PCT}% "
+                     f"({self.level_count}→{best_lc}) — no switch")
+            return None
+
+        old_lc = self.level_count
+        log.warning(f"Shadow eval: switching {old_lc}→{best_lc} levels "
+                    f"margin={margin:.4f}% pnl_best={best_pnl:.4f}% "
+                    f"pnl_curr={current_pnl:.4f}%")
+        self.level_count = best_lc
+        grid_state = get_current_grid_state()
+        centre = grid_state['centre_price'] if grid_state else None
+        spacing = grid_state['spacing_pct'] if grid_state else GRID_SPACING_PCT
+
+        # FIX 2: audit trail row before rebuild
+        if centre:
+            insert_grid_state(centre, spacing, best_lc,
+                              notes=f"level_switch {old_lc}→{best_lc} margin={margin:.4f}%")
+
+        self.initialise_grid(centre=centre, spacing_pct=spacing)
+        return best_lc
 
     # --- Coinbase JWT Auth ---
 
@@ -116,8 +223,7 @@ class GridEngine:
 
     def compute_order_size(self, price: float) -> float:
         """Compute XRP order size per level based on max inventory."""
-        from config import GRID_LEVELS
-        size_usd = MAX_INVENTORY_USD / (GRID_LEVELS // 2)
+        size_usd = MAX_INVENTORY_USD / (self.level_count // 2)
         size_xrp = size_usd / price
         return round(size_xrp, 2)
 
@@ -263,7 +369,6 @@ class GridEngine:
                          spacing_pct: Optional[float] = None):
         """Set up the full grid from scratch."""
         if centre is None:
-            # Use current price as centre
             centre = self.get_current_price()
             if not centre:
                 log.error("Cannot initialise grid — no price available")
@@ -272,10 +377,10 @@ class GridEngine:
         if spacing_pct is None:
             spacing_pct = GRID_SPACING_PCT
 
-        log.info(f"Initialising grid — centre={centre} spacing={spacing_pct*100:.2f}%")
+        log.info(f"Initialising grid — centre={centre} spacing={spacing_pct*100:.2f}% levels={self.level_count}")
         self.cancel_all_orders()
 
-        levels = self.build_grid_levels(centre, spacing_pct, GRID_LEVELS)
+        levels = self.build_grid_levels(centre, spacing_pct, self.level_count)
         size = self.compute_order_size(centre)
 
         placed = 0
@@ -285,9 +390,13 @@ class GridEngine:
                 placed += 1
             time.sleep(0.1)  # Rate limit buffer
 
-        insert_grid_state(centre, spacing_pct, GRID_LEVELS,
+        insert_grid_state(centre, spacing_pct, self.level_count,
                           notes=f"Grid initialised — {placed} orders placed")
         log.info(f"Grid initialised — {placed}/{len(levels)} orders placed")
+
+        if self.shadow_sim:
+            self.shadow_sim.rebuild(centre, spacing_pct)
+
         return True
 
     def apply_magi_decision(self, consensus: dict):
@@ -332,7 +441,6 @@ class GridEngine:
         # Apply risk constraints
         if risk_action == 'PAUSE_LONGS':
             log.info("MAGI PAUSE_LONGS — cancelling buy orders")
-            # Cancel buys only — in paper mode filter, in live would need selective cancel
         elif risk_action == 'PAUSE_SHORTS':
             log.info("MAGI PAUSE_SHORTS — cancelling sell orders")
 
@@ -342,7 +450,6 @@ class GridEngine:
             xrp = self.paper_inventory['xrp']
             usd = self.paper_inventory['usd']
         else:
-            # Live: fetch from Coinbase account
             xrp, usd = self._get_live_balances()
 
         net_usd = xrp * price
@@ -379,10 +486,9 @@ if __name__ == "__main__":
     print(f"Current price: {engine.get_current_price()}")
     engine.initialise_grid()
 
-    # Simulate a price movement and check fills
     price = engine.get_current_price()
     if price:
-        test_price = price * 0.995  # Drop 0.5%
+        test_price = price * 0.995
         fills = engine.simulate_fills(test_price)
         print(f"Simulated fills at {test_price:.4f}: {len(fills)}")
         engine.update_inventory(price)

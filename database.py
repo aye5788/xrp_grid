@@ -124,6 +124,15 @@ def init_db():
         source TEXT
     )''')
 
+    c.execute('''CREATE TABLE IF NOT EXISTS shadow_grid_state (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        level_count INTEGER NOT NULL UNIQUE,
+        state_blob TEXT,
+        fill_count INTEGER DEFAULT 0,
+        rolling_pnl_pct REAL DEFAULT 0,
+        updated_at TEXT
+    )''')
+
     conn.commit()
     conn.close()
     print("Database initialised.")
@@ -235,6 +244,40 @@ def get_latest_inventory():
         ORDER BY timestamp DESC LIMIT 1''').fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def upsert_shadow_grid_state(level_count, state_dict, fill_count=0, rolling_pnl_pct=0.0):
+    conn = get_conn()
+    conn.execute('''INSERT INTO shadow_grid_state
+        (level_count, state_blob, fill_count, rolling_pnl_pct, updated_at)
+        VALUES (?,?,?,?,?)
+        ON CONFLICT(level_count) DO UPDATE SET
+            state_blob=excluded.state_blob,
+            fill_count=excluded.fill_count,
+            rolling_pnl_pct=excluded.rolling_pnl_pct,
+            updated_at=excluded.updated_at''',
+        (level_count, json.dumps(state_dict), fill_count, rolling_pnl_pct,
+         datetime.utcnow().isoformat()))
+    conn.commit()
+    conn.close()
+
+
+def get_shadow_grid_state(level_count):
+    conn = get_conn()
+    row = conn.execute('SELECT state_blob FROM shadow_grid_state WHERE level_count=?',
+        (level_count,)).fetchone()
+    conn.close()
+    if row and row['state_blob']:
+        return json.loads(row['state_blob'])
+    return None
+
+
+def get_all_shadow_states():
+    conn = get_conn()
+    rows = conn.execute('''SELECT level_count, fill_count, rolling_pnl_pct, updated_at
+        FROM shadow_grid_state ORDER BY level_count''').fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def insert_token_usage(agent, model, prompt_tokens, completion_tokens, total_tokens, cost_usd, source='direct'):

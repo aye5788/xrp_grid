@@ -48,12 +48,19 @@ signal.signal(signal.SIGINT, signal_handler)
 
 
 def run_observer_cycle():
-    """Run data collection cycle."""
+    """Run data collection cycle and shadow tick."""
     log.info("--- OBSERVER CYCLE ---")
     try:
         poll_cycle()
     except Exception as e:
         log.error(f"Observer cycle error: {e}")
+
+    try:
+        price = engine.get_current_price()
+        if price:
+            engine.process_shadow_tick(price)
+    except Exception as e:
+        log.error(f"Shadow tick error: {e}")
 
 
 def run_magi_cycle(trigger='scheduled'):
@@ -72,6 +79,13 @@ def run_magi_cycle(trigger='scheduled'):
         result = run_cycle(trigger=trigger)
         if result:
             consensus = result['consensus']
+
+            if consensus.get('grid_action') != 'HALT':
+                try:
+                    engine.evaluate_and_maybe_switch_levels()
+                except Exception as e:
+                    log.error(f"Shadow eval error: {e}")
+
             engine.apply_magi_decision(consensus)
             price = engine.get_current_price()
             if price:
@@ -100,6 +114,9 @@ def main():
 
     # Initialise database
     init_db()
+
+    # Load engine state (shadow sim) after DB is ready
+    engine.load_state()
 
     # Run initial observer poll
     run_observer_cycle()

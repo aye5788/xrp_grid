@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from database import (
     get_latest_indicators, get_current_grid_state,
     get_latest_inventory, get_recent_magi_decisions,
-    get_cost_summary, get_cost_today
+    get_cost_summary, get_cost_today, get_all_shadow_states
 )
 from grid.engine import GridEngine
 from magi.costs import get_fixed_monthly_total, FIXED_SUBSCRIPTIONS
@@ -102,6 +102,34 @@ HTML_TEMPLATE = """
             </div>
         </div>
     </div>
+
+    <h2>Shadow Grid Variants</h2>
+    {% if shadow_variants %}
+    <table>
+        <tr>
+            <th>Variant</th>
+            <th>Fills (24h)</th>
+            <th>Rolling P&amp;L%</th>
+            <th>Status</th>
+        </tr>
+        {% for sv in shadow_variants %}
+        <tr>
+            <td style="{{ 'color:#00ff88; font-weight:bold;' if sv.level_count == active_levels else '' }}">
+                {{ sv.level_count }}-level{{ ' ★' if sv.level_count == active_levels else '' }}
+            </td>
+            <td>{{ sv.fill_count }}</td>
+            <td style="{{ 'color:#00ff88;' if (sv.rolling_pnl_pct or 0) >= 0 else 'color:#ff4444;' }}">
+                {{ '%.4f'|format(sv.rolling_pnl_pct or 0) }}%
+            </td>
+            <td style="{{ 'color:#00ff88;' if sv.level_count == active_levels else 'color:#666;' }}">
+                {{ 'ACTIVE' if sv.level_count == active_levels else 'shadow' }}
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    <div style="color:#666; font-size:0.8em;">Shadow simulation not yet initialised — starts after first observer cycle.</div>
+    {% endif %}
 
     <h2>Inventory</h2>
     <div class="grid">
@@ -306,6 +334,7 @@ def index():
 
     guardrails_ok, guardrail_failures = check_all_guardrails()
     ks_active = kill_switch_active()
+    shadow_variants = get_all_shadow_states()
 
     return render_template_string(HTML_TEMPLATE,
         now=now,
@@ -333,7 +362,9 @@ def index():
         guardrails_ok=guardrails_ok,
         guardrail_failures=guardrail_failures,
         kill_switch=ks_active,
-        paper_mode=engine.paper
+        paper_mode=engine.paper,
+        shadow_variants=shadow_variants,
+        active_levels=engine.level_count
     )
 
 @app.route('/api/status')
@@ -368,6 +399,14 @@ def trigger_learning():
         return jsonify(result or {'skipped': True, 'reason': 'unknown'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/shadow_variants')
+def api_shadow_variants():
+    shadow_variants = get_all_shadow_states()
+    return jsonify({
+        'variants': shadow_variants,
+        'active_levels': engine.level_count
+    })
 
 @app.route('/api/toggle_kill', methods=['POST'])
 def toggle_kill():

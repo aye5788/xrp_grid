@@ -12,7 +12,11 @@ COINBASE_API_SECRET = os.getenv("COINBASE_API_SECRET")
 
 # --- Trading Parameters ---
 SYMBOL = "XRP-USD"
-GRID_LEVELS = 10
+GRID_LEVELS_DEFAULT = 10
+GRID_LEVEL_VARIANTS = [6, 8, 10, 12, 14, 16]
+GRID_SWITCH_THRESHOLD_PCT = 0.10   # min P&L% margin to trigger a level switch
+GRID_SWITCH_MIN_FILLS = 20         # both live and candidate need at least this many fills
+GRID_SWITCH_MIN_HOURS = 24         # rolling window for P&L comparison
 GRID_SPACING_PCT = 0.005
 GRID_CENTRE_DEFAULT = None
 MAX_INVENTORY_USD = 50.0
