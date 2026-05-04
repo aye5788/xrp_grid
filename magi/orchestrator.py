@@ -1,51 +1,17 @@
 import json
 import logging
 import argparse
-import os
-import re
-from datetime import datetime
 from dotenv import load_dotenv
 from database import (
     get_latest_indicators, get_current_grid_state, get_latest_inventory,
     insert_magi_decision, insert_grid_state
 )
-from magi.melchior import build_context as melchior_context, get_decision as melchior_stateless
-from magi.balthasar import build_context as balthasar_context, get_decision as balthasar_stateless
-from magi.casper import build_context as casper_context, get_decision as casper_stateless
-from magi.letta_agents import send_message, ENV_KEYS
+from magi.melchior import get_decision as melchior_stateless
+from magi.balthasar import get_decision as balthasar_stateless
+from magi.casper import get_decision as casper_stateless
 
 load_dotenv()
 log = logging.getLogger('magi.orchestrator')
-
-
-def extract_json(text: str) -> dict:
-    """Extract JSON from response text, handling markdown fences."""
-    if not text:
-        return {}
-    text = text.strip()
-    if text.startswith("```"):
-        text = re.sub(r'^```(?:json)?\s*', '', text)
-        text = re.sub(r'\s*```$', '', text)
-    return json.loads(text)
-
-
-def call_letta_agent(name: str, context: str, fallback_fn, *fallback_args) -> dict:
-    """Call a Letta agent. Fall back to stateless API call on any error."""
-    from magi.letta_agents import MODELS
-    agent_id = os.getenv(ENV_KEYS[name])
-    if not agent_id:
-        log.warning(f"{name} has no Letta agent ID — using stateless fallback")
-        return fallback_fn(*fallback_args)
-    try:
-        raw = send_message(agent_id, context, agent_name=name, model=MODELS[name])
-        result = extract_json(raw)
-        if not result:
-            raise ValueError("Empty or unparseable Letta response")
-        log.info(f"{name} (Letta): {result.get('action') or result.get('regime')}")
-        return result
-    except Exception as e:
-        log.error(f"{name} Letta call failed: {e} — falling back to stateless")
-        return fallback_fn(*fallback_args)
 
 
 def build_empty_inventory():
@@ -102,22 +68,10 @@ def run_cycle(trigger='scheduled', force=False):
         log.warning("No indicator data available — skipping cycle")
         return None
 
-    log.info("Calling Letta agents...")
-    melchior = call_letta_agent(
-        'melchior',
-        melchior_context(indicators, grid_state),
-        melchior_stateless, indicators, grid_state
-    )
-    balthasar = call_letta_agent(
-        'balthasar',
-        balthasar_context(indicators, inventory, grid_state),
-        balthasar_stateless, indicators, inventory, grid_state
-    )
-    casper = call_letta_agent(
-        'casper',
-        casper_context(indicators),
-        casper_stateless, indicators
-    )
+    log.info("Calling MAGI agents (stateless)...")
+    melchior = melchior_stateless(indicators, grid_state)
+    balthasar = balthasar_stateless(indicators, inventory, grid_state)
+    casper = casper_stateless(indicators)
 
     log.info(f"Melchior: {melchior.get('action')} / {melchior.get('conviction')}")
     log.info(f"Balthasar: {balthasar.get('action')} / {balthasar.get('conviction')}")

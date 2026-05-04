@@ -2,15 +2,11 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-from dotenv import load_dotenv
-from letta_client import Letta
 from database import get_latest_inventory, get_conn
-from magi.letta_agents import ENV_KEYS
 
-load_dotenv()
 log = logging.getLogger('magi.learning')
-client = Letta(api_key=os.getenv('LETTA_API_KEY'))
 EST = ZoneInfo('America/New_York')
+LEARNING_LOG_PATH = '/root/xrp_grid/learning_log.md'
 
 
 def has_open_position() -> bool:
@@ -44,65 +40,108 @@ def get_today_decisions(hours_back: int = 24) -> list:
     return [dict(r) for r in rows]
 
 
-def get_today_pnl_summary() -> dict:
+def get_today_orders(hours_back: int = 24) -> dict:
     conn = get_conn()
-    cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat()
-    fills = conn.execute('''SELECT * FROM grid_orders
-        WHERE filled_at > ? AND status='filled' ''', (cutoff,)).fetchall()
+    cutoff = (datetime.utcnow() - timedelta(hours=hours_back)).isoformat()
+    rows = conn.execute('''SELECT status, COUNT(*) as cnt FROM grid_orders
+        WHERE timestamp > ? GROUP BY status''', (cutoff,)).fetchall()
     conn.close()
-    fills = [dict(f) for f in fills]
-    total_fees = sum((f['fee'] or 0) for f in fills)
-    return {
-        'total_fills': len(fills),
-        'buy_fills': sum(1 for f in fills if f['side'] == 'buy'),
-        'sell_fills': sum(1 for f in fills if f['side'] == 'sell'),
-        'total_fees': round(total_fees, 4)
-    }
+    return {r['status']: r['cnt'] for r in rows}
 
 
-def build_summary(decisions, pnl, inventory):
+def compute_net_pnl(hours_back: int = 24) -> float:
+    """Return net P&L: check pnl_daily first, fall back to computing from fills."""
+    conn = get_conn()
     today = datetime.now(EST).strftime('%Y-%m-%d')
-    melchior_actions, balthasar_actions, casper_regimes = {}, {}, {}
+    row = conn.execute(
+        'SELECT net_pnl FROM pnl_daily WHERE date = ?', (today,)
+    ).fetchone()
+    if row and row['net_pnl'] is not None:
+        conn.close()
+        return float(row['net_pnl'])
+    cutoff = (datetime.utcnow() - timedelta(hours=hours_back)).isoformat()
+    fills = conn.execute(
+        "SELECT side, price, fill_price, size, fee FROM grid_orders "
+        "WHERE filled_at > ? AND status='filled'", (cutoff,)
+    ).fetchall()
+    conn.close()
+    pnl = 0.0
+    for f in fills:
+        if f['side'] == 'buy':
+            pnl -= (f['fill_price'] or f['price']) * f['size']
+        else:
+            pnl += (f['fill_price'] or f['price']) * f['size']
+        pnl -= (f['fee'] or 0)
+    return round(pnl, 4)
+
+
+def get_guardrail_trips_today() -> list:
+    """Scan magi.log for today's guardrail-blocked lines."""
+    trips = []
+    log_path = '/root/xrp_grid/magi.log'
+    today = datetime.now(EST).strftime('%Y-%m-%d')
+    try:
+        with open(log_path, 'r') as f:
+            for line in f:
+                if today in line and 'Guardrails blocked cycle' in line:
+                    trips.append(line.strip())
+    except Exception:
+        pass
+    return trips
+
+
+def build_summary(decisions: list, orders_by_status: dict,
+                  net_pnl: float, inventory: dict, guardrail_trips: list) -> str:
+    today = datetime.now(EST).strftime('%Y-%m-%d')
+
+    triggers: dict = {}
     for d in decisions:
-        m = d.get('melchior_action') or 'NULL'
-        b = d.get('balthasar_action') or 'NULL'
-        c = d.get('casper_action') or 'NULL'
-        melchior_actions[m] = melchior_actions.get(m, 0) + 1
-        balthasar_actions[b] = balthasar_actions.get(b, 0) + 1
-        casper_regimes[c] = casper_regimes.get(c, 0) + 1
+        t = d.get('trigger') or 'unknown'
+        triggers[t] = triggers.get(t, 0) + 1
 
-    return f"""DAILY SUMMARY — {today}
+    lines = [
+        f"## {today}",
+        "",
+        f"MAGI cycles: {len(decisions)} | triggers: {triggers}",
+        "",
+    ]
 
-Decisions made today: {len(decisions)}
-Melchior actions: {melchior_actions}
-Balthasar actions: {balthasar_actions}
-Casper regimes: {casper_regimes}
+    if decisions:
+        lines.append("Cycle outputs:")
+        for d in decisions:
+            ts = (d.get('timestamp') or '')[:16]
+            grid = d.get('consensus_grid_action', '?')
+            risk = d.get('consensus_risk_action', '?')
+            regime = d.get('consensus_regime', '?')
+            reason = d.get('notes', '')
+            lines.append(f"  {ts} | grid={grid} risk={risk} regime={regime} — {reason}")
+        lines.append("")
 
-Grid activity:
-- Total fills: {pnl['total_fills']} ({pnl['buy_fills']} buys, {pnl['sell_fills']} sells)
-- Total fees paid: ${pnl['total_fees']}
+    placed = sum(orders_by_status.values())
+    filled = orders_by_status.get('filled', 0)
+    cancelled = orders_by_status.get('cancelled', 0)
 
-End-of-day inventory:
-- XRP held: {inventory.get('xrp_held', 0)}
-- USD held: {inventory.get('usd_held', 0)}
-- Net position USD: {inventory.get('net_position_usd', 0)}
-- Inventory skew: {inventory.get('inventory_skew', 0)}
-"""
+    lines += [
+        f"Paper orders: placed={placed} filled={filled} cancelled={cancelled}",
+        f"Day net P&L: ${net_pnl:.4f}",
+        "",
+        "Inventory snapshot:",
+        f"  xrp_held={inventory.get('xrp_held', 0)}",
+        f"  usd_held={inventory.get('usd_held', 0)}",
+        f"  net_position_usd={inventory.get('net_position_usd', 0)}",
+        f"  inventory_skew={inventory.get('inventory_skew', 0)}",
+        "",
+    ]
 
-
-def build_agent_message(agent_name: str, summary: str) -> str:
-    if agent_name == 'melchior':
-        focus = "Reflect on your grid structural decisions today. Did your TIGHTEN/WIDEN/RECENTRE/MAINTAIN calls align with the fill rate and inventory outcomes? Update your decisions memory block with one or two sentences capturing what you learned."
-    elif agent_name == 'balthasar':
-        focus = "Reflect on your risk decisions today. Did inventory skew or volatility ever approach concerning levels? Did your CLEAR/PAUSE/HALT calls protect the system appropriately? Update your decisions memory block with one or two sentences capturing what you learned."
+    if guardrail_trips:
+        lines.append("Guardrail trips:")
+        for trip in guardrail_trips:
+            lines.append(f"  {trip}")
     else:
-        focus = "Reflect on your regime calls today. Did RANGING calls hold up? Were any TRENDING calls premature or correct? Update your decisions memory block with one or two sentences capturing what you learned."
+        lines.append("Guardrail trips: none")
 
-    return f"""{summary}
-
-{focus}
-
-Use the core_memory_replace tool to update your 'decisions' memory block. Keep the block concise — append today's takeaway and trim older entries if the block exceeds 2000 characters."""
+    lines += ["", "---", ""]
+    return '\n'.join(lines)
 
 
 def run_learning_cycle(force: bool = False):
@@ -112,43 +151,25 @@ def run_learning_cycle(force: bool = False):
         return {'skipped': True, 'reason': reason}
 
     log.info(f"Learning cycle starting — {reason}")
+
     decisions = get_today_decisions()
-    if not decisions:
-        log.warning("No decisions in last 24h — nothing to learn from")
-        return {'skipped': True, 'reason': 'No decisions to learn from'}
-
-    pnl = get_today_pnl_summary()
+    orders_by_status = get_today_orders()
+    net_pnl = compute_net_pnl()
     inventory = get_latest_inventory() or {}
-    summary = build_summary(decisions, pnl, inventory)
+    guardrail_trips = get_guardrail_trips_today()
 
-    log.info(f"Summary built — {len(decisions)} decisions, {pnl['total_fills']} fills")
+    summary = build_summary(decisions, orders_by_status, net_pnl, inventory, guardrail_trips)
 
-    results = {}
-    for agent_name in ['melchior', 'balthasar', 'casper']:
-        agent_id = os.getenv(ENV_KEYS[agent_name])
-        if not agent_id:
-            results[agent_name] = "no agent ID"
-            continue
-        message = build_agent_message(agent_name, summary)
-        try:
-            client.agents.messages.create(agent_id=agent_id, input=message)
-            results[agent_name] = "ok"
-            log.info(f"{agent_name} learning cycle complete")
-        except Exception as e:
-            results[agent_name] = f"error: {e}"
-            log.error(f"{agent_name} learning cycle failed: {e}")
+    with open(LEARNING_LOG_PATH, 'a') as f:
+        f.write(summary)
 
-    from guardrails import trim_memory_block
-    for agent_name in ['melchior', 'balthasar', 'casper']:
-        agent_id = os.getenv(ENV_KEYS[agent_name])
-        if agent_id:
-            trim_memory_block(agent_id, 'decisions')
+    log.info("Learning cycle: summary appended to learning_log.md")
 
     return {
         'reason': reason,
         'decisions_count': len(decisions),
-        'pnl': pnl,
-        'results': results
+        'pnl': net_pnl,
+        'log_path': LEARNING_LOG_PATH
     }
 
 

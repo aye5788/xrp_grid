@@ -97,7 +97,9 @@ HTML_TEMPLATE = """
         </div>
         <div class="card">
             <div class="label">Mode</div>
-            <div class="value" style="color:#ffaa00;">PAPER</div>
+            <div class="value" style="color:{{ '#ffaa00' if paper_mode else '#ff4444' }};">
+                {{ 'PAPER' if paper_mode else 'LIVE' }}
+            </div>
         </div>
     </div>
 
@@ -266,7 +268,7 @@ HTML_TEMPLATE = """
     </table>
 
     <div class="footer">
-        MAGI Phase 5 — XRP/USD Spot Grid Bot — Paper Mode
+        MAGI Phase 5 — XRP/USD Spot Grid Bot — {{ 'Paper' if paper_mode else 'Live' }} Mode
     </div>
 </body>
 </html>
@@ -330,7 +332,8 @@ def index():
         scheduler_alive=check_scheduler_alive(),
         guardrails_ok=guardrails_ok,
         guardrail_failures=guardrail_failures,
-        kill_switch=ks_active
+        kill_switch=ks_active,
+        paper_mode=engine.paper
     )
 
 @app.route('/api/status')
@@ -353,7 +356,8 @@ def api_status():
             'skew': inventory.get('inventory_skew')
         },
         'latest_magi': decisions[0] if decisions else None,
-        'scheduler_alive': check_scheduler_alive()
+        'scheduler_alive': check_scheduler_alive(),
+        'paper_mode': engine.paper
     })
 
 @app.route('/api/trigger_learning', methods=['POST'])

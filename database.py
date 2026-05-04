@@ -237,7 +237,7 @@ def get_latest_inventory():
     return dict(row) if row else None
 
 
-def insert_token_usage(agent, model, prompt_tokens, completion_tokens, total_tokens, cost_usd, source='letta'):
+def insert_token_usage(agent, model, prompt_tokens, completion_tokens, total_tokens, cost_usd, source='direct'):
     conn = get_conn()
     conn.execute('''INSERT INTO token_usage
         (timestamp, agent, model, prompt_tokens, completion_tokens, total_tokens, estimated_cost_usd, source)

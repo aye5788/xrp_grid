@@ -7,14 +7,8 @@ load_dotenv()
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-LETTA_API_KEY = os.getenv("LETTA_API_KEY")
 COINBASE_API_KEY = os.getenv("COINBASE_API_KEY")
 COINBASE_API_SECRET = os.getenv("COINBASE_API_SECRET")
-
-# --- Letta Agent IDs (populated after first-time agent creation) ---
-MELCHIOR_AGENT_ID = os.getenv("MELCHIOR_AGENT_ID", "")
-BALTHASAR_AGENT_ID = os.getenv("BALTHASAR_AGENT_ID", "")
-CASPER_AGENT_ID = os.getenv("CASPER_AGENT_ID", "")
 
 # --- Trading Parameters ---
 SYMBOL = "XRP-USD"
@@ -47,9 +41,6 @@ DASHBOARD_PORT = 5000
 DASHBOARD_REFRESH_SECONDS = 30
 
 # --- Guardrails ---
-LETTA_CREDIT_FLOOR = 1000           # Halt MAGI cycles if remaining credits below this
 DAILY_LOSS_LIMIT_USD = 10.0         # Auto-HALT if net daily P&L below -$10
-MAX_LETTA_STEPS = 10                # Per-call step cap on agent loops
-MEMORY_BLOCK_MAX_CHARS = 2000       # Trim agent memory blocks above this
 COINBASE_RATE_LIMIT_BACKOFF = 5     # Seconds to wait after a 429
 KILL_SWITCH_FILE = '/root/xrp_grid/HALT'  # If this file exists, system halts
