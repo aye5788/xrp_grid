@@ -48,7 +48,7 @@ signal.signal(signal.SIGINT, signal_handler)
 
 
 def run_observer_cycle():
-    """Run data collection cycle and shadow tick."""
+    """Run data collection cycle, shadow tick, and paper fill simulation."""
     log.info("--- OBSERVER CYCLE ---")
     try:
         poll_cycle()
@@ -59,6 +59,11 @@ def run_observer_cycle():
         price = engine.get_current_price()
         if price:
             engine.process_shadow_tick(price)
+            if engine.paper:
+                filled = engine.simulate_fills(price)
+                if filled:
+                    log.info(f"Observer: {len(filled)} paper fills at {price:.4f}")
+                    engine.update_inventory(price)
     except Exception as e:
         log.error(f"Shadow tick error: {e}")
 

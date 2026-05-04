@@ -1,6 +1,6 @@
 import sqlite3
 import json
-from datetime import datetime
+from datetime import datetime, date
 from config import DB_PATH
 
 
@@ -204,6 +204,58 @@ def get_current_grid_state():
     return dict(row) if row else None
 
 
+# --- Grid order helpers ---
+
+def insert_grid_order(timestamp, order_id, side, price, size, status,
+                      fee=0.0, filled_at=None, fill_price=None):
+    conn = get_conn()
+    conn.execute('''INSERT INTO grid_orders
+        (timestamp, order_id, side, price, size, status, fee, filled_at, fill_price)
+        VALUES (?,?,?,?,?,?,?,?,?)''',
+        (timestamp, order_id, side, price, size, status,
+         fee, filled_at, fill_price))
+    conn.commit()
+    conn.close()
+
+
+def update_grid_order_status(order_id, status,
+                              filled_at=None, fill_price=None, fee=None):
+    conn = get_conn()
+    sets = ['status=?']
+    vals = [status]
+    if filled_at is not None:
+        sets.append('filled_at=?')
+        vals.append(filled_at)
+    if fill_price is not None:
+        sets.append('fill_price=?')
+        vals.append(fill_price)
+    if fee is not None:
+        sets.append('fee=?')
+        vals.append(fee)
+    vals.append(order_id)
+    conn.execute(f"UPDATE grid_orders SET {', '.join(sets)} WHERE order_id=?", vals)
+    conn.commit()
+    conn.close()
+
+
+def get_recent_grid_orders(limit=50):
+    conn = get_conn()
+    rows = conn.execute('''SELECT * FROM grid_orders
+        ORDER BY timestamp DESC LIMIT ?''', (limit,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_fills_today_count():
+    conn = get_conn()
+    today = date.today().isoformat()
+    row = conn.execute('''SELECT COUNT(*) as cnt FROM grid_orders
+        WHERE status='filled' AND (filled_at >= ? OR timestamp >= ?)''',
+        (today, today)).fetchone()
+    conn.close()
+    return row['cnt'] if row else 0
+
+
 # --- MAGI decision helpers ---
 
 def insert_magi_decision(data: dict):
@@ -246,6 +298,8 @@ def get_latest_inventory():
     return dict(row) if row else None
 
 
+# --- Shadow grid helpers ---
+
 def upsert_shadow_grid_state(level_count, state_dict, fill_count=0, rolling_pnl_pct=0.0):
     conn = get_conn()
     conn.execute('''INSERT INTO shadow_grid_state
@@ -280,6 +334,18 @@ def get_all_shadow_states():
     return [dict(r) for r in rows]
 
 
+def get_best_shadow_from_db():
+    """Return (level_count, rolling_pnl_pct) for best shadow variant with fills > 0."""
+    rows = get_all_shadow_states()
+    candidates = [r for r in rows if (r['fill_count'] or 0) > 0]
+    if not candidates:
+        return None, None
+    best = max(candidates, key=lambda r: r['rolling_pnl_pct'] or 0)
+    return best['level_count'], best['rolling_pnl_pct']
+
+
+# --- Token usage helpers ---
+
 def insert_token_usage(agent, model, prompt_tokens, completion_tokens, total_tokens, cost_usd, source='direct'):
     conn = get_conn()
     conn.execute('''INSERT INTO token_usage
@@ -308,7 +374,6 @@ def get_cost_summary(days_back=30):
 
 
 def get_cost_today():
-    from datetime import date
     conn = get_conn()
     today = date.today().isoformat()
     row = conn.execute('''SELECT

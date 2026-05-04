@@ -1,7 +1,7 @@
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 log = logging.getLogger('grid.shadow_simulator')
 
@@ -219,6 +219,29 @@ class ShadowSimulator:
             'threshold_pct': GRID_SWITCH_THRESHOLD_PCT,
             'min_fills': GRID_SWITCH_MIN_FILLS
         }
+
+    def get_best_shadow_pnl_pct(self, min_hours: int = None) -> Tuple[Optional[int], Optional[float]]:
+        """
+        Return (level_count, rolling_pnl_pct) for the variant with the highest
+        rolling P&L% among those with >= min_hours of fill history.
+        Returns (None, None) if no variant qualifies.
+        """
+        from config import GRID_SWITCH_MIN_HOURS
+        if min_hours is None:
+            min_hours = GRID_SWITCH_MIN_HOURS
+
+        best_lc: Optional[int] = None
+        best_pnl: Optional[float] = None
+
+        for lc, sg in self.variants.items():
+            if sg.get_oldest_fill_age_hours() < min_hours:
+                continue
+            pnl = sg.get_rolling_pnl_pct()
+            if best_pnl is None or pnl > best_pnl:
+                best_pnl = pnl
+                best_lc = lc
+
+        return best_lc, best_pnl
 
     def persist_all(self):
         """Persist all variant states to DB."""

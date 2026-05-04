@@ -17,7 +17,8 @@ from config import (
 from database import (
     insert_grid_state, get_current_grid_state,
     get_latest_indicators, upsert_inventory,
-    get_latest_inventory
+    get_latest_inventory,
+    insert_grid_order, update_grid_order_status
 )
 
 log = logging.getLogger('grid.engine')
@@ -137,7 +138,7 @@ class GridEngine:
         centre = grid_state['centre_price'] if grid_state else None
         spacing = grid_state['spacing_pct'] if grid_state else GRID_SPACING_PCT
 
-        # FIX 2: audit trail row before rebuild
+        # Audit trail row before rebuild
         if centre:
             insert_grid_state(centre, spacing, best_lc,
                               notes=f"level_switch {old_lc}→{best_lc} margin={margin:.4f}%")
@@ -265,6 +266,18 @@ class GridEngine:
 
         if self.paper:
             self.paper_orders[order_id] = order
+            try:
+                insert_grid_order(
+                    timestamp=order['timestamp'],
+                    order_id=order_id,
+                    side=side,
+                    price=price,
+                    size=size,
+                    status='open',
+                    fee=0.0
+                )
+            except Exception as e:
+                log.warning(f"Failed to persist paper order: {e}")
             log.info(f"[PAPER] {side.upper()} {size} XRP @ {price} — id={order_id}")
             return order
 
@@ -308,10 +321,19 @@ class GridEngine:
     def cancel_all_orders(self):
         """Cancel all open orders."""
         if self.paper:
+            now_iso = datetime.utcnow().isoformat()
+            cancelled = 0
+            for order_id, order in list(self.paper_orders.items()):
+                if order.get('status') == 'open':
+                    try:
+                        update_grid_order_status(order_id, 'cancelled', filled_at=now_iso)
+                    except Exception as e:
+                        log.warning(f"Failed to persist cancel for {order_id}: {e}")
+                    cancelled += 1
             count = len(self.paper_orders)
             self.paper_orders.clear()
-            log.info(f"[PAPER] Cancelled {count} orders")
-            return count
+            log.info(f"[PAPER] Cancelled {cancelled} open orders ({count} total cleared)")
+            return cancelled
 
         try:
             path = "/api/v3/brokerage/orders/batch_cancel"
@@ -358,6 +380,16 @@ class GridEngine:
                 order['fill_price'] = current_price
                 fee = order['size'] * order['price'] * MAKER_FEE
                 order['fee'] = fee
+                now_iso = datetime.utcnow().isoformat()
+                try:
+                    update_grid_order_status(
+                        order_id, 'filled',
+                        filled_at=now_iso,
+                        fill_price=current_price,
+                        fee=fee
+                    )
+                except Exception as e:
+                    log.warning(f"Failed to persist fill for {order_id}: {e}")
                 filled.append(order)
                 log.info(f"[PAPER FILL] {order['side'].upper()} {order['size']} XRP @ {current_price} fee={fee:.4f}")
 

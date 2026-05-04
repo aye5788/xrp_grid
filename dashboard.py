@@ -1,18 +1,19 @@
 from flask import Flask, jsonify, render_template_string, request
 import logging
-import threading
 import os
 from datetime import datetime, timezone
 from database import (
     get_latest_indicators, get_current_grid_state,
     get_latest_inventory, get_recent_magi_decisions,
-    get_cost_summary, get_cost_today, get_all_shadow_states
+    get_cost_summary, get_cost_today, get_all_shadow_states,
+    get_recent_grid_orders, get_best_shadow_from_db, get_fills_today_count
 )
 from grid.engine import GridEngine
+from grid.pnl import get_pnl_snapshot
 from magi.costs import get_fixed_monthly_total, FIXED_SUBSCRIPTIONS
 from magi.learning import run_learning_cycle
 from guardrails import check_all_guardrails, kill_switch_active
-from config import KILL_SWITCH_FILE
+from config import KILL_SWITCH_FILE, MAX_INVENTORY_USD
 
 log = logging.getLogger('dashboard')
 app = Flask(__name__)
@@ -45,6 +46,14 @@ HTML_TEMPLATE = """
         .agent-card { background: #111; border: 1px solid #00ff8833; padding: 12px; border-radius: 4px; }
         .agent-name { color: #00ccff; font-size: 0.75em; margin-bottom: 6px; text-transform: uppercase; }
         .footer { margin-top: 40px; color: #333; font-size: 0.7em; border-top: 1px solid #222; padding-top: 10px; }
+        .pnl-pos { color: #00ff88; }
+        .pnl-neg { color: #ff4444; }
+        .pnl-zero { color: #666; }
+        .side-buy { color: #00ff88; }
+        .side-sell { color: #ff4444; }
+        .status-filled { color: #00ff88; }
+        .status-cancelled { color: #ff4444; }
+        .status-open { color: #ffaa00; }
     </style>
 </head>
 <body>
@@ -102,6 +111,88 @@ HTML_TEMPLATE = """
             </div>
         </div>
     </div>
+
+    <h2>Paper P&amp;L</h2>
+    <div class="grid">
+        <div class="card">
+            <div class="label">Realized P&amp;L</div>
+            <div class="value {{ 'pnl-pos' if pnl_realized >= 0 else 'pnl-neg' }}">${{ pnl_realized_fmt }}</div>
+            <div class="sub">{{ pnl_fill_count }} total fills &nbsp;|&nbsp; {{ pnl_matched_trips }} round trips</div>
+        </div>
+        <div class="card">
+            <div class="label">Unrealized P&amp;L</div>
+            <div class="value {{ 'pnl-pos' if pnl_unrealized >= 0 else 'pnl-neg' }}">${{ pnl_unrealized_fmt }}</div>
+            <div class="sub">{{ pnl_unmatched_buys }} open buy position{{ 's' if pnl_unmatched_buys != 1 else '' }}</div>
+        </div>
+        <div class="card">
+            <div class="label">Total P&amp;L</div>
+            <div class="value {{ 'pnl-pos' if pnl_total >= 0 else 'pnl-neg' }}">${{ pnl_total_fmt }}</div>
+            <div class="sub">Fees paid: ${{ pnl_fees_fmt }}</div>
+        </div>
+        <div class="card">
+            <div class="label">vs Best Shadow</div>
+            <div class="value {{ 'pnl-pos' if live_vs_shadow >= 0 else 'pnl-neg' }}">{{ live_vs_shadow_fmt }}%</div>
+            <div class="sub">
+                Live: {{ live_pnl_pct_fmt }}%
+                &nbsp;/&nbsp;
+                Shadow {{ best_shadow_level or '—' }}-lv: {{ best_shadow_pnl_fmt }}%
+            </div>
+        </div>
+        <div class="card">
+            <div class="label">Win Rate</div>
+            <div class="value">{{ pnl_win_rate }}%</div>
+            <div class="sub">
+                {% if pnl_avg_per_trip is not none %}
+                avg ${{ pnl_avg_per_trip }} / trip
+                {% else %}
+                no round trips yet
+                {% endif %}
+            </div>
+        </div>
+        <div class="card">
+            <div class="label">Activity</div>
+            <div class="value">{{ pnl_fills_today }}</div>
+            <div class="sub">
+                fills today
+                {% if pnl_mins_since is not none %}
+                &nbsp;|&nbsp; last {{ pnl_mins_since }}m ago
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <h2>Recent Orders</h2>
+    {% if recent_orders %}
+    <table>
+        <tr>
+            <th>Time</th>
+            <th>Side</th>
+            <th>Price</th>
+            <th>Size</th>
+            <th>Status</th>
+            <th>Fill Price</th>
+            <th>Fee</th>
+            <th>P&amp;L</th>
+        </tr>
+        {% for o in recent_orders %}
+        {% set order_pnl = order_pnl_map.get(o.order_id) %}
+        <tr>
+            <td style="color:#666;">{{ (o.filled_at or o.timestamp or '')[:16] }}</td>
+            <td class="side-{{ o.side }}">{{ o.side }}</td>
+            <td>${{ '%.4f'|format(o.price or 0) }}</td>
+            <td>{{ '%.2f'|format(o.size or 0) }}</td>
+            <td class="status-{{ o.status }}">{{ o.status }}</td>
+            <td>{{ '$%.4f'|format(o.fill_price) if o.fill_price else '—' }}</td>
+            <td>{{ '$%.5f'|format(o.fee) if o.fee else '—' }}</td>
+            <td class="{{ 'pnl-pos' if order_pnl and order_pnl > 0 else ('pnl-neg' if order_pnl and order_pnl < 0 else 'pnl-zero') }}">
+                {{ '$%.4f'|format(order_pnl) if order_pnl is not none else '—' }}
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    <div style="color:#666; font-size:0.8em;">No orders recorded yet — starts after first MAGI cycle.</div>
+    {% endif %}
 
     <h2>Shadow Grid Variants</h2>
     {% if shadow_variants %}
@@ -304,15 +395,15 @@ HTML_TEMPLATE = """
 
 def check_scheduler_alive():
     try:
-        import os
         log_path = '/root/xrp_grid/magi.log'
         if not os.path.exists(log_path):
             return False
         mtime = os.path.getmtime(log_path)
         age_minutes = (datetime.now(timezone.utc).timestamp() - mtime) / 60
         return age_minutes < 90
-    except:
+    except Exception:
         return False
+
 
 @app.route('/')
 def index():
@@ -325,7 +416,7 @@ def index():
     inventory = get_latest_inventory() or {}
     decisions = get_recent_magi_decisions(10)
     latest_decision = decisions[0] if decisions else None
-    price = engine.get_current_price()
+    price = engine.get_current_price() or 0.0
 
     cost_today_data = get_cost_today()
     cost_30d_data = get_cost_summary(days_back=30)
@@ -335,6 +426,15 @@ def index():
     guardrails_ok, guardrail_failures = check_all_guardrails()
     ks_active = kill_switch_active()
     shadow_variants = get_all_shadow_states()
+
+    # P&L snapshot
+    snap = get_pnl_snapshot(price)
+    best_shadow_level, best_shadow_pnl = get_best_shadow_from_db()
+    live_pnl_pct = round(snap['total'] / MAX_INVENTORY_USD * 100, 4) if MAX_INVENTORY_USD > 0 else 0.0
+    best_shadow_pnl = best_shadow_pnl or 0.0
+    live_vs_shadow = round(live_pnl_pct - best_shadow_pnl, 4)
+
+    recent_orders = get_recent_grid_orders(limit=25)
 
     return render_template_string(HTML_TEMPLATE,
         now=now,
@@ -364,8 +464,32 @@ def index():
         kill_switch=ks_active,
         paper_mode=engine.paper,
         shadow_variants=shadow_variants,
-        active_levels=engine.level_count
+        active_levels=engine.level_count,
+        # P&L tiles
+        pnl_realized=snap['realized'],
+        pnl_realized_fmt=f"{snap['realized']:.4f}",
+        pnl_unrealized=snap['unrealized'],
+        pnl_unrealized_fmt=f"{snap['unrealized']:.4f}",
+        pnl_total=snap['total'],
+        pnl_total_fmt=f"{snap['total']:.4f}",
+        pnl_fees_fmt=f"{snap['fees']:.4f}",
+        pnl_fill_count=snap['fill_count'],
+        pnl_matched_trips=snap['matched_round_trips'],
+        pnl_unmatched_buys=snap['unmatched_buys'],
+        pnl_win_rate=snap['win_rate'],
+        pnl_avg_per_trip=snap['avg_pnl_per_round_trip'],
+        pnl_fills_today=snap['fills_today'],
+        pnl_mins_since=snap['time_since_last_fill_minutes'],
+        live_pnl_pct_fmt=f"{live_pnl_pct:.4f}",
+        best_shadow_level=best_shadow_level,
+        best_shadow_pnl_fmt=f"{best_shadow_pnl:.4f}",
+        live_vs_shadow=live_vs_shadow,
+        live_vs_shadow_fmt=f"{live_vs_shadow:+.4f}",
+        # Recent orders table
+        recent_orders=recent_orders,
+        order_pnl_map=snap['order_pnl_map'],
     )
+
 
 @app.route('/api/status')
 def api_status():
@@ -391,6 +515,39 @@ def api_status():
         'paper_mode': engine.paper
     })
 
+
+@app.route('/api/pnl')
+def api_pnl():
+    price = engine.get_current_price() or 0.0
+    snap = get_pnl_snapshot(price)
+    best_lc, best_shadow_pnl = get_best_shadow_from_db()
+    live_pnl_pct = round(snap['total'] / MAX_INVENTORY_USD * 100, 4) if MAX_INVENTORY_USD > 0 else 0.0
+    live_minus_shadow = round(live_pnl_pct - (best_shadow_pnl or 0.0), 4)
+    return jsonify({
+        **snap,
+        'best_shadow_level': best_lc,
+        'best_shadow_pnl_pct': best_shadow_pnl,
+        'live_pnl_pct': live_pnl_pct,
+        'live_minus_shadow_pct': live_minus_shadow,
+    })
+
+
+@app.route('/api/recent_orders')
+def api_recent_orders():
+    limit = min(int(request.args.get('limit', 25)), 200)
+    orders = get_recent_grid_orders(limit=limit)
+    return jsonify({'orders': orders, 'count': len(orders)})
+
+
+@app.route('/api/shadow_variants')
+def api_shadow_variants():
+    shadow_variants = get_all_shadow_states()
+    return jsonify({
+        'variants': shadow_variants,
+        'active_levels': engine.level_count
+    })
+
+
 @app.route('/api/trigger_learning', methods=['POST'])
 def trigger_learning():
     force = request.args.get('force', 'false').lower() == 'true'
@@ -400,13 +557,6 @@ def trigger_learning():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/shadow_variants')
-def api_shadow_variants():
-    shadow_variants = get_all_shadow_states()
-    return jsonify({
-        'variants': shadow_variants,
-        'active_levels': engine.level_count
-    })
 
 @app.route('/api/toggle_kill', methods=['POST'])
 def toggle_kill():
@@ -420,6 +570,7 @@ def toggle_kill():
         return jsonify({'kill_switch': active})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=5000, debug=False)
