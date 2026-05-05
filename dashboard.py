@@ -272,20 +272,42 @@ HTML_TEMPLATE = """
     {% endif %}
 
     <h2>Manual Actions</h2>
-    <div style="margin-top:10px;">
-        <button onclick="triggerLearning()" style="background:#00ccff22; color:#00ccff; border:1px solid #00ccff; padding:10px 20px; font-family:monospace; font-size:0.9em; cursor:pointer; border-radius:4px;">
-            Trigger Learning Cycle
+    <div style="margin-top:10px; display:flex; flex-wrap:wrap; gap:10px; align-items:center;">
+        <button onclick="triggerMagi(this)" style="background:#00ff8822; color:#00ffcc; border:2px solid #00ff88; padding:10px 24px; font-family:monospace; font-size:1em; font-weight:bold; cursor:pointer; border-radius:4px;">
+            Trigger MAGI Cycle
         </button>
-        <button onclick="triggerLearning(true)" style="background:#ffaa0022; color:#ffaa00; border:1px solid #ffaa00; padding:10px 20px; font-family:monospace; font-size:0.9em; cursor:pointer; border-radius:4px; margin-left:10px;">
-            Force (Weekend Override)
+        <button onclick="triggerLearning()" style="background:#00ccff11; color:#4488aa; border:1px solid #00ccff33; padding:8px 14px; font-family:monospace; font-size:0.8em; cursor:pointer; border-radius:4px;">
+            Generate Daily Summary
         </button>
-        <button onclick="toggleKill()" id="kill-btn" style="background:{{ '#ff000033' if kill_switch else '#33000022' }}; color:{{ '#ff4444' if kill_switch else '#aa3333' }}; border:1px solid {{ '#ff4444' if kill_switch else '#550000' }}; padding:10px 20px; font-family:monospace; font-size:0.9em; cursor:pointer; border-radius:4px; margin-left:10px;">
+        <button onclick="triggerLearning(true)" style="background:#ffaa0011; color:#887744; border:1px solid #ffaa0033; padding:8px 14px; font-family:monospace; font-size:0.8em; cursor:pointer; border-radius:4px;">
+            Generate Summary (Weekend Override)
+        </button>
+        <button onclick="toggleKill()" id="kill-btn" style="background:{{ '#ff000033' if kill_switch else '#33000022' }}; color:{{ '#ff4444' if kill_switch else '#aa3333' }}; border:1px solid {{ '#ff4444' if kill_switch else '#550000' }}; padding:8px 14px; font-family:monospace; font-size:0.8em; cursor:pointer; border-radius:4px;">
             {{ '⬛ DEACTIVATE KILL SWITCH' if kill_switch else '⬛ ACTIVATE KILL SWITCH' }}
         </button>
-        <span id="learning-status" style="margin-left:15px; color:#888;"></span>
-        <span id="kill-status" style="margin-left:15px; color:#888;"></span>
+        <span id="magi-status" style="color:#888; font-size:0.85em;"></span>
+        <span id="learning-status" style="color:#888; font-size:0.85em;"></span>
+        <span id="kill-status" style="color:#888; font-size:0.85em;"></span>
     </div>
     <script>
+    async function triggerMagi(btn) {
+        btn.disabled = true;
+        btn.textContent = 'Running MAGI cycle...';
+        try {
+            const r = await fetch('/api/trigger_magi', {method: 'POST'});
+            const data = await r.json();
+            if (data.ok) {
+                btn.textContent = 'Cycle complete — refreshing...';
+                setTimeout(() => location.reload(), 1500);
+            } else {
+                btn.textContent = 'Failed: ' + (data.error || 'unknown');
+                btn.disabled = false;
+            }
+        } catch (e) {
+            btn.textContent = 'Error: ' + e.message;
+            btn.disabled = false;
+        }
+    }
     function triggerLearning(force) {
         const status = document.getElementById('learning-status');
         status.textContent = 'Running learning cycle...';
@@ -325,6 +347,16 @@ HTML_TEMPLATE = """
     </script>
 
     <h2>Latest MAGI Decision</h2>
+    <div style="font-size:0.8em; color:#555; margin-bottom:10px;">
+        {% if latest_decision and decision_age_label %}
+            Latest cycle: <span style="color:#888;">{{ decision_ts_display }}</span>
+            &nbsp;(<span style="color:{{ decision_age_color }};">{{ decision_age_label }}</span>)
+        {% elif latest_decision %}
+            Latest cycle: <span style="color:#888;">{{ decision_ts_display }}</span>
+        {% else %}
+            No MAGI cycles run yet.
+        {% endif %}
+    </div>
     {% if latest_decision %}
     <div class="agent-row">
         <div class="agent-card">
@@ -405,6 +437,38 @@ def check_scheduler_alive():
         return False
 
 
+def _decision_age(latest_decision):
+    """Return (display_ts, age_label, age_color) for the latest MAGI decision."""
+    if not latest_decision:
+        return '', None, '#666'
+    try:
+        ts_str = latest_decision['timestamp']
+        if not ts_str:
+            return '', None, '#666'
+        ts = datetime.fromisoformat(str(ts_str).replace('Z', '+00:00'))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        display_ts = ts_str[:16]
+        age_secs = (datetime.now(timezone.utc) - ts).total_seconds()
+        age_mins = int(age_secs / 60)
+        if age_mins < 60:
+            age_label = f"{age_mins} minute{'s' if age_mins != 1 else ''} ago"
+        elif age_mins < 120:
+            h, m = divmod(age_mins, 60)
+            age_label = f"{h}h {m}m ago"
+        else:
+            age_label = f"{age_mins // 60:.0f} hours ago"
+        if age_mins < 120:
+            color = '#00ff88'
+        elif age_mins < 480:
+            color = '#ffaa00'
+        else:
+            color = '#ff4444'
+        return display_ts, age_label, color
+    except Exception:
+        return str(latest_decision.get('timestamp', ''))[:16] if hasattr(latest_decision, 'get') else '', None, '#666'
+
+
 @app.route('/')
 def index():
     from zoneinfo import ZoneInfo
@@ -435,6 +499,8 @@ def index():
     live_vs_shadow = round(live_pnl_pct - best_shadow_pnl, 4)
 
     recent_orders = get_recent_grid_orders(limit=25)
+
+    decision_ts_display, decision_age_label, decision_age_color = _decision_age(latest_decision)
 
     return render_template_string(HTML_TEMPLATE,
         now=now,
@@ -488,6 +554,10 @@ def index():
         # Recent orders table
         recent_orders=recent_orders,
         order_pnl_map=snap['order_pnl_map'],
+        # MAGI decision age (FIX 3)
+        decision_ts_display=decision_ts_display,
+        decision_age_label=decision_age_label,
+        decision_age_color=decision_age_color,
     )
 
 
@@ -556,6 +626,22 @@ def trigger_learning():
         return jsonify(result or {'skipped': True, 'reason': 'unknown'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/trigger_magi', methods=['POST'])
+def trigger_magi():
+    try:
+        from magi.orchestrator import run_cycle
+        result = run_cycle(trigger='manual', force=True)
+        if result is None:
+            return jsonify({'ok': False, 'error': 'Cycle returned None — check guardrails or recent logs'}), 200
+        return jsonify({
+            'ok': True,
+            'consensus': result.get('consensus'),
+            'timestamp': result.get('timestamp'),
+        })
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
 
 
 @app.route('/api/toggle_kill', methods=['POST'])
