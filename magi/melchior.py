@@ -51,6 +51,24 @@ def get_decision(indicators: dict, grid_state: dict) -> dict:
         )
         raw = response.choices[0].message.content
         result = json.loads(raw)
+        try:
+            from database import insert_token_usage
+            from magi.costs import estimate_cost
+            pt = response.usage.prompt_tokens
+            ct = response.usage.completion_tokens
+            tt = response.usage.total_tokens
+            cost = estimate_cost("gpt-4o", pt, ct)
+            insert_token_usage(
+                agent="melchior",
+                model="gpt-4o",
+                prompt_tokens=pt,
+                completion_tokens=ct,
+                total_tokens=tt,
+                cost_usd=cost,
+                source="direct"
+            )
+        except Exception as e:
+            log.warning(f"Melchior token logging failed: {e}")
         log.info(f"Melchior: action={result.get('action')} conviction={result.get('conviction')}")
         return result
     except Exception as e:

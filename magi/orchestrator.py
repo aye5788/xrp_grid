@@ -68,9 +68,15 @@ def run_cycle(trigger='scheduled', force=False):
         log.warning("No indicator data available — skipping cycle")
         return None
 
+    from grid.engine import GridEngine
+    _price_engine = GridEngine(paper=True)
+    current_price = _price_engine.get_current_price()
+    if current_price is None:
+        log.warning("No current price for Balthasar budget context — proceeding with NULL")
+
     log.info("Calling MAGI agents (stateless)...")
     melchior = melchior_stateless(indicators, grid_state)
-    balthasar = balthasar_stateless(indicators, inventory, grid_state)
+    balthasar = balthasar_stateless(indicators, inventory, grid_state, current_price)
     casper = casper_stateless(indicators)
 
     log.info(f"Melchior: {melchior.get('action')} / {melchior.get('conviction')}")

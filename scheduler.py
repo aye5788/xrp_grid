@@ -123,12 +123,42 @@ def main():
     # Load engine state (shadow sim) after DB is ready
     engine.load_state()
 
+    # Fund detection — only enforced when configured exchange is the trading exchange
+    from config import EXCHANGE, MAX_INVENTORY_USD
+    if EXCHANGE == "kraken":
+        log.info("Running Kraken fund-detection check (XXRP + ZUSD only)...")
+        try:
+            xrp, usd = engine.exchange.get_balances()
+            price = engine.exchange.get_current_price()
+            if price is None or price <= 0:
+                log.error("Cannot run fund detection — Kraken price unavailable")
+                sys.exit(1)
+            xrp_value_usd = xrp * price
+            total_in_universe = xrp_value_usd + usd
+            log.info(f"Kraken bot universe: {xrp:.4f} XRP (${xrp_value_usd:.2f}) + ${usd:.2f} USD = ${total_in_universe:.2f}")
+            if total_in_universe < MAX_INVENTORY_USD:
+                log.error(f"INSUFFICIENT FUNDS — bot universe ${total_in_universe:.2f} < required ${MAX_INVENTORY_USD:.2f}")
+                log.error("Refusing to operate. Top up XRP or USD on Kraken and restart.")
+                sys.exit(1)
+            log.info(f"Fund detection passed — universe ${total_in_universe:.2f} >= ${MAX_INVENTORY_USD:.2f}")
+        except SystemExit:
+            raise
+        except Exception as e:
+            log.error(f"Fund detection check failed with exception: {e}")
+            log.error("Refusing to operate until Kraken connectivity is verified.")
+            sys.exit(1)
+
     # Run initial observer poll
     run_observer_cycle()
 
-    # Initialise grid
-    log.info("Initialising grid on startup...")
-    engine.initialise_grid()
+    # Initialise grid only if no orders were restored from DB.
+    # If load_state() restored an existing order book, resume that book instead
+    # of placing duplicates.
+    if not engine.paper_orders:
+        log.info("No paper orders restored — initialising fresh grid on startup")
+        engine.initialise_grid()
+    else:
+        log.info(f"Resumed {len(engine.paper_orders)} paper orders from DB — skipping fresh grid init")
 
     # Run initial MAGI cycle
     run_magi_cycle(trigger='startup')

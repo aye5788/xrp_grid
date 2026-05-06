@@ -13,6 +13,10 @@ log = logging.getLogger('observer')
 
 COINBASE_REST = "https://api.coinbase.com/api/v3/brokerage"
 
+# Lazy-initialised exchange instance for XRP candle fetches when EXCHANGE != "coinbase"
+_xrp_exchange = None
+
+
 def get_candles_coinbase(product_id, granularity, limit=300):
     """Fetch OHLCV candles from Coinbase Advanced REST API."""
     url = f"{COINBASE_REST}/market/products/{product_id}/candles"
@@ -36,6 +40,26 @@ def get_candles_coinbase(product_id, granularity, limit=300):
         log.error(f"Candle fetch error {product_id}: {e}")
         return []
 
+
+def get_candles_xrp(granularity: str, limit: int = 300) -> list:
+    """Fetch XRP candles from whichever exchange is configured.
+
+    BTC candles always stay on Coinbase — BTC is a market-context signal only.
+    """
+    global _xrp_exchange
+    from config import EXCHANGE
+    if EXCHANGE == "coinbase":
+        return get_candles_coinbase("XRP-USD", granularity, limit)
+    elif EXCHANGE == "kraken":
+        if _xrp_exchange is None:
+            from grid.exchanges.kraken import KrakenExchange
+            _xrp_exchange = KrakenExchange(symbol="XRP-USD")
+        return _xrp_exchange.get_candles(granularity, limit)
+    else:
+        log.error(f"Unknown EXCHANGE for XRP candles: {EXCHANGE}")
+        return []
+
+
 def compute_indicators(candles_1h, candles_6h, candles_1d, btc_candles_1d):
     """Compute all technical indicators from candle data."""
     if len(candles_1h) < 50:
@@ -56,6 +80,27 @@ def compute_indicators(candles_1h, candles_6h, candles_1d, btc_candles_1d):
 
     result = {"timestamp": df1h.iloc[-1]["timestamp"], "timeframe": "1h"}
 
+    # Initialise all indicator keys to None so upsert always writes every column,
+    # preventing stale values from persisting when a computation fails.
+    result['vwap'] = None
+    result['vwap_dev_pct'] = None
+    result['atr'] = None
+    result['atr_percentile'] = None
+    result['vol_regime'] = None
+    result['autocorr_1h'] = None
+    result['autocorr_4h'] = None
+    result['ema_50'] = None
+    result['ema_200'] = None
+    result['adx'] = None
+    result['adx_pos'] = None
+    result['adx_neg'] = None
+    result['roc_6h'] = None
+    result['bb_width'] = None
+    result['bb_upper'] = None
+    result['bb_lower'] = None
+    result['btc_ema_50'] = None
+    result['btc_ema_200'] = None
+
     # VWAP (1h data, rolling 24 periods)
     try:
         typical = (df1h['high'] + df1h['low'] + df1h['close']) / 3
@@ -65,6 +110,8 @@ def compute_indicators(candles_1h, candles_6h, candles_1d, btc_candles_1d):
             (df1h['close'].iloc[-1] - vwap.iloc[-1]) / vwap.iloc[-1] * 100, 4)
     except Exception as e:
         log.warning(f"VWAP error: {e}")
+        result['vwap'] = None
+        result['vwap_dev_pct'] = None
 
     # ATR and vol regime (1h)
     try:
@@ -82,6 +129,9 @@ def compute_indicators(candles_1h, candles_6h, candles_1d, btc_candles_1d):
             result['vol_regime'] = 'MEDIUM'
     except Exception as e:
         log.warning(f"ATR error: {e}")
+        result['atr'] = None
+        result['atr_percentile'] = None
+        result['vol_regime'] = None
 
     # Autocorrelation (1h returns)
     try:
@@ -90,6 +140,8 @@ def compute_indicators(candles_1h, candles_6h, candles_1d, btc_candles_1d):
         result['autocorr_4h'] = round(float(returns.autocorr(lag=4)), 4)
     except Exception as e:
         log.warning(f"Autocorr error: {e}")
+        result['autocorr_1h'] = None
+        result['autocorr_4h'] = None
 
     # EMA 50/200 daily
     if len(df1d) >= 50:
@@ -98,6 +150,8 @@ def compute_indicators(candles_1h, candles_6h, candles_1d, btc_candles_1d):
             result['ema_200'] = round(float(ta.trend.EMAIndicator(df1d['close'], window=200).ema_indicator().iloc[-1]), 6) if len(df1d) >= 200 else None
         except Exception as e:
             log.warning(f"EMA error: {e}")
+            result['ema_50'] = None
+            result['ema_200'] = None
 
     # ADX daily
     if len(df1d) >= 14:
@@ -108,6 +162,9 @@ def compute_indicators(candles_1h, candles_6h, candles_1d, btc_candles_1d):
             result['adx_neg'] = round(float(adx.adx_neg().iloc[-1]), 4)
         except Exception as e:
             log.warning(f"ADX error: {e}")
+            result['adx'] = None
+            result['adx_pos'] = None
+            result['adx_neg'] = None
 
     # ROC 6h
     if len(df6h) >= 6:
@@ -115,6 +172,7 @@ def compute_indicators(candles_1h, candles_6h, candles_1d, btc_candles_1d):
             result['roc_6h'] = round(float(ta.momentum.ROCIndicator(df6h['close'], window=6).roc().iloc[-1]), 4)
         except Exception as e:
             log.warning(f"ROC error: {e}")
+            result['roc_6h'] = None
 
     # Bollinger Band Width daily
     if len(df1d) >= 20:
@@ -125,14 +183,19 @@ def compute_indicators(candles_1h, candles_6h, candles_1d, btc_candles_1d):
             result['bb_lower'] = round(float(bb.bollinger_lband().iloc[-1]), 6)
         except Exception as e:
             log.warning(f"BB error: {e}")
+            result['bb_width'] = None
+            result['bb_upper'] = None
+            result['bb_lower'] = None
 
-    # BTC EMA context
+    # BTC EMA context — always from Coinbase regardless of EXCHANGE setting
     if len(dfbtc) >= 50:
         try:
             result['btc_ema_50'] = round(float(ta.trend.EMAIndicator(dfbtc['close'], window=50).ema_indicator().iloc[-1]), 2)
             result['btc_ema_200'] = round(float(ta.trend.EMAIndicator(dfbtc['close'], window=200).ema_indicator().iloc[-1]), 2) if len(dfbtc) >= 200 else None
         except Exception as e:
             log.warning(f"BTC EMA error: {e}")
+            result['btc_ema_50'] = None
+            result['btc_ema_200'] = None
 
     return result
 
@@ -140,10 +203,10 @@ def poll_cycle():
     """One full data collection cycle."""
     log.info("Poll cycle starting")
 
-    # Fetch candles
-    xrp_1h = get_candles_coinbase("XRP-USD", "ONE_HOUR", 300)
-    xrp_6h = get_candles_coinbase("XRP-USD", "SIX_HOUR", 100)
-    xrp_1d = get_candles_coinbase("XRP-USD", "ONE_DAY", 300)
+    # Fetch candles — XRP from configured exchange, BTC always from Coinbase
+    xrp_1h = get_candles_xrp("ONE_HOUR", 300)
+    xrp_6h = get_candles_xrp("SIX_HOUR", 100)
+    xrp_1d = get_candles_xrp("ONE_DAY", 300)
     btc_1d = get_candles_coinbase("BTC-USD", "ONE_DAY", 300)
 
     # Write candles to DB

@@ -9,9 +9,12 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 COINBASE_API_KEY = os.getenv("COINBASE_API_KEY")
 COINBASE_API_SECRET = os.getenv("COINBASE_API_SECRET")
+KRAKEN_API_KEY = os.getenv("KRAKEN_API_KEY")
+KRAKEN_API_SECRET = os.getenv("KRAKEN_API_SECRET")
 
 # --- Trading Parameters ---
 SYMBOL = "XRP-USD"
+EXCHANGE = "kraken"   # "coinbase" or "kraken"
 GRID_LEVELS_DEFAULT = 10
 GRID_LEVEL_VARIANTS = [6, 8, 10, 12, 14, 16]
 GRID_SWITCH_THRESHOLD_PCT = 0.10   # min P&L% margin to trigger a level switch

@@ -65,6 +65,25 @@ def get_decision(indicators: dict) -> dict:
         if not response.text:
             raise ValueError(f"Empty response from Gemini — finish_reason: {response.candidates[0].finish_reason if response.candidates else 'unknown'}")
         result = extract_json(response.text)
+        try:
+            from database import insert_token_usage
+            from magi.costs import estimate_cost
+            um = response.usage_metadata
+            pt = um.prompt_token_count
+            ct = um.candidates_token_count
+            tt = um.total_token_count
+            cost = estimate_cost("gemini-2.5-flash", pt, ct)
+            insert_token_usage(
+                agent="casper",
+                model="gemini-2.5-flash",
+                prompt_tokens=pt,
+                completion_tokens=ct,
+                total_tokens=tt,
+                cost_usd=cost,
+                source="direct"
+            )
+        except Exception as e:
+            log.warning(f"Casper token logging failed: {e}")
         log.info(f"Casper: regime={result.get('regime')} conviction={result.get('conviction')}")
         return result
     except Exception as e:

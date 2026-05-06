@@ -1,9 +1,6 @@
 import json
 import logging
 import time
-import hmac
-import hashlib
-import base64
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -12,7 +9,7 @@ from config import (
     COINBASE_API_KEY, COINBASE_API_SECRET,
     SYMBOL, GRID_LEVELS_DEFAULT, GRID_SPACING_PCT,
     TAKER_FEE, MAKER_FEE, MAX_INVENTORY_USD,
-    DB_PATH
+    DB_PATH, EXCHANGE
 )
 from database import (
     insert_grid_state, get_current_grid_state,
@@ -20,10 +17,9 @@ from database import (
     get_latest_inventory,
     insert_grid_order, update_grid_order_status
 )
+from grid.exchanges.coinbase import CoinbaseExchange
 
 log = logging.getLogger('grid.engine')
-
-COINBASE_REST = "https://api.coinbase.com/api/v3/brokerage"
 
 PAPER_MODE = True  # Always start in paper mode
 
@@ -37,6 +33,15 @@ class GridEngine:
         self.level_count = GRID_LEVELS_DEFAULT
         self.shadow_sim = None
         self._shadow_tick_count = 0
+
+        if EXCHANGE == "coinbase":
+            self.exchange = CoinbaseExchange(symbol=SYMBOL)
+        elif EXCHANGE == "kraken":
+            from grid.exchanges.kraken import KrakenExchange
+            self.exchange = KrakenExchange(symbol=SYMBOL)
+        else:
+            raise ValueError(f"Unknown exchange: {EXCHANGE}")
+
         if not self.paper:
             log.warning("LIVE MODE ACTIVE — real orders will be placed")
         else:
@@ -55,6 +60,69 @@ class GridEngine:
             self.level_count = grid_state['levels']
         # Ensure all variant rows exist in DB (fill_count=0 for brand-new variants)
         self.shadow_sim.persist_all()
+
+        # Restore paper_orders from grid_orders table — any status='open' row
+        # represents an order that was live in a previous process incarnation.
+        # The migration that introduced this behavior wiped historical ghosts,
+        # so any row we find here is genuinely live state.
+        from database import get_conn
+        conn = get_conn()
+        rows = conn.execute(
+            "SELECT order_id, side, price, size, timestamp FROM grid_orders WHERE status='open'"
+        ).fetchall()
+        conn.close()
+        self.paper_orders = {}
+        for r in rows:
+            self.paper_orders[r['order_id']] = {
+                'order_id': r['order_id'],
+                'side': r['side'],
+                'price': r['price'],
+                'size': r['size'],
+                'status': 'open',
+                'timestamp': r['timestamp'],
+            }
+        log.info(f"Engine state loaded — restored {len(self.paper_orders)} paper orders from DB")
+
+        # Restore paper_inventory from the most recent inventory snapshot.
+        # If the table is empty (very fresh deployment), keep the __init__ defaults.
+        latest = get_latest_inventory()
+        if latest is not None:
+            self.paper_inventory = {
+                'xrp': float(latest.get('xrp_held') or 0.0),
+                'usd': float(latest.get('usd_held') or 0.0),
+            }
+            log.info(f"Engine state loaded — paper_inventory restored: xrp={self.paper_inventory['xrp']:.4f} usd=${self.paper_inventory['usd']:.2f}")
+
+        # Sanity check: paper_inventory must be physically possible (no negative spot holdings).
+        # If the most recent inventory snapshot has impossible values (legacy bug from
+        # pre-fix simulator), reset baseline from live Kraken account.
+        if self.paper_inventory['xrp'] < 0 or self.paper_inventory['usd'] < 0:
+            log.warning(
+                f"[PAPER RESET] Impossible paper_inventory detected: "
+                f"xrp={self.paper_inventory['xrp']}, usd={self.paper_inventory['usd']}. "
+                f"Querying live Kraken balance for baseline reset."
+            )
+            try:
+                xrp_real, usd_real = self.exchange.get_balances()
+                if xrp_real > 0 or usd_real > 0:
+                    self.paper_inventory = {'xrp': float(xrp_real), 'usd': float(usd_real)}
+                    log.warning(
+                        f"[PAPER RESET] paper_inventory rebased from Kraken: "
+                        f"xrp={xrp_real:.4f}, usd=${usd_real:.2f}"
+                    )
+                    # Persist the corrected baseline immediately
+                    from database import upsert_inventory
+                    price = self.get_current_price() or 0.0
+                    net_usd = xrp_real * price
+                    skew = net_usd / MAX_INVENTORY_USD if MAX_INVENTORY_USD > 0 else 0
+                    upsert_inventory(xrp_real, usd_real, net_usd, skew)
+                else:
+                    log.error("[PAPER RESET] Kraken returned zero balances; falling back to defaults")
+                    self.paper_inventory = {'xrp': 0.0, 'usd': 100.0}
+            except Exception as e:
+                log.error(f"[PAPER RESET] Kraken balance fetch failed: {e}; falling back to defaults")
+                self.paper_inventory = {'xrp': 0.0, 'usd': 100.0}
+
         log.info(f"Engine state loaded — level_count={self.level_count}")
 
     # --- Shadow simulation ---
@@ -146,81 +214,46 @@ class GridEngine:
         self.initialise_grid(centre=centre, spacing_pct=spacing)
         return best_lc
 
-    # --- Coinbase JWT Auth ---
-
-    def _get_jwt_headers(self, method, path):
-        """Generate JWT auth headers for Coinbase Advanced API."""
-        import jwt as pyjwt
-        key_name = COINBASE_API_KEY
-        key_secret = COINBASE_API_SECRET
-        request_host = "api.coinbase.com"
-        uri = f"{method} {request_host}{path}"
-        private_key_bytes = key_secret.encode('utf-8')
-        payload = {
-            "sub": key_name,
-            "iss": "cdp",
-            "nbf": int(time.time()),
-            "exp": int(time.time()) + 120,
-            "uri": uri
-        }
-        try:
-            from cryptography.hazmat.primitives.serialization import load_pem_private_key
-            private_key = load_pem_private_key(private_key_bytes, password=None)
-            token = pyjwt.encode(payload, private_key, algorithm="ES256",
-                                  headers={"kid": key_name, "nonce": str(uuid.uuid4())})
-            return {"Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json"}
-        except Exception as e:
-            log.error(f"JWT generation failed: {e}")
-            raise
-
     # --- Market Data ---
 
     def get_current_price(self) -> Optional[float]:
         """Get current XRP-USD mid price."""
-        try:
-            url = f"{COINBASE_REST}/market/products/{SYMBOL}"
-            r = requests.get(url, timeout=10)
-            r.raise_for_status()
-            data = r.json()
-            return float(data.get('price', 0))
-        except Exception as e:
-            log.error(f"Price fetch error: {e}")
-            return None
+        return self.exchange.get_current_price()
 
     def get_current_spread(self) -> tuple:
         """Get current bid/ask spread."""
-        try:
-            url = f"{COINBASE_REST}/market/products/{SYMBOL}/ticker"
-            r = requests.get(url, timeout=10)
-            r.raise_for_status()
-            data = r.json()
-            bid = float(data.get('best_bid', 0))
-            ask = float(data.get('best_ask', 0))
-            spread_pct = (ask - bid) / bid * 100 if bid > 0 else 0
-            return bid, ask, spread_pct
-        except Exception as e:
-            log.error(f"Spread fetch error: {e}")
-            return 0, 0, 0
+        return self.exchange.get_ticker()
 
     # --- Grid Construction ---
 
     def build_grid_levels(self, centre: float, spacing_pct: float,
-                           levels: int) -> list:
-        """Build grid price levels above and below centre."""
+                           levels: int, xrp_held: float, usd_held: float) -> list:
+        """Build grid price levels trimmed to what current holdings can cover."""
         half = levels // 2
-        grid = []
-        for i in range(-half, half + 1):
-            if i == 0:
-                continue
-            price = centre * (1 + i * spacing_pct)
-            side = 'buy' if i < 0 else 'sell'
-            grid.append({
-                'price': round(price, 5),
-                'side': side,
-                'level': i
-            })
-        return grid
+        size_xrp = self.compute_order_size(centre)
+
+        # Sell ladder: walk nearest-to-centre outward, stop when XRP runs out
+        sell_levels = []
+        cumulative_xrp = 0.0
+        for i in range(1, half + 1):
+            if cumulative_xrp + size_xrp > xrp_held:
+                break
+            price = round(centre * (1 + i * spacing_pct), 5)
+            sell_levels.append({'price': price, 'side': 'sell', 'level': i})
+            cumulative_xrp += size_xrp
+
+        # Buy ladder: walk nearest-to-centre outward, stop when USD runs out
+        buy_levels = []
+        cumulative_usd = 0.0
+        for i in range(1, half + 1):
+            level_price = round(centre * (1 - i * spacing_pct), 5)
+            cost = size_xrp * level_price
+            if cumulative_usd + cost > usd_held:
+                break
+            buy_levels.append({'price': level_price, 'side': 'buy', 'level': -i})
+            cumulative_usd += cost
+
+        return buy_levels + sell_levels
 
     def compute_order_size(self, price: float) -> float:
         """Compute XRP order size per level based on max inventory."""
@@ -282,41 +315,10 @@ class GridEngine:
             return order
 
         # Live order placement
-        try:
-            from config import COINBASE_RATE_LIMIT_BACKOFF
-            path = "/api/v3/brokerage/orders"
-            headers = self._get_jwt_headers("POST", path)
-            body = {
-                "client_order_id": order_id,
-                "product_id": SYMBOL,
-                "side": side.upper(),
-                "order_configuration": {
-                    "limit_limit_gtc": {
-                        "base_size": str(size),
-                        "limit_price": str(price),
-                        "post_only": True
-                    }
-                }
-            }
-            r = requests.post(f"{COINBASE_REST}/orders",
-                              headers=headers,
-                              json=body, timeout=10)
-            if r.status_code == 429:
-                log.warning(f"Coinbase rate limited — backing off {COINBASE_RATE_LIMIT_BACKOFF}s")
-                time.sleep(COINBASE_RATE_LIMIT_BACKOFF)
-                r = requests.post(f"{COINBASE_REST}/orders",
-                                  headers=headers,
-                                  json=body, timeout=10)
-            r.raise_for_status()
-            result = r.json()
-            order['order_id'] = result.get('order_id', order_id)
-            order['status'] = 'open'
-            log.info(f"[LIVE] {side.upper()} {size} XRP @ {price} placed — id={order['order_id']}")
-            return order
-        except Exception as e:
-            log.error(f"Order placement failed: {e}")
-            order['status'] = 'failed'
-            return order
+        result = self.exchange.place_order(side, price, size, order_id)
+        order['order_id'] = result['order_id']
+        order['status'] = result['status']
+        return order
 
     def cancel_all_orders(self):
         """Cancel all open orders."""
@@ -335,29 +337,7 @@ class GridEngine:
             log.info(f"[PAPER] Cancelled {cancelled} open orders ({count} total cleared)")
             return cancelled
 
-        try:
-            path = "/api/v3/brokerage/orders/batch_cancel"
-            headers = self._get_jwt_headers("POST", path)
-            # Get open order IDs first
-            r = requests.get(f"{COINBASE_REST}/orders/historical/batch",
-                             headers=self._get_jwt_headers("GET",
-                             "/api/v3/brokerage/orders/historical/batch"),
-                             params={"product_id": SYMBOL, "order_status": "OPEN"},
-                             timeout=10)
-            r.raise_for_status()
-            orders = r.json().get('orders', [])
-            order_ids = [o['order_id'] for o in orders]
-            if not order_ids:
-                return 0
-            r2 = requests.post(f"{COINBASE_REST}/orders/batch_cancel",
-                               headers=headers,
-                               json={"order_ids": order_ids}, timeout=10)
-            r2.raise_for_status()
-            log.info(f"[LIVE] Cancelled {len(order_ids)} orders")
-            return len(order_ids)
-        except Exception as e:
-            log.error(f"Cancel all failed: {e}")
-            return 0
+        return self.exchange.cancel_all_open_orders()
 
     def simulate_fills(self, current_price: float):
         """Paper mode: check which resting orders would be filled at current price."""
@@ -367,10 +347,25 @@ class GridEngine:
                 continue
             filled_flag = False
             if order['side'] == 'buy' and current_price <= order['price']:
+                cost_usd = order['size'] * order['price']
+                if self.paper_inventory['usd'] < cost_usd:
+                    log.warning(
+                        f"[PAPER REJECT] Buy fill rejected — insufficient USD. "
+                        f"Need ${cost_usd:.2f}, have ${self.paper_inventory['usd']:.2f}. "
+                        f"Order id={order_id} stays open."
+                    )
+                    continue
                 filled_flag = True
                 self.paper_inventory['xrp'] += order['size']
-                self.paper_inventory['usd'] -= order['size'] * order['price']
+                self.paper_inventory['usd'] -= cost_usd
             elif order['side'] == 'sell' and current_price >= order['price']:
+                if self.paper_inventory['xrp'] < order['size']:
+                    log.warning(
+                        f"[PAPER REJECT] Sell fill rejected — insufficient XRP. "
+                        f"Need {order['size']}, have {self.paper_inventory['xrp']:.4f}. "
+                        f"Order id={order_id} stays open."
+                    )
+                    continue
                 filled_flag = True
                 self.paper_inventory['xrp'] -= order['size']
                 self.paper_inventory['usd'] += order['size'] * order['price']
@@ -412,7 +407,25 @@ class GridEngine:
         log.info(f"Initialising grid — centre={centre} spacing={spacing_pct*100:.2f}% levels={self.level_count}")
         self.cancel_all_orders()
 
-        levels = self.build_grid_levels(centre, spacing_pct, self.level_count)
+        levels = self.build_grid_levels(
+            centre, spacing_pct, self.level_count,
+            xrp_held=self.paper_inventory['xrp'],
+            usd_held=self.paper_inventory['usd'],
+        )
+
+        if not levels:
+            log.warning("Grid empty after inventory trim — no buys or sells coverable with current holdings")
+            return False
+
+        n_buys = sum(1 for l in levels if l['side'] == 'buy')
+        n_sells = sum(1 for l in levels if l['side'] == 'sell')
+        half = self.level_count // 2
+        if n_buys != n_sells or n_buys < half:
+            log.warning(
+                f"Grid asymmetric — placing {n_buys} buys + {n_sells} sells "
+                f"(XRP held insufficient for full sell ladder)"
+            )
+
         size = self.compute_order_size(centre)
 
         placed = 0
@@ -490,24 +503,8 @@ class GridEngine:
         return xrp, usd, net_usd, skew
 
     def _get_live_balances(self):
-        """Fetch live XRP and USD balances from Coinbase."""
-        try:
-            path = "/api/v3/brokerage/accounts"
-            headers = self._get_jwt_headers("GET", path)
-            r = requests.get(f"{COINBASE_REST}/accounts",
-                             headers=headers, timeout=10)
-            r.raise_for_status()
-            accounts = r.json().get('accounts', [])
-            xrp = usd = 0.0
-            for acc in accounts:
-                if acc.get('currency') == 'XRP':
-                    xrp = float(acc.get('available_balance', {}).get('value', 0))
-                elif acc.get('currency') == 'USD':
-                    usd = float(acc.get('available_balance', {}).get('value', 0))
-            return xrp, usd
-        except Exception as e:
-            log.error(f"Balance fetch failed: {e}")
-            return 0.0, 0.0
+        """Fetch live XRP and USD balances from the exchange."""
+        return self.exchange.get_balances()
 
 
 if __name__ == "__main__":
