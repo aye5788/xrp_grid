@@ -113,9 +113,11 @@ class GridEngine:
                     # Persist the corrected baseline immediately
                     from database import upsert_inventory
                     price = self.get_current_price() or 0.0
-                    net_usd = xrp_real * price
-                    skew = net_usd / MAX_INVENTORY_USD if MAX_INVENTORY_USD > 0 else 0
-                    upsert_inventory(xrp_real, usd_real, net_usd, skew)
+                    xrp_value_usd = xrp_real * price
+                    total_universe_usd = xrp_value_usd + usd_real
+                    target_xrp_value = total_universe_usd / 2
+                    allocation_skew = (xrp_value_usd - target_xrp_value) / total_universe_usd if total_universe_usd > 0 else 0
+                    upsert_inventory(xrp_real, usd_real, xrp_value_usd, allocation_skew)
                 else:
                     log.error("[PAPER RESET] Kraken returned zero balances; falling back to defaults")
                     self.paper_inventory = {'xrp': 0.0, 'usd': 100.0}
@@ -497,10 +499,15 @@ class GridEngine:
         else:
             xrp, usd = self._get_live_balances()
 
-        net_usd = xrp * price
-        skew = net_usd / MAX_INVENTORY_USD if MAX_INVENTORY_USD > 0 else 0
-        upsert_inventory(xrp, usd, net_usd, skew)
-        return xrp, usd, net_usd, skew
+        xrp_value_usd = xrp * price
+        total_universe_usd = xrp_value_usd + usd
+        target_xrp_value = total_universe_usd / 2
+        allocation_skew = (xrp_value_usd - target_xrp_value) / total_universe_usd if total_universe_usd > 0 else 0
+
+        # net_usd column kept for backward compatibility; now stores xrp_value_usd
+        # inventory_skew column kept for backward compatibility; now stores allocation_skew
+        upsert_inventory(xrp, usd, xrp_value_usd, allocation_skew)
+        return xrp, usd, xrp_value_usd, allocation_skew
 
     def _get_live_balances(self):
         """Fetch live XRP and USD balances from the exchange."""

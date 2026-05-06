@@ -18,20 +18,24 @@ def build_context(indicators: dict, inventory: dict, grid_state: dict, current_p
     usd = inventory.get('usd_held') or 0
     price_ok = current_price is not None and current_price > 0
 
-    if price_ok:
-        xrp_value_usd = xrp * current_price
-        total_value_usd = xrp_value_usd + usd
-        capital_deployed_usd = xrp_value_usd
-        capital_free_usd = MAX_INVENTORY_USD - capital_deployed_usd
-        drawdown_pct = (total_value_usd - MAX_INVENTORY_USD) / MAX_INVENTORY_USD * 100
-        pct_deployed = capital_deployed_usd / MAX_INVENTORY_USD * 100
+    inventory_skew_raw = inventory.get('inventory_skew')
 
-        budget_deployed    = f"${capital_deployed_usd:.2f} ({pct_deployed:.1f}% of budget)"
-        budget_free        = f"${capital_free_usd:.2f}"
-        budget_total       = f"${total_value_usd:.2f}"
-        budget_drawdown    = f"{drawdown_pct:+.1f}%"
+    if price_ok:
+        xrp_value_usd       = xrp * current_price
+        total_universe_usd  = xrp_value_usd + usd
+        target_xrp_value    = total_universe_usd / 2
+        allocation_skew     = (xrp_value_usd - target_xrp_value) / total_universe_usd if total_universe_usd > 0 else 0
+        xrp_pct_of_universe = xrp_value_usd / total_universe_usd * 100 if total_universe_usd > 0 else 0
+        inv_skew_fmt        = f"{inventory_skew_raw:+.3f}" if inventory_skew_raw is not None else 'NULL'
+
+        portfolio_block = f"""PORTFOLIO STATE:
+- total_universe_usd: ${total_universe_usd:.2f}  (sum of XRP value + USD held)
+- xrp_value_usd: ${xrp_value_usd:.2f}  ({xrp_pct_of_universe:.1f}% of universe)
+- usd_held: ${usd:.2f}
+- allocation_skew: {allocation_skew:+.3f}  (range ±1; 0 = balanced 50/50, +1 = all XRP, -1 = all USD)
+- inventory_skew (DB): {inv_skew_fmt}"""
     else:
-        budget_deployed = budget_free = budget_total = budget_drawdown = "NULL (price unavailable)"
+        portfolio_block = "PORTFOLIO STATE: NULL (price unavailable)"
 
     return f"""CURRENT RISK STATE — XRP/USD GRID BOT
 
@@ -48,12 +52,7 @@ Grid State:
 - pause_shorts: {grid_state.get('pause_shorts', 0)}
 - halt: {grid_state.get('halt', 0)}
 
-Budget State (ring-fenced $50 USD):
-- allocated_budget_usd: {MAX_INVENTORY_USD:.2f}
-- capital_deployed_usd: {budget_deployed}
-- capital_free_usd: {budget_free}
-- total_value_usd: {budget_total}
-- drawdown_pct: {budget_drawdown}
+{portfolio_block}
 
 Market:
 - vol_regime: {indicators.get('vol_regime', 'NULL')}
