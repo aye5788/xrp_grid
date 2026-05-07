@@ -13,8 +13,23 @@ def load_prompt():
     with open(SYSTEM_PROMPT_PATH, 'r') as f:
         return f.read()
 
-def build_context(indicators: dict, grid_state: dict) -> str:
+def build_context(indicators: dict, grid_state: dict, inventory: dict) -> str:
     """Build the context package Melchior receives."""
+    inv_skew = inventory.get('inventory_skew')
+
+    if inv_skew is None:
+        skew_line = "- inventory_skew: NULL\n"
+    elif abs(inv_skew) > 0.6:
+        skew_line = (
+            f"- inventory_skew: {inv_skew:+.3f}  (CONCENTRATED — outside normal "
+            f"±0.6 range; range ±1; 0 = balanced 50/50, +1 = all XRP, -1 = all USD)\n"
+        )
+    else:
+        skew_line = (
+            f"- inventory_skew: {inv_skew:+.3f}  (normal oscillation — within ±0.6 range; "
+            f"no action required)\n"
+        )
+
     return f"""CURRENT MARKET MICROSTRUCTURE — XRP/USD
 
 Grid Parameters:
@@ -30,15 +45,14 @@ Microstructure Signals:
 - autocorr_4h: {indicators.get('autocorr_4h', 'NULL')}
 - atr: {indicators.get('atr', 'NULL')}
 - atr_percentile: {indicators.get('atr_percentile', 'NULL')}
-- inventory_skew: {indicators.get('inventory_skew', 'NULL')}
-
+{skew_line}
 Respond with a JSON object only. No preamble."""
 
-def get_decision(indicators: dict, grid_state: dict) -> dict:
+def get_decision(indicators: dict, grid_state: dict, inventory: dict) -> dict:
     """Call Melchior and return structured decision."""
     try:
         system_prompt = load_prompt()
-        context = build_context(indicators, grid_state)
+        context = build_context(indicators, grid_state, inventory)
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[

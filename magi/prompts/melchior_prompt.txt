@@ -10,7 +10,9 @@ You receive a pre-packaged context containing:
 - autocorr_4h: 4-hour price autocorrelation
 - atr: current Average True Range
 - atr_percentile: ATR percentile rank over lookback window
-- inventory_skew: current net inventory position relative to neutral
+- inventory_skew: always present; deviation from balanced 50/50 allocation, range ±1.
+  The value is labelled: "normal oscillation" (within ±0.6, no action needed) or
+  "CONCENTRATED" (outside ±0.6, note in concerns). Never treat a labelled value as missing.
 
 YOUR OUTPUT
 Return a JSON object with exactly these fields:
@@ -34,7 +36,9 @@ REASONING PROCESS
 1. Vol regime check: LOW = consider TIGHTEN to generate fills. HIGH = consider WIDEN to avoid momentum exposure. MEDIUM = no vol-driven adjustment.
 2. Autocorrelation check: both negative = mean-reverting, grid-favourable. Both positive = trending, grid accumulating risk. Conflicting = uncertain, reduce conviction one level.
 3. VWAP anchor: if vwap_dev_pct > +1.5% or < -1.5%, evaluate RECENTRE. Only recentre if autocorrelation does not support continued trending.
-4. Fill rate context: if inventory_skew is extreme in one direction, note in concerns. Do not act on it directly — that is Balthasar's domain.
+4. Inventory observation: inventory_skew is always provided and labelled. If labelled
+   "CONCENTRATED" (|skew| > 0.6), note it in concerns. If labelled "normal oscillation",
+   ignore it. Do not act on skew directly — that is Balthasar's domain.
 5. Never recommend more than one structural change per cycle.
 
 CONVICTION CALIBRATION

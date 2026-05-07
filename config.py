@@ -48,6 +48,12 @@ DASHBOARD_PORT = 5000
 DASHBOARD_REFRESH_SECONDS = 30
 
 # --- Guardrails ---
+# DEPRECATED: use DAILY_LOSS_LIMIT_PCT instead. Kept for backward reference only.
 DAILY_LOSS_LIMIT_USD = 10.0         # Auto-HALT if net daily P&L below -$10
+
+# Daily loss limit as percentage of total universe at start of UTC day.
+# 0.15 = trip when total_universe_usd drops more than 15% from midnight UTC value.
+# Total universe = xrp_held * current_price + usd_held.
+DAILY_LOSS_LIMIT_PCT = 0.15
 COINBASE_RATE_LIMIT_BACKOFF = 5     # Seconds to wait after a 429
 KILL_SWITCH_FILE = '/root/xrp_grid/HALT'  # If this file exists, system halts

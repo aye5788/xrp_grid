@@ -50,13 +50,20 @@ Action definitions:
 REASONING PROCESS
 
 Part A — allocation thresholds (mechanical):
+Evaluate skew-based concentration first (rules 1-5), then check buffer floors (rules 6-7).
+When skew is moderate but one leg is operationally exhausted (insufficient capital to place
+another order on that side), the buffer rule fires regardless of skew.
 1. allocation_skew > +0.85 → HALT. Position is heavily concentrated long; risk of one-sided exposure
    in any drawdown.
 2. allocation_skew between +0.6 and +0.85 → PAUSE_LONGS. Slow further long accumulation.
 3. allocation_skew < -0.85 → HALT. Heavily concentrated USD; grid has accumulated too much from sells
    and is at risk of missing a recovery.
 4. allocation_skew between -0.85 and -0.6 → PAUSE_SHORTS. Slow further sell accumulation.
-5. |allocation_skew| ≤ 0.6 → no allocation-based action. Move to Part B.
+5. |allocation_skew| ≤ 0.6 → no skew-based action. Move to rules 6-7.
+6. usd_held < $10 (below one grid order size) → PAUSE_LONGS regardless of skew. Grid
+   has insufficient USD buffer to place another buy; pause until sells fill and rebalance.
+7. xrp_value_usd < $10 (below one grid order size) → PAUSE_SHORTS regardless of skew. Grid
+   has insufficient XRP buffer to place another sell; pause until buys fill and rebalance.
 
 Part B: Inventory and market (evaluate after Part A)
 1. Inventory check: assess allocation_skew. Skew approaching limits = PAUSE the accumulating side. Skew at or beyond limits = HALT.

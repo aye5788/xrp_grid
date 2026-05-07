@@ -75,7 +75,7 @@ def run_cycle(trigger='scheduled', force=False):
         log.warning("No current price for Balthasar budget context — proceeding with NULL")
 
     log.info("Calling MAGI agents (stateless)...")
-    melchior = melchior_stateless(indicators, grid_state)
+    melchior = melchior_stateless(indicators, grid_state, inventory)
     balthasar = balthasar_stateless(indicators, inventory, grid_state, current_price)
     casper = casper_stateless(indicators)
 
