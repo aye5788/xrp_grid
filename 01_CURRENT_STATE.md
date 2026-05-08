@@ -1,6 +1,6 @@
 # MAGI XRP Grid Bot — Current State
 
-**Last updated:** 2026-05-07
+**Last updated:** 2026-05-08
 
 ---
 
@@ -30,6 +30,13 @@
 - **Melchior inventory_skew fully wired.** Fixed three-line bug across `magi/melchior.py` and `magi/orchestrator.py` where inventory dict was fetched but never passed to Melchior, and the prompt template looked it up from the wrong dict (indicators instead of inventory). Now Melchior sees the same allocation skew Balthasar sees. The field is conditionally included in Melchior's context only when `|skew| > 0.6` (concentrated state); within normal range it's omitted, since Melchior doesn't make decisions on inventory anyway. Range annotation added: `(range ±1; 0 = balanced 50/50, +1 = all XRP, -1 = all USD)`.
 - **Directional concentration cap in place_order.** Replaces the prior size-based cap that compared `net_position_usd` against `MAX_INVENTORY_USD`. After the 2026-05-06 risk-math reframe, `net_position_usd` stores mark-to-market XRP value, not deployment — so the old cap tripped whenever `xrp_value > $50` regardless of direction, blocking sells that would reduce concentration. New behavior: read `allocation_skew` from the latest inventory row (stored in the legacy-named `inventory_skew` column), block buys when `skew > +0.90`, block sells when `skew < -0.90`. Otherwise allow. Threshold sits just above Balthasar's HALT at ±0.85 so the cap is a deterministic backstop, not a primary control. Rejected orders log `rejected_concentration`.
 - **Casper regime detection (2026-05-07):** tightened to escalate biased chop (low ADX + bearish EMA stack + negative momentum) to TRENDING. Added current_price, autocorr_1h, autocorr_4h to Casper's context. EMA structure now co-primary with ADX.
+- **Dashboard chart vertical scaling fixed (2026-05-08).** Added `rightPriceScale` config to Lightweight Charts v4.2.3 createChart() call in dashboard.py with `scaleMargins: {top: 0.2, bottom: 0.2}`. Chart no longer compresses vertically when price stays in a tight range.
+
+- **Open order book context added to Melchior and Balthasar (2026-05-08).** New `get_open_orders_summary()` function in database.py queries open orders by side and price, plus fills from the last 24h. Melchior receives a compact "Order Ladder" block (buy count, highest bid, sell count, lowest ask, 24h fill count). Balthasar receives "Order Book Exposure" and "Recent Fills (last 24h)" blocks. Both agents now have visibility into the live order ladder when making decisions.
+
+- **Historical base rates injected into all three agent prompts (2026-05-08).** Empirical forward-return statistics block appended to casper_prompt.txt, melchior_prompt.txt, and balthasar_prompt.txt. Derived from 46,300 hours of XRP/USD hourly data (Jan 2021 - May 2026). Block covers: bearish chop analog stats (647 bars, 67.4% 7d win rate), regime duration characteristics, BB-width and volume context, drawdown-before-recovery distribution, and broader bearish stack base rates. Static block — agents use as calibration, not prediction.
+
+- **Paper inventory reset to balanced 50/50 state (2026-05-08).** Paper inventory was drifted to xrp=48.4, usd=$1.30 (nearly all XRP, no USD) due to accumulated buy fills with no USD to place new buys. Reset to xrp=24.83, usd=$35.00, skew=0.000 at price $1.4093. Grid rebuilt with 3 buys + 3 sells. System is now operating two-sided. Root cause: paper mode has no rebalancing mechanism — when USD is depleted, buy ladder cannot be funded. Resolution: one-time manual reset. Future fix: note in deferred tasks.
 
 ---
 
@@ -65,6 +72,23 @@ The exchange is Kraken Spot REST API, paper mode (`engine.paper = True`). No rea
 - DB columns `inventory.inventory_skew` and `inventory.net_position_usd` store different conceptual values post-2026-05-06 than they did pre-fix. The schema is unchanged for backward compatibility, but the values written are now `allocation_skew` and `xrp_value_usd` respectively. Old data (rows before 2026-05-06 ~17:58 UTC) used the prior formula and should be treated as not directly comparable to new rows.
 - **The system has TWO services, not one.** `magi.service` runs `python3 -m scheduler` (handles startup cycles, scheduled cycles at 9 AM / 2 PM EST, observer polling). `magi-dashboard.service` runs `python3 -m dashboard` (handles all Flask API requests including `/api/trigger_magi` and dashboard page rendering). Both must be restarted after any code change in shared modules (`magi/*.py`, `database.py`, `config.py`, `grid/engine.py`, etc.). Restarting only `magi.service` after a code change leaves the dashboard process running stale code, which produces inconsistent behavior — scheduled cycles see new code, manual triggers see old code. Standard restart command: `systemctl restart magi.service magi-dashboard.service`.
 - **Kraken account is bot-only.** Operator does not manually deposit, withdraw, or trade on Kraken outside the bot's activity. All inventory changes reflect bot fills. Daily loss guardrail's universe-delta metric is therefore a clean P&L signal — no manual capital movement noise to filter out.
+- **Historical base-rate analysis completed (2026-05-08).** 46,300 hours of XRP/USD hourly OHLCV pulled from FMP API (Jan 2021 - May 2026, Starter plan). Dataset stored in operator's Google Colab/Drive as xrp_hourly.csv. Six analyses completed: regime transitions, current streak context, regime age vs forward return, BB-width clustering, volume profile, drawdown before recovery. Key findings:
+  - Bearish chop regime (ADX≤20, EMA-50<EMA-200, price >5% below EMA-200, negative ROC-6h): 647 analog bars, 7d win rate 67.4%, mean +3.23%
+  - Episodes short-lived: median 2h, max 13h. Resolves UP 52.9%.
+  - Only early-stage bars exist (all <12h) — regime is inherently transient
+  - Compressed BB-width (current): 7d win rate 64.1% vs 70.7% expanded
+  - High volume bearish chop: 7d win rate 69.8% vs 65.0% low volume
+  - 7d winners: median max drawdown before recovery -3.12%; 51.8% drew down >3% first; only 21.1% went up without >1% dip
+  - Broader bearish stack (EMA-50<EMA-200 only): 7d win rate 50.8% — edge exists only in tight-filter regime
+  - Refresh dataset quarterly or when regime changes materially
+- **FMP API surveyed (2026-05-08).** Starter plan confirmed, 5-year historical limit. Subscription ended after session. Worth revisiting if re-subscribed:
+  - `search-crypto-news` (XRPUSD): best candidate for Balthasar tail-risk context, 5 headlines per call
+  - `treasury-rates`: daily 10y yield, useful as monthly macro signal
+  - `economics-indicators` (CPI/GDP): monthly, low priority
+  - Technical indicators endpoint: not worth it, we compute ourselves
+  - EOD historical: not worth it, hourly is strictly better
+
+- **CDN caching clarification (2026-05-08).** Cache-busting query strings (?bust=...) do NOT work on raw.githubusercontent.com — Fastly ignores query strings entirely. TTL is 5 minutes. After magi-sync, wait 5+ minutes before opening a new Claude session. Only reliable fixes: (a) wait for TTL or (b) paste content directly from droplet via cat. 03_INSTRUCTIONS_TO_CLAUDE.md updated to reflect this.
 
 ---
 

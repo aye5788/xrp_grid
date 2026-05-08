@@ -14,6 +14,8 @@ def load_prompt():
         return f.read()
 
 def build_context(indicators: dict, inventory: dict, grid_state: dict, current_price=None) -> str:
+    from database import get_open_orders_summary
+    orders = get_open_orders_summary()
     xrp = inventory.get('xrp_held') or 0
     usd = inventory.get('usd_held') or 0
     price_ok = current_price is not None and current_price > 0
@@ -37,6 +39,17 @@ def build_context(indicators: dict, inventory: dict, grid_state: dict, current_p
     else:
         portfolio_block = "PORTFOLIO STATE: NULL (price unavailable)"
 
+    if orders['recent_fills']:
+        fills_lines = '\n'.join([
+            f"  {f['side'].upper()} filled @ "
+            f"{f.get('fill_price') or f.get('price', '?'):.4f} "
+            f"({f.get('size', 0):.2f} XRP) at "
+            f"{(f.get('filled_at') or '')[:16]}"
+            for f in orders['recent_fills']
+        ])
+    else:
+        fills_lines = "  none in last 24h"
+
     return f"""CURRENT RISK STATE — XRP/USD GRID BOT
 
 Inventory:
@@ -58,6 +71,15 @@ Market:
 - vol_regime: {indicators.get('vol_regime', 'NULL')}
 - vwap_dev_pct: {indicators.get('vwap_dev_pct', 'NULL')}%
 - atr_percentile: {indicators.get('atr_percentile', 'NULL')}
+
+Order Book Exposure:
+- open_buys: {orders['buy_count']} orders (will accumulate XRP inventory if filled)
+- open_sells: {orders['sell_count']} orders (will reduce XRP inventory if filled)
+- highest_buy_price: {orders['highest_buy']}
+- lowest_sell_price: {orders['lowest_sell']}
+
+Recent Fills (last 24h):
+{fills_lines}
 
 You must respond with a valid JSON object only. No preamble, no explanation outside the JSON."""
 

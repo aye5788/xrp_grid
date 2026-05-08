@@ -15,6 +15,8 @@ def load_prompt():
 
 def build_context(indicators: dict, grid_state: dict, inventory: dict) -> str:
     """Build the context package Melchior receives."""
+    from database import get_open_orders_summary
+    orders = get_open_orders_summary()
     inv_skew = inventory.get('inventory_skew')
 
     if inv_skew is None:
@@ -46,6 +48,11 @@ Microstructure Signals:
 - atr: {indicators.get('atr', 'NULL')}
 - atr_percentile: {indicators.get('atr_percentile', 'NULL')}
 {skew_line}
+Order Ladder (live open orders):
+- open_buys: {orders['buy_count']} orders, highest bid: {orders['highest_buy']}
+- open_sells: {orders['sell_count']} orders, lowest ask: {orders['lowest_sell']}
+- fills last 24h: {len(orders['recent_fills'])} fills
+
 Respond with a JSON object only. No preamble."""
 
 def get_decision(indicators: dict, grid_state: dict, inventory: dict) -> dict:

@@ -488,6 +488,13 @@ CHART_HTML_TEMPLATE = """<!DOCTYPE html>
             timeVisible: true,
             secondsVisible: false,
         },
+        rightPriceScale: {
+            autoScale: true,
+            scaleMargins: {
+                top: 0.2,
+                bottom: 0.2,
+            },
+        },
     });
 
     var candleSeries = chart.addCandlestickSeries({

@@ -246,6 +246,41 @@ def get_recent_grid_orders(limit=50):
     return [dict(r) for r in rows]
 
 
+def get_open_orders_summary():
+    """Return open order counts, prices, and recent fills for agent context."""
+    from datetime import timedelta
+    conn = get_conn()
+
+    open_rows = conn.execute(
+        "SELECT side, price, size FROM grid_orders WHERE status='open' "
+        "ORDER BY price ASC"
+    ).fetchall()
+
+    cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat()
+    fill_rows = conn.execute(
+        "SELECT side, fill_price, price, size, filled_at FROM grid_orders "
+        "WHERE status='filled' AND filled_at >= ? "
+        "ORDER BY filled_at DESC LIMIT 10",
+        (cutoff,)
+    ).fetchall()
+
+    conn.close()
+
+    buys  = [dict(r) for r in open_rows if r['side'] == 'buy']
+    sells = [dict(r) for r in open_rows if r['side'] == 'sell']
+    fills = [dict(r) for r in fill_rows]
+
+    return {
+        'open_buys':     buys,
+        'open_sells':    sells,
+        'recent_fills':  fills,
+        'buy_count':     len(buys),
+        'sell_count':    len(sells),
+        'highest_buy':   max((b['price'] for b in buys),  default=None),
+        'lowest_sell':   min((s['price'] for s in sells), default=None),
+    }
+
+
 def get_fills_today_count():
     conn = get_conn()
     today = date.today().isoformat()

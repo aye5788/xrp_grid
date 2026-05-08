@@ -29,6 +29,15 @@ Beyond the immediate post-fix window, the same observation questions from before
 
 ## Next tasks
 
+### Paper inventory auto-rebalance
+Paper mode has no rebalancing mechanism. When fills skew heavily to one side, the grid loses the ability to place orders on the other side (USD depleted = no buys; XRP depleted = no sells). Required manual reset on 2026-05-08. Options: (a) periodic rebalance back to 50/50 when skew exceeds threshold, or (b) synthetic inventory floor in paper mode that prevents either leg from hitting zero. Decision: option (b) preferred — simpler, doesn't interfere with P&L accounting.
+
+### XRP news feed for Balthasar (requires FMP re-subscription)
+Wire `search-crypto-news` (XRPUSD) into the MAGI cycle. One FMP API call per cycle, last 5 headlines, passed as `news_headlines` field in Balthasar's build_context(). Gives Balthasar visibility into tail-risk events (SEC rulings, exchange delistings, Ripple news) that technical indicators don't capture. Implementation: add call in magi/orchestrator.py before Balthasar prompt construction. No schema changes required. Blocked on active FMP subscription.
+
+### Weekly synthesis / learning loop (deferred — wait for live data)
+Offline weekly job that reads last 7 days of magi_decisions + grid_orders fills, runs a single LLM call asking for pattern synthesis, writes output to magi/knowledge/weekly_synthesis.md (capped at ~500 words, full rewrite not append). File injected into all three agent prompts. Concept: same as Anthropic's "Dreams" product but hand-rolled, multi-model compatible, SQLite-backed. Key design decision: replacement loop not accumulation loop — file stays bounded regardless of history length. Raw data stays in SQLite forever (cheap); distilled knowledge stays flat. DO NOT BUILD until 2-3 months of clean live trading data exists — synthesizing from paper data or broken-period data risks encoding artifacts as market wisdom.
+
 ### Shadow simulator spot fix
 
 The shadow simulator (`grid/shadow_simulator.py`) has the same impossible-fill bug pattern that was fixed in the live engine. It accepts fills regardless of its own simulated inventory — XRP supply is effectively unlimited in its model. Shadow rolling P&L percentages are directional comparisons between variants, not spot-realistic P&L figures.
@@ -91,7 +100,7 @@ Run the grid strategy + shadow simulator against historical XRP OHLCV data to va
 
 - **Recent-context analytics layer.** New module `magi/analytics.py` running SQL summaries against existing tables (candles, indicators, magi_decisions, grid_orders, inventory) producing short text summaries injected into each agent's prompt context. Per-agent isolation. Captures recent indicator trajectories, recent agent decision history, recent fill outcomes. Hand-rolled, not framework-based — every framework surveyed (Mem0, Letta, ByteRover, Hindsight, LangMem, Hermes-holographic, smysle/agent-memory) was wrong shape for our case (vector DB overhead, runtime takeover, wrong language, or built for chatbot conversation memory we don't have). Our shape: structured JSON decisions per cycle, recency-ordered retrieval, per-agent isolation, SQLite-already-present.
 
-- **Historical base-rate analysis (separate side project).** Pull XRP/USD hourly OHLCV from Kraken's downloadable historical archive (Google-Drive-hosted ZIP, support article 360047124832, ~11 years of hourly data for XRPUSD, refreshes quarterly). Compute the same indicators observer.py uses across the full history. Build conditional pattern dataset: for each historical bar, record indicator state and forward-return distributions at 4h, 24h, 7d windows. Surface base-rate summaries to agents as "in N historical instances of similar conditions, forward-return distribution was X." Lives separately from the live system; refreshed quarterly when Kraken publishes incremental ZIPs. Decoupled from runtime, no API dependency at runtime.
+- **Historical base-rate analysis — COMPLETED 2026-05-08.** 46,300 hours of XRP/USD hourly OHLCV pulled from FMP API (Jan 2021 - May 2026). Six analyses completed. Base rates injected into all three agent prompts as static calibration block. Dataset in operator's Colab/Drive (xrp_hourly.csv). Refresh quarterly or when regime changes materially.
 
 - **Architectural framing recorded from this session:** agents currently make decisions against state snapshots with no shared sense of trajectory or strategy outcome. Today's failure (Casper RANGING + grid bleed) was a symptom of this gap, not just a Casper-prompt bug. The recent-context analytics layer addresses tactical recall. The historical base-rate analysis addresses pattern knowledge. Both are needed; Casper prompt fix was the minimum bounded change to address tonight's specific failure.
 
