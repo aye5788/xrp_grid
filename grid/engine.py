@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import time
 import uuid
 from datetime import datetime, timezone
@@ -9,7 +10,9 @@ from config import (
     COINBASE_API_KEY, COINBASE_API_SECRET,
     SYMBOL, GRID_LEVELS_DEFAULT, GRID_SPACING_PCT,
     TAKER_FEE, MAKER_FEE, MAX_INVENTORY_USD,
-    DB_PATH, EXCHANGE
+    DB_PATH, EXCHANGE,
+    LIVE_CONFIRMATION_FILE, LIVE_CONFIRMATION_TOKEN,
+    LIVE_CONFIRMATION_ENV_VAR, LIVE_CONFIRMATION_ENV_VALUE,
 )
 from database import (
     insert_grid_state, get_current_grid_state,
@@ -42,10 +45,31 @@ class GridEngine:
         else:
             raise ValueError(f"Unknown exchange: {EXCHANGE}")
 
-        if not self.paper:
-            log.warning("LIVE MODE ACTIVE — real orders will be placed")
-        else:
+        if self.paper:
+            log.info("Two-factor live gate: not consulted (paper mode active)")
             log.info("Paper mode active — no real orders will be placed")
+        else:
+            gate_1_env = os.environ.get(LIVE_CONFIRMATION_ENV_VAR) == LIVE_CONFIRMATION_ENV_VALUE
+            gate_2_file = os.path.isfile(LIVE_CONFIRMATION_FILE)
+            if gate_2_file:
+                gate_3_token = open(LIVE_CONFIRMATION_FILE).read() == LIVE_CONFIRMATION_TOKEN
+                gate_3_label = "PASS" if gate_3_token else "FAIL (content mismatch)"
+            else:
+                gate_3_token = False
+                gate_3_label = "skipped — file does not exist"
+            log.error(f"Live gate — gate_1_env ({LIVE_CONFIRMATION_ENV_VAR}={LIVE_CONFIRMATION_ENV_VALUE}): {'PASS' if gate_1_env else 'FAIL'}")
+            log.error(f"Live gate — gate_2_file ({LIVE_CONFIRMATION_FILE}): {'PASS' if gate_2_file else 'FAIL'}")
+            log.error(f"Live gate — gate_3_token: {gate_3_label}")
+            if gate_1_env and gate_2_file and gate_3_token:
+                log.warning("LIVE MODE ACTIVE — all three confirmation gates passed — real orders will be placed")
+            else:
+                failed = [name for name, passed in [
+                    ("gate_1_env", gate_1_env),
+                    ("gate_2_file", gate_2_file),
+                    ("gate_3_token", gate_3_token),
+                ] if not passed]
+                log.error(f"Live mode refused — failed gates: {', '.join(failed)}")
+                raise RuntimeError("Live mode refused — confirmation gates not satisfied. See log for details.")
 
     # --- State loading ---
 
@@ -289,14 +313,22 @@ class GridEngine:
                 order['status'] = 'rejected'
                 return order
 
-        # Position size hard cap
-        from config import MAX_INVENTORY_USD
+        # Concentration cap — directional backstop above Balthasar's HALT (±0.85).
+        # Reads allocation_skew (stored in the legacy-named inventory_skew column
+        # per the 2026-05-06 risk-math reframe). Blocks buys when XRP-heavy
+        # (skew > +0.90) and sells when USD-heavy (skew < -0.90). In normal
+        # operation Balthasar HALTs at ±0.85 first; this is a deterministic
+        # backstop only.
         from database import get_latest_inventory
         inv = get_latest_inventory() or {}
-        net_pos = abs(inv.get('net_position_usd', 0) or 0)
-        if net_pos >= MAX_INVENTORY_USD:
-            log.error(f"Position size cap reached: ${net_pos:.2f} >= ${MAX_INVENTORY_USD}")
-            order['status'] = 'rejected_size_cap'
+        skew = inv.get('inventory_skew', 0) or 0
+        if side == 'buy' and skew > 0.90:
+            log.error(f"Concentration cap reached: skew={skew:+.3f} > +0.90 — refusing buy")
+            order['status'] = 'rejected_concentration'
+            return order
+        if side == 'sell' and skew < -0.90:
+            log.error(f"Concentration cap reached: skew={skew:+.3f} < -0.90 — refusing sell")
+            order['status'] = 'rejected_concentration'
             return order
 
         if self.paper:

@@ -16,7 +16,19 @@ def load_prompt():
         return f.read()
 
 def build_context(indicators: dict) -> str:
+    current_price = None
+    try:
+        from database import get_candles
+        rows = get_candles('1h', limit=1)
+        if rows:
+            current_price = rows[0].get('close')
+    except Exception as e:
+        log.warning(f"Casper: failed to fetch current_price: {e}")
+
     return f"""CURRENT MARKET REGIME DATA — XRP/USD
+
+Price Context:
+- current_price: {current_price if current_price is not None else 'NULL'}
 
 Trend Indicators (Daily):
 - ema_50: {indicators.get('ema_50', 'NULL')}
@@ -30,6 +42,10 @@ Trend Indicators (Daily):
 
 Momentum (6h):
 - roc_6h: {indicators.get('roc_6h', 'NULL')}%
+
+Mean Reversion Signals:
+- autocorr_1h: {indicators.get('autocorr_1h', 'NULL')}
+- autocorr_4h: {indicators.get('autocorr_4h', 'NULL')}
 
 BTC Market Context (Daily):
 - btc_ema_50: {indicators.get('btc_ema_50', 'NULL')}

@@ -93,6 +93,12 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
+    <h2>LIVE CHART</h2>
+    <iframe src="/chart"
+            style="width:100%; height:480px; border:1px solid #00ff8844;
+                   border-radius:4px; background:#0a0a0a;"
+            scrolling="no"></iframe>
+
     <h2>Grid State</h2>
     <div class="grid">
         <div class="card">
@@ -425,6 +431,258 @@ HTML_TEMPLATE = """
 </html>
 """
 
+CHART_HTML_TEMPLATE = """<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>XRP/USD Live Chart</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0a0a; color: #00ff88; font-family: monospace; overflow: hidden; }
+        #chart-container { width: 100vw; height: 100vh; position: relative; }
+        #status {
+            position: absolute;
+            top: 8px;
+            left: 8px;
+            z-index: 10;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.75em;
+            background: rgba(0,0,0,0.6);
+            padding: 4px 8px;
+            border-radius: 3px;
+            pointer-events: none;
+        }
+        #status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #ffaa00;
+            display: inline-block;
+        }
+    </style>
+</head>
+<body>
+    <div id="chart-container">
+        <div id="status">
+            <span id="status-dot"></span>
+            <span id="status-text" style="color:#ffaa00;">CONNECTING</span>
+        </div>
+    </div>
+    <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
+    <script>
+    var container = document.getElementById('chart-container');
+    var chart = LightweightCharts.createChart(container, {
+        width: window.innerWidth,
+        height: window.innerHeight,
+        layout: {
+            background: { color: '#0a0a0a' },
+            textColor: '#00ff88',
+        },
+        grid: {
+            vertLines: { color: '#ffffff11' },
+            horzLines: { color: '#ffffff11' },
+        },
+        timeScale: {
+            timeVisible: true,
+            secondsVisible: false,
+        },
+    });
+
+    var candleSeries = chart.addCandlestickSeries({
+        upColor: '#00ff88',
+        downColor: '#ff4444',
+        borderUpColor: '#00ff88',
+        borderDownColor: '#ff4444',
+        wickUpColor: '#00ff88',
+        wickDownColor: '#ff4444',
+    });
+
+    window.addEventListener('resize', function() {
+        chart.applyOptions({ width: window.innerWidth, height: window.innerHeight });
+    });
+
+    var priceLines = [];
+    var ws = null;
+    var lastMessageAt = 0;
+    var reconnectAttempt = 0;
+    var reconnectTimer = null;
+    var backoffMs = 2000;
+    var backoffStartTime = null;
+
+    function setStatus(state) {
+        var dot = document.getElementById('status-dot');
+        var txt = document.getElementById('status-text');
+        if (state === 'live') {
+            dot.style.background = '#00ff88';
+            txt.textContent = 'LIVE';
+            txt.style.color = '#00ff88';
+        } else if (state === 'reconnecting') {
+            dot.style.background = '#ffaa00';
+            txt.textContent = 'RECONNECTING';
+            txt.style.color = '#ffaa00';
+        } else {
+            dot.style.background = '#ff4444';
+            txt.textContent = 'DISCONNECTED';
+            txt.style.color = '#ff4444';
+        }
+    }
+
+    function parseTime(rfc3339) {
+        return Math.floor(new Date(rfc3339).getTime() / 1000);
+    }
+
+    function drawGridLevels() {
+        fetch('/api/active_grid_levels')
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                priceLines.forEach(function(pl) { candleSeries.removePriceLine(pl); });
+                priceLines = [];
+
+                (data.levels || []).forEach(function(level) {
+                    var color = level.side === 'buy' ? '#00ff88' : '#ff4444';
+                    var title = level.side === 'buy'
+                        ? 'B@' + parseFloat(level.price).toFixed(4)
+                        : 'S@' + parseFloat(level.price).toFixed(4);
+                    var pl = candleSeries.createPriceLine({
+                        price: parseFloat(level.price),
+                        color: color,
+                        lineStyle: 0,
+                        lineWidth: 1,
+                        axisLabelVisible: true,
+                        title: title,
+                    });
+                    priceLines.push(pl);
+                });
+
+                if (data.centre_price != null) {
+                    var cpl = candleSeries.createPriceLine({
+                        price: parseFloat(data.centre_price),
+                        color: '#00ccff',
+                        lineStyle: 2,
+                        lineWidth: 2,
+                        axisLabelVisible: true,
+                        title: 'centre',
+                    });
+                    priceLines.push(cpl);
+                }
+            })
+            .catch(function(err) { console.error('Grid levels fetch failed:', err); });
+    }
+
+    drawGridLevels();
+    setInterval(drawGridLevels, 30000);
+
+    function connect() {
+        if (ws) {
+            ws.onclose = null;
+            ws.onerror = null;
+            try { ws.close(); } catch(e) {}
+            ws = null;
+        }
+
+        ws = new WebSocket('wss://ws.kraken.com/v2');
+
+        ws.onopen = function() {
+            reconnectAttempt = 0;
+            backoffMs = 2000;
+            backoffStartTime = null;
+            lastMessageAt = Date.now();
+            ws.send(JSON.stringify({
+                method: 'subscribe',
+                params: { channel: 'ohlc', symbol: ['XRP/USD'], interval: 5 }
+            }));
+        };
+
+        ws.onmessage = function(event) {
+            lastMessageAt = Date.now();
+            var msg;
+            try { msg = JSON.parse(event.data); } catch(e) { return; }
+
+            var channel = msg.channel;
+            var type = msg.type;
+
+            if (channel === 'heartbeat') {
+                return;
+            }
+
+            if (channel === 'ohlc') {
+                var data = msg.data || [];
+                if (type === 'snapshot') {
+                    console.log('Kraken OHLC snapshot: ' + data.length + ' bars received');
+                    var bars = data.map(function(c) {
+                        return {
+                            time: parseTime(c.interval_begin),
+                            open: c.open,
+                            high: c.high,
+                            low: c.low,
+                            close: c.close,
+                        };
+                    });
+                    candleSeries.setData(bars);
+                    setStatus('live');
+                } else if (type === 'update') {
+                    data.forEach(function(c) {
+                        candleSeries.update({
+                            time: parseTime(c.interval_begin),
+                            open: c.open,
+                            high: c.high,
+                            low: c.low,
+                            close: c.close,
+                        });
+                    });
+                    setStatus('live');
+                }
+            }
+        };
+
+        ws.onclose = function() {
+            if (backoffStartTime === null) {
+                backoffStartTime = Date.now();
+            }
+
+            reconnectAttempt++;
+            var delay;
+            if (reconnectAttempt === 1) {
+                delay = 0;
+            } else {
+                delay = Math.min(backoffMs, 30000);
+                backoffMs = Math.min(backoffMs * 2, 30000);
+            }
+
+            var elapsed = Date.now() - backoffStartTime;
+            if (elapsed > 60000) {
+                setStatus('disconnected');
+            } else {
+                setStatus('reconnecting');
+            }
+
+            clearTimeout(reconnectTimer);
+            reconnectTimer = setTimeout(connect, delay);
+        };
+
+        ws.onerror = function() {
+            try { ws.close(); } catch(e) {}
+        };
+    }
+
+    setInterval(function() {
+        if (lastMessageAt === 0) return;
+        var silent = Date.now() - lastMessageAt;
+        if (silent > 5000 && ws && ws.readyState === WebSocket.OPEN) {
+            ws.close();
+        } else if (silent <= 5000 && ws && ws.readyState === WebSocket.OPEN) {
+            setStatus('live');
+        }
+    }, 2000);
+
+    connect();
+    </script>
+</body>
+</html>
+"""
+
 def check_scheduler_alive():
     try:
         log_path = '/root/xrp_grid/magi.log'
@@ -656,6 +914,33 @@ def toggle_kill():
         return jsonify({'kill_switch': active})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/active_grid_levels')
+def api_active_grid_levels():
+    from database import get_conn, get_current_grid_state
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT order_id, side, price FROM grid_orders WHERE status='open' "
+        "ORDER BY price ASC"
+    ).fetchall()
+    conn.close()
+    levels = [
+        {'order_id': r['order_id'], 'side': r['side'], 'price': r['price']}
+        for r in rows
+    ]
+    grid_state = get_current_grid_state() or {}
+    return jsonify({
+        'levels': levels,
+        'centre_price': grid_state.get('centre_price'),
+        'spacing_pct': grid_state.get('spacing_pct'),
+        'level_count': grid_state.get('levels'),
+    })
+
+
+@app.route('/chart')
+def chart():
+    return CHART_HTML_TEMPLATE
 
 
 if __name__ == "__main__":
