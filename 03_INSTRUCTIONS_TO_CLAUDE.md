@@ -6,6 +6,23 @@ These instructions capture hard-won operating patterns for this codebase. Read b
 
 ---
 
+## Read first, every session
+
+Fetch these from the GitHub repo at the start of every session. ALWAYS append `?bust=v=1` to each URL to bypass raw.githubusercontent.com's CDN cache. Without the cache-busting query, recent magi-sync pushes may serve stale content for up to ten minutes per CDN node, causing the session to start with an out-of-date view of the system.
+
+1. https://raw.githubusercontent.com/aye5788/xrp_grid/main/00_PROJECT_OVERVIEW.md?bust=v=1 — what the system is
+2. https://raw.githubusercontent.com/aye5788/xrp_grid/main/01_CURRENT_STATE.md?bust=v=1 — where it is, what is verified
+3. https://raw.githubusercontent.com/aye5788/xrp_grid/main/02_NEXT_BUILD_TASKS.md?bust=v=1 — what to do next
+4. https://raw.githubusercontent.com/aye5788/xrp_grid/main/03_INSTRUCTIONS_TO_CLAUDE.md?bust=v=1 — operating rules (this file)
+5. The connected GitHub repo (aye5788/xrp_grid) — actual current code
+6. The most recent prior session if context relevant
+
+Do not start working until you have read these. If the operator opens with a task, still read these first — most "questions" are actually answered in the docs and you will waste a turn re-deriving it.
+
+Operational note on CDN caching: raw.githubusercontent.com serves files through a cache layer. Different CDN nodes can serve different versions of the same file for up to ten minutes after a magi-sync push, depending on which cache node a given client hits. If a fetch returns content that contradicts what the operator says is on the droplet, the most likely cause is a stale CDN response, NOT a sync failure. Re-fetch with a different cache-bust value (e.g. `?bust=v=2`) to confirm. Do not assume content was lost or never pushed without first confirming via cache-bust.
+
+---
+
 ## Workflow patterns to use
 
 ### Restart procedure — when code changes are deployed
