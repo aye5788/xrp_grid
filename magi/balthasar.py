@@ -14,7 +14,8 @@ def load_prompt():
         return f.read()
 
 def build_context(indicators: dict, inventory: dict, grid_state: dict, current_price=None) -> str:
-    from database import get_open_orders_summary
+    from database import get_open_orders_summary, get_trajectory_context
+    traj = get_trajectory_context()
     orders = get_open_orders_summary()
     xrp = inventory.get('xrp_held') or 0
     usd = inventory.get('usd_held') or 0
@@ -80,6 +81,13 @@ Order Book Exposure:
 
 Recent Fills (last 24h):
 {fills_lines}
+
+Trajectory Context:
+- skew_delta (change since last cycle): {traj['skew_delta']} (negative = improving if currently long-skewed)
+- skew_trend (last 5 snapshots): {traj['skew_trend']} (stable / worsening_long / worsening_short)
+- fills_since_last_magi: {traj['fills_since_last_magi_buys']} buys / {traj['fills_since_last_magi_sells']} sells
+- casper_regime_consecutive_cycles: {traj['regime_consecutive']}
+- pause_longs_active: {traj['pause_longs_active']} | pause_shorts_active: {traj['pause_shorts_active']}
 
 You must respond with a valid JSON object only. No preamble, no explanation outside the JSON."""
 

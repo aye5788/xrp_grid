@@ -30,7 +30,6 @@ log = logging.getLogger('scheduler')
 # Schedule config (EST)
 OBSERVER_INTERVAL_MINUTES = 60
 MAGI_HOURS_EST = [9, 14]   # 9AM and 2PM EST
-LEARNING_HOUR_EST = 17     # 5PM EST — manual trigger only for now
 
 EST = ZoneInfo('America/New_York')
 
@@ -155,8 +154,20 @@ def main():
     # If load_state() restored an existing order book, resume that book instead
     # of placing duplicates.
     if not engine.paper_orders:
-        log.info("No paper orders restored — initialising fresh grid on startup")
-        engine.initialise_grid()
+        # Check pause flags before rebuilding — don't undo an active pause.
+        # PAUSE_LONGS cancels all buy orders; if we rebuilt here, the pause
+        # would be silently undone on every restart.
+        from database import get_current_grid_state
+        gs = get_current_grid_state() or {}
+        if gs.get('pause_longs') or gs.get('pause_shorts'):
+            log.info(
+                f"Startup: pause_longs={gs.get('pause_longs')} "
+                f"pause_shorts={gs.get('pause_shorts')} active — "
+                f"skipping grid rebuild to preserve pause state"
+            )
+        else:
+            log.info("No paper orders restored — initialising fresh grid on startup")
+            engine.initialise_grid()
     else:
         log.info(f"Resumed {len(engine.paper_orders)} paper orders from DB — skipping fresh grid init")
 
@@ -164,7 +175,33 @@ def main():
     run_magi_cycle(trigger='startup')
 
     last_observer_time = datetime.now(timezone.utc)
-    last_magi_hour = -1
+
+    # Initialize from DB to avoid duplicate cycle on restart.
+    # If a cycle already ran in the current EST hour, don't re-fire.
+    try:
+        from database import get_recent_magi_decisions
+        import pytz
+        recent = get_recent_magi_decisions(limit=1)
+        if recent:
+            last_ts = recent[0].get('timestamp', '')
+            est = pytz.timezone('US/Eastern')
+            last_dt = datetime.fromisoformat(last_ts).replace(
+                tzinfo=timezone.utc).astimezone(est)
+            now_est = datetime.now(timezone.utc).astimezone(est)
+            # If last decision was in the current calendar hour,
+            # mark that hour as done
+            if (last_dt.date() == now_est.date() and
+                    last_dt.hour == now_est.hour):
+                last_magi_hour = last_dt.hour
+                log.info(f"Scheduler restart: MAGI already ran at "
+                         f"{last_dt.strftime('%H:%M')} EST — skipping re-fire")
+            else:
+                last_magi_hour = -1
+        else:
+            last_magi_hour = -1
+    except Exception as e:
+        log.warning(f"Could not read last MAGI time from DB: {e} — defaulting to -1")
+        last_magi_hour = -1
 
     log.info("Scheduler running — observer every 60min, MAGI at 9AM and 2PM EST")
 

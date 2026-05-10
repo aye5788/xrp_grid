@@ -30,6 +30,10 @@ class BaseExchange(ABC):
         """Cancel all open orders for the symbol. Returns count cancelled."""
 
     @abstractmethod
+    def cancel_orders_by_side(self, side: str) -> int:
+        """Cancel all open orders on one side ('buy' or 'sell'). Returns count cancelled."""
+
+    @abstractmethod
     def get_balances(self) -> tuple:
         """Return (xrp_balance, usd_balance). Returns (0.0, 0.0) on error."""
 

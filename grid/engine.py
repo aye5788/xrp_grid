@@ -498,30 +498,126 @@ class GridEngine:
         spacing = current_state['spacing_pct']
 
         if grid_action == 'RECENTRE':
-            indicators = get_latest_indicators('1h')
-            new_centre = indicators.get('vwap') if indicators else None
+            # Use Melchior's computed recentre_target if provided and valid.
+            # Fall back to VWAP from indicators only if Melchior didn't supply one.
+            melchior_target = consensus.get('recentre_target')
+            if melchior_target and isinstance(melchior_target, (int, float)) and melchior_target > 0:
+                new_centre = melchior_target
+                log.info(f"MAGI RECENTRE — {centre} → {new_centre} (Melchior target)")
+            else:
+                indicators = get_latest_indicators('1h')
+                new_centre = indicators.get('vwap') if indicators else None
+                log.info(f"MAGI RECENTRE — {centre} → {new_centre} (VWAP fallback)")
             if new_centre:
-                log.info(f"MAGI RECENTRE — {centre} → {new_centre}")
                 self.initialise_grid(centre=new_centre, spacing_pct=spacing)
+            else:
+                log.warning("MAGI RECENTRE — no valid target, skipping")
 
         elif grid_action == 'TIGHTEN':
-            new_spacing = spacing * 0.8
-            log.info(f"MAGI TIGHTEN — spacing {spacing*100:.3f}% → {new_spacing*100:.3f}%")
+            # Use Melchior's spacing_adjustment_pct if provided and valid.
+            # Treated as a multiplier (e.g. 0.85 means tighten to 85% of current spacing).
+            # Fall back to hardcoded 0.8x only if Melchior didn't supply a valid one.
+            adj = consensus.get('spacing_adjustment_pct')
+            if adj and isinstance(adj, (int, float)) and 0.5 <= adj <= 0.99:
+                new_spacing = spacing * adj
+                log.info(f"MAGI TIGHTEN — spacing {spacing*100:.3f}% → {new_spacing*100:.3f}% (Melchior adj={adj})")
+            else:
+                new_spacing = spacing * 0.8
+                log.info(f"MAGI TIGHTEN — spacing {spacing*100:.3f}% → {new_spacing*100:.3f}% (hardcoded 0.8x fallback)")
             self.initialise_grid(centre=centre, spacing_pct=new_spacing)
 
         elif grid_action == 'WIDEN':
-            new_spacing = spacing * 1.2
-            log.info(f"MAGI WIDEN — spacing {spacing*100:.3f}% → {new_spacing*100:.3f}%")
+            # Use Melchior's spacing_adjustment_pct if provided and valid.
+            # Treated as a multiplier (e.g. 1.15 means widen to 115% of current spacing).
+            # Fall back to hardcoded 1.2x only if Melchior didn't supply a valid one.
+            adj = consensus.get('spacing_adjustment_pct')
+            if adj and isinstance(adj, (int, float)) and 1.01 <= adj <= 2.0:
+                new_spacing = spacing * adj
+                log.info(f"MAGI WIDEN — spacing {spacing*100:.3f}% → {new_spacing*100:.3f}% (Melchior adj={adj})")
+            else:
+                new_spacing = spacing * 1.2
+                log.info(f"MAGI WIDEN — spacing {spacing*100:.3f}% → {new_spacing*100:.3f}% (hardcoded 1.2x fallback)")
             self.initialise_grid(centre=centre, spacing_pct=new_spacing)
 
         else:  # MAINTAIN
             log.info("MAGI MAINTAIN — no grid changes")
 
+        # Refresh so pause rows reflect the post-action grid configuration.
+        # RECENTRE/TIGHTEN/WIDEN each call initialise_grid() which writes a new
+        # grid_state row — re-reading here ensures the pause row inherits the
+        # correct (post-action) centre and spacing, not the pre-action values.
+        post_action = get_current_grid_state() or current_state
+        eff_centre = post_action['centre_price']
+        eff_spacing = post_action['spacing_pct']
+        eff_levels = post_action.get('levels', self.level_count)
+
         # Apply risk constraints
         if risk_action == 'PAUSE_LONGS':
-            log.info("MAGI PAUSE_LONGS — cancelling buy orders")
+            now_iso = datetime.utcnow().isoformat()
+            cancelled = 0
+            for order_id, order in list(self.paper_orders.items()):
+                if order.get('status') == 'open' and order.get('side') == 'buy':
+                    try:
+                        update_grid_order_status(order_id, 'cancelled',
+                                                 filled_at=now_iso)
+                    except Exception as e:
+                        log.warning(f"Failed to persist cancel for {order_id}: {e}")
+                    order['status'] = 'cancelled'
+                    cancelled += 1
+            if cancelled:
+                keys_to_remove = [oid for oid, o in self.paper_orders.items()
+                                  if o.get('status') == 'cancelled']
+                for k in keys_to_remove:
+                    del self.paper_orders[k]
+            log.info(f"MAGI PAUSE_LONGS — cancelled {cancelled} open buy orders")
+            if not self.paper:
+                try:
+                    live_cancelled = self.exchange.cancel_orders_by_side('buy')
+                    log.info(f"MAGI PAUSE_LONGS [LIVE] — cancelled {live_cancelled} buy orders on exchange")
+                except Exception as e:
+                    log.error(f"MAGI PAUSE_LONGS [LIVE] — exchange cancellation failed: {e}")
+            insert_grid_state(
+                eff_centre, eff_spacing, eff_levels,
+                pause_longs=1, pause_shorts=0,
+                notes=f"PAUSE_LONGS applied — {cancelled} buys cancelled"
+            )
+
         elif risk_action == 'PAUSE_SHORTS':
-            log.info("MAGI PAUSE_SHORTS — cancelling sell orders")
+            now_iso = datetime.utcnow().isoformat()
+            cancelled = 0
+            for order_id, order in list(self.paper_orders.items()):
+                if order.get('status') == 'open' and order.get('side') == 'sell':
+                    try:
+                        update_grid_order_status(order_id, 'cancelled',
+                                                 filled_at=now_iso)
+                    except Exception as e:
+                        log.warning(f"Failed to persist cancel for {order_id}: {e}")
+                    order['status'] = 'cancelled'
+                    cancelled += 1
+            if cancelled:
+                keys_to_remove = [oid for oid, o in self.paper_orders.items()
+                                  if o.get('status') == 'cancelled']
+                for k in keys_to_remove:
+                    del self.paper_orders[k]
+            log.info(f"MAGI PAUSE_SHORTS — cancelled {cancelled} open sell orders")
+            if not self.paper:
+                try:
+                    live_cancelled = self.exchange.cancel_orders_by_side('sell')
+                    log.info(f"MAGI PAUSE_SHORTS [LIVE] — cancelled {live_cancelled} sell orders on exchange")
+                except Exception as e:
+                    log.error(f"MAGI PAUSE_SHORTS [LIVE] — exchange cancellation failed: {e}")
+            insert_grid_state(
+                eff_centre, eff_spacing, eff_levels,
+                pause_longs=0, pause_shorts=1,
+                notes=f"PAUSE_SHORTS applied — {cancelled} sells cancelled"
+            )
+
+        elif risk_action == 'CLEAR':
+            insert_grid_state(
+                eff_centre, eff_spacing, eff_levels,
+                pause_longs=0, pause_shorts=0,
+                notes="Risk CLEAR — pause flags reset"
+            )
 
     def update_inventory(self, price: float):
         """Sync inventory state to database."""

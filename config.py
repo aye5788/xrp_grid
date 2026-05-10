@@ -23,8 +23,8 @@ GRID_SWITCH_MIN_HOURS = 24         # rolling window for P&L comparison
 GRID_SPACING_PCT = 0.005
 GRID_CENTRE_DEFAULT = None
 MAX_INVENTORY_USD = 50.0
-TAKER_FEE = 0.006
-MAKER_FEE = 0.004
+TAKER_FEE = 0.0026  # Kraken XRP/USD tier-0 taker: 0.26%
+MAKER_FEE = 0.0016  # Kraken XRP/USD tier-0 maker: 0.16%
 
 # --- MAGI Supervision Schedule ---
 MORNING_CYCLE_HOUR = 9

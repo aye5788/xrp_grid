@@ -18,6 +18,13 @@ from config import KILL_SWITCH_FILE, MAX_INVENTORY_USD
 log = logging.getLogger('dashboard')
 app = Flask(__name__)
 engine = GridEngine(paper=True)
+engine.load_state()
+
+# Shared secret for /api/trigger_magi. Set MAGI_TRIGGER_TOKEN in .env to require
+# the token as an X-Magi-Token header or ?token= query param. If unset, the
+# endpoint remains open — acceptable when access is restricted by network topology
+# (e.g. localhost-only). External exposure requires the token to be set.
+MAGI_TRIGGER_TOKEN = os.environ.get('MAGI_TRIGGER_TOKEN', '')
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -487,6 +494,10 @@ CHART_HTML_TEMPLATE = """<!DOCTYPE html>
         timeScale: {
             timeVisible: true,
             secondsVisible: false,
+            rightOffset: 5,
+            barSpacing: 6,
+            fixLeftEdge: false,
+            fixRightEdge: false,
         },
         rightPriceScale: {
             autoScale: true,
@@ -544,6 +555,8 @@ CHART_HTML_TEMPLATE = """<!DOCTYPE html>
         fetch('/api/active_grid_levels')
             .then(function(r) { return r.json(); })
             .then(function(data) {
+                console.log('Grid levels:', data.levels ? data.levels.length : 0,
+                            'centre:', data.centre_price);
                 priceLines.forEach(function(pl) { candleSeries.removePriceLine(pl); });
                 priceLines = [];
 
@@ -555,8 +568,8 @@ CHART_HTML_TEMPLATE = """<!DOCTYPE html>
                     var pl = candleSeries.createPriceLine({
                         price: parseFloat(level.price),
                         color: color,
-                        lineStyle: 0,
-                        lineWidth: 1,
+                        lineStyle: level.side === 'buy' ? 1 : 0,
+                        lineWidth: 2,
                         axisLabelVisible: true,
                         title: title,
                     });
@@ -573,6 +586,19 @@ CHART_HTML_TEMPLATE = """<!DOCTYPE html>
                         title: 'centre',
                     });
                     priceLines.push(cpl);
+                }
+
+                if (data.centre_price != null && data.levels && data.levels.length > 0) {
+                    var prices = data.levels.map(function(l) {
+                        return parseFloat(l.price);
+                    });
+                    prices.push(parseFloat(data.centre_price));
+                    var minPrice = Math.min.apply(null, prices);
+                    var maxPrice = Math.max.apply(null, prices);
+                    var padding = (maxPrice - minPrice) * 0.5;
+                    chart.priceScale('right').applyOptions({
+                        autoScale: true,
+                    });
                 }
             })
             .catch(function(err) { console.error('Grid levels fetch failed:', err); });
@@ -628,6 +654,7 @@ CHART_HTML_TEMPLATE = """<!DOCTYPE html>
                         };
                     });
                     candleSeries.setData(bars);
+                    chart.timeScale().fitContent();
                     setStatus('live');
                 } else if (type === 'update') {
                     data.forEach(function(c) {
@@ -895,14 +922,24 @@ def trigger_learning():
 
 @app.route('/api/trigger_magi', methods=['POST'])
 def trigger_magi():
+    if MAGI_TRIGGER_TOKEN:
+        provided = request.headers.get('X-Magi-Token', '') or \
+                   request.args.get('token', '')
+        if provided != MAGI_TRIGGER_TOKEN:
+            return jsonify({'ok': False, 'error': 'Unauthorized'}), 403
     try:
         from magi.orchestrator import run_cycle
         result = run_cycle(trigger='manual', force=True)
         if result is None:
             return jsonify({'ok': False, 'error': 'Cycle returned None — check guardrails or recent logs'}), 200
+        # Apply the decision to the grid — this is what actually
+        # cancels orders, pauses sides, or halts the grid.
+        # Without this call, decisions are recorded but never enforced.
+        consensus = result.get('consensus', {})
+        engine.apply_magi_decision(consensus)
         return jsonify({
             'ok': True,
-            'consensus': result.get('consensus'),
+            'consensus': consensus,
             'timestamp': result.get('timestamp'),
         })
     except Exception as e:

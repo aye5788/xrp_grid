@@ -13,24 +13,35 @@ def load_prompt():
     with open(SYSTEM_PROMPT_PATH, 'r') as f:
         return f.read()
 
-def build_context(indicators: dict, grid_state: dict, inventory: dict) -> str:
+def build_context(indicators: dict, grid_state: dict, inventory: dict,
+                  casper_regime: dict = None) -> str:
     """Build the context package Melchior receives."""
-    from database import get_open_orders_summary
+    from database import get_open_orders_summary, get_trajectory_context
     orders = get_open_orders_summary()
+    traj = get_trajectory_context()
     inv_skew = inventory.get('inventory_skew')
 
     if inv_skew is None:
         skew_line = "- inventory_skew: NULL\n"
-    elif abs(inv_skew) > 0.6:
-        skew_line = (
-            f"- inventory_skew: {inv_skew:+.3f}  (CONCENTRATED — outside normal "
-            f"±0.6 range; range ±1; 0 = balanced 50/50, +1 = all XRP, -1 = all USD)\n"
-        )
     else:
         skew_line = (
-            f"- inventory_skew: {inv_skew:+.3f}  (normal oscillation — within ±0.6 range; "
-            f"no action required)\n"
+            f"- inventory_skew: {inv_skew:+.3f}  (range ±1; 0 = balanced 50/50, "
+            f"+1 = all XRP, -1 = all USD; Balthasar manages risk thresholds)\n"
         )
+
+    if casper_regime is not None:
+        regime_block = (
+            f"\nRegime Context (from Casper):\n"
+            f"- regime: {casper_regime.get('regime')}\n"
+            f"- conviction: {casper_regime.get('conviction')}\n"
+            f"- trend_direction: {casper_regime.get('trend_direction')}\n"
+            f"- reasoning: {casper_regime.get('reasoning')}\n"
+            f"Note: If regime is TRENDING, your TIGHTEN or RECENTRE recommendation "
+            f"will be blocked by consensus. Consider whether WIDEN or MAINTAIN is "
+            f"more appropriate given this regime."
+        )
+    else:
+        regime_block = ""
 
     return f"""CURRENT MARKET MICROSTRUCTURE — XRP/USD
 
@@ -53,13 +64,21 @@ Order Ladder (live open orders):
 - open_sells: {orders['sell_count']} orders, lowest ask: {orders['lowest_sell']}
 - fills last 24h: {len(orders['recent_fills'])} fills
 
+Trajectory Context:
+- casper_regime_consecutive_cycles: {traj['regime_consecutive']} (how long current regime has held)
+- melchior_blocked_cycles: {traj['melchior_blocked_cycles']} (consecutive cycles your recommendation was overridden)
+- cycles_since_structural_change: {traj['cycles_since_structural_change']} (grid unchanged for this many cycles)
+- fills_since_last_magi: {traj['fills_since_last_magi_buys']} buys / {traj['fills_since_last_magi_sells']} sells
+- pause_longs_active: {traj['pause_longs_active']} | pause_shorts_active: {traj['pause_shorts_active']}
+{regime_block}
 Respond with a JSON object only. No preamble."""
 
-def get_decision(indicators: dict, grid_state: dict, inventory: dict) -> dict:
+def get_decision(indicators: dict, grid_state: dict, inventory: dict,
+                 casper_regime: dict = None) -> dict:
     """Call Melchior and return structured decision."""
     try:
         system_prompt = load_prompt()
-        context = build_context(indicators, grid_state, inventory)
+        context = build_context(indicators, grid_state, inventory, casper_regime)
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[

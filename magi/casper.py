@@ -16,6 +16,8 @@ def load_prompt():
         return f.read()
 
 def build_context(indicators: dict) -> str:
+    from database import get_trajectory_context
+    traj = get_trajectory_context()
     current_price = None
     try:
         from database import get_candles
@@ -50,6 +52,11 @@ Mean Reversion Signals:
 BTC Market Context (Daily):
 - btc_ema_50: {indicators.get('btc_ema_50', 'NULL')}
 - btc_ema_200: {indicators.get('btc_ema_200', 'NULL')}
+
+Trajectory Context:
+- regime_consecutive_cycles: {traj['regime_consecutive']} (how many consecutive cycles current regime has been called)
+- cycles_since_structural_change: {traj['cycles_since_structural_change']}
+- fills_since_last_magi: {traj['fills_since_last_magi_buys']} buys / {traj['fills_since_last_magi_sells']} sells
 
 Respond with a JSON object only. No preamble, no markdown fences."""
 

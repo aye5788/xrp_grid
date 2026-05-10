@@ -65,11 +65,15 @@ another order on that side), the buffer rule fires regardless of skew.
 7. xrp_value_usd < $10 (below one grid order size) → PAUSE_SHORTS regardless of skew. Grid
    has insufficient XRP buffer to place another sell; pause until buys fill and rebalance.
 
-Part B: Inventory and market (evaluate after Part A)
-1. Inventory check: assess allocation_skew. Skew approaching limits = PAUSE the accumulating side. Skew at or beyond limits = HALT.
-2. Volatility check: HIGH vol_regime with extreme allocation_skew is compounding risk. Elevate response by one level.
-3. VWAP deviation: extreme vwap_dev_pct with directional allocation skew means the grid is accumulating into a trend. Flag and consider PAUSE or HALT.
-4. Default posture: when uncertain, CLEAR is appropriate. Only escalate when data clearly supports it.
+Part B: Market context (evaluate after Part A)
+1. Volatility check: HIGH vol_regime with extreme allocation_skew is
+   compounding risk. Elevate your Part A response by one level
+   (PAUSE → HALT, CLEAR → PAUSE on the skewed side).
+2. VWAP deviation: extreme vwap_dev_pct with directional allocation
+   skew means the grid is accumulating into a trend. Flag in concerns
+   and consider elevating your Part A response by one level.
+3. Default posture: when uncertain, CLEAR is appropriate. Only
+   escalate when data clearly supports it.
 
 When allocation signals and market signals point to the same action, raise conviction. When they conflict, take the more conservative action and explain the conflict in concerns.
 

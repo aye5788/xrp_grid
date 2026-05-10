@@ -259,6 +259,40 @@ class KrakenExchange(BaseExchange):
             # Do NOT remove from _open_order_placed_at — orders may still be live
             return 0
 
+    def cancel_orders_by_side(self, side: str) -> int:
+        """Cancel all open XRP/USD orders on one side ('buy' or 'sell'). Returns count cancelled."""
+        try:
+            result = self._private_post("OpenOrders")
+            open_orders = result.get("open", {})
+            txids = [
+                txid for txid, order in open_orders.items()
+                if order.get("descr", {}).get("pair") == "XRPUSD"
+                and order.get("descr", {}).get("type") == side
+            ]
+            if not txids:
+                return 0
+            if len(txids) == 1:
+                txid = txids[0]
+                cost = self._cancel_cost(txid)
+                self._check_and_add(cost, f"CancelOrder x1 ({side})")
+                result = self._private_post("CancelOrder", {"txid": txid})
+                n = result.get("count", 0)
+                if n > 0:
+                    self._open_order_placed_at.pop(txid, None)
+                log.info(f"[KRAKEN] Cancelled {n} {side} order (single)")
+                return n
+            total_cost = sum(self._cancel_cost(txid) for txid in txids)
+            self._check_and_add(total_cost, f"CancelOrderBatch x{len(txids)} ({side})")
+            result = self._private_post("CancelOrderBatch", {"orders": txids}, as_json=True)
+            n = result.get("count", 0)
+            for txid in txids:
+                self._open_order_placed_at.pop(txid, None)
+            log.info(f"[KRAKEN] Cancelled {n} {side} orders (batch)")
+            return n
+        except Exception as e:
+            log.error(f"cancel_orders_by_side({side}) failed: {e}")
+            return 0
+
     def get_balances(self) -> tuple:
         """Return (xrp_balance, usd_balance) for XXRP and ZUSD only.
 

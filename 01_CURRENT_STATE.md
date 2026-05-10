@@ -1,6 +1,6 @@
 # MAGI XRP Grid Bot — Current State
 
-**Last updated:** 2026-05-08
+**Last updated:** 2026-05-10
 
 ---
 
@@ -37,6 +37,38 @@
 - **Historical base rates injected into all three agent prompts (2026-05-08).** Empirical forward-return statistics block appended to casper_prompt.txt, melchior_prompt.txt, and balthasar_prompt.txt. Derived from 46,300 hours of XRP/USD hourly data (Jan 2021 - May 2026). Block covers: bearish chop analog stats (647 bars, 67.4% 7d win rate), regime duration characteristics, BB-width and volume context, drawdown-before-recovery distribution, and broader bearish stack base rates. Static block — agents use as calibration, not prediction.
 
 - **Paper inventory reset to balanced 50/50 state (2026-05-08).** Paper inventory was drifted to xrp=48.4, usd=$1.30 (nearly all XRP, no USD) due to accumulated buy fills with no USD to place new buys. Reset to xrp=24.83, usd=$35.00, skew=0.000 at price $1.4093. Grid rebuilt with 3 buys + 3 sells. System is now operating two-sided. Root cause: paper mode has no rebalancing mechanism — when USD is depleted, buy ladder cannot be funded. Resolution: one-time manual reset. Future fix: note in deferred tasks.
+
+- **PAUSE_LONGS/PAUSE_SHORTS actually enforced (2026-05-10).** Previously the risk actions were logged but never executed — buy/sell orders stayed open on the exchange. Now `apply_magi_decision()` in `engine.py` cancels open orders of the relevant side in paper mode, writes pause flags to `grid_state` table, and inserts a `grid_state` row recording the pause. CLEAR resets pause flags. Live mode path added via new `cancel_orders_by_side(side)` method on `BaseExchange` and `KrakenExchange`.
+
+- **Trajectory context injected into all three agents (2026-05-10).** New `get_trajectory_context()` in `database.py` queries last 5 MAGI decisions, last 5 inventory snapshots, fills since last cycle, and current pause flags. Each agent's `build_context()` now includes: `regime_consecutive_cycles`, `melchior_blocked_cycles` (Melchior only), `cycles_since_structural_change`, `skew_delta`, `skew_trend` (Balthasar only), `fills_since_last_magi` (buys/sells), `pause_longs_active`, `pause_shorts_active`. Agents now have positional awareness of where they are in the current episode, not just a snapshot.
+
+- **Sequential agent ordering with regime pass-through (2026-05-10).** Orchestrator now runs Casper first, then passes Casper's full output to Melchior as `casper_regime` context, then runs Balthasar independently (regime-blind by design). Melchior can now self-suppress actions that would be blocked by consensus, producing more useful output instead of wasted calls.
+
+- **Conviction weighting in `apply_consensus()` (2026-05-10).** Low-conviction HALT from Balthasar is downgraded to PAUSE_LONGS. Low-conviction TRENDING from Casper does not block Melchior's recommendation. Both changes are zero-cost (no extra LLM calls).
+
+- **WIDEN passes through Casper TRENDING (2026-05-10).** Previously Casper TRENDING blocked ALL Melchior recommendations including WIDEN. WIDEN is the correct structural response to a trending market — only TIGHTEN and RECENTRE are dangerous in trends. WIDEN now passes through regardless of regime.
+
+- **Melchior's outputs used by engine (2026-05-10).** Previously `engine.py` ignored Melchior's `recentre_target` and `spacing_adjustment_pct`, substituting its own hardcoded VWAP and 0.8x/1.2x multipliers. Now `engine.py` uses Melchior's computed values with validation bounds, falling back to hardcoded values only if Melchior returns an invalid or null value. `spacing_adjustment_pct` format documented in `melchior_prompt.txt` as a multiplier (0.85 = 85% of current spacing).
+
+- **Prompt cleanup (2026-05-10).** Historical base rates block removed from `melchior_prompt.txt` (Melchior doesn't receive ADX/EMA/ROC-6h to evaluate the regime). PAUSE_LONGS instruction removed from `casper_prompt.txt` (Casper doesn't control PAUSE_LONGS). Skew annotation tension resolved in `melchior.py` — CONCENTRATED label removed, replaced with neutral annotation. Part B Rule 1 redundancy removed from `balthasar_prompt.txt`.
+
+- **Comprehensive system audit completed (2026-05-10).** Claude Code read all 19 system files and produced a prioritized finding list. All critical and major findings addressed in the same session (see below).
+
+- **Fee rates corrected (2026-05-10).** `config.py` had `MAKER_FEE=0.004` (0.4%) and `TAKER_FEE=0.006` (0.6%) — 2–2.5x actual Kraken rates. Corrected to `MAKER_FEE=0.0016` (0.16%) and `TAKER_FEE=0.0026` (0.26%). All P&L metrics prior to this fix understated profitability. Shadow comparison data accumulated before this fix is polluted.
+
+- **Dashboard `trigger_magi` applies decision (2026-05-10).** Previously `/api/trigger_magi` recorded a decision but never called `engine.apply_magi_decision()`. A user-triggered HALT had no effect on order placement. Now the consensus is applied immediately after `run_cycle()` returns.
+
+- **Restart de-duplication for MAGI cycles (2026-05-10).** `scheduler.py` initialized `last_magi_hour = -1` on every restart, causing a duplicate MAGI cycle if restarted within the same scheduled hour. Now reads the most recent decision timestamp from DB and skips re-firing if a cycle already ran in the current EST hour.
+
+- **Pause survives restart (2026-05-10).** `scheduler.py` now checks `grid_state.pause_longs` and `grid_state.pause_shorts` before calling `initialise_grid()` on startup. If a pause is active, grid rebuild is skipped to preserve the pause state.
+
+- **Dashboard engine `load_state()` on startup (2026-05-10).** The module-level `GridEngine` instance in `dashboard.py` now calls `load_state()` at startup so `engine.level_count` reflects the live running count rather than the default. The shadow ★ marker is now correct.
+
+- **Auth token on `/api/trigger_magi` (2026-05-10).** Endpoint checks `MAGI_TRIGGER_TOKEN` environment variable if set. Token passed via `X-Magi-Token` header or `?token=` query param. If not set, endpoint remains open (backward compatible). Set in `.env` when ready to lock down.
+
+- **Chart fixes (2026-05-10).** `fitContent()` called after initial candle load so chart spreads across view instead of compressing to right edge. `rightOffset`, `barSpacing`, `fixLeftEdge`/`fixRightEdge` options added. Grid level lines changed to `lineWidth=2`, buy lines dotted (`lineStyle=1`), sell lines solid (`lineStyle=0`). `console.log` added for debugging.
+
+- **Dead code removed (2026-05-10).** `LEARNING_HOUR_EST = 17` constant removed from `scheduler.py` (never used — learning is manual-only). `casper_action` column naming annotated in `orchestrator.py` to clarify it stores a regime string not an action verb.
 
 ---
 
@@ -89,6 +121,12 @@ The exchange is Kraken Spot REST API, paper mode (`engine.paper = True`). No rea
   - EOD historical: not worth it, hourly is strictly better
 
 - **CDN caching clarification (2026-05-08).** Cache-busting query strings (?bust=...) do NOT work on raw.githubusercontent.com — Fastly ignores query strings entirely. TTL is 5 minutes. After magi-sync, wait 5+ minutes before opening a new Claude session. Only reliable fixes: (a) wait for TTL or (b) paste content directly from droplet via cat. 03_INSTRUCTIONS_TO_CLAUDE.md updated to reflect this.
+
+- **Kraken granularity translation confirmed (2026-05-10).** `KrakenExchange.get_candles()` correctly translates `ONE_HOUR→60`, `ONE_DAY→1440`; `SIX_HOUR` is resampled from 1H bars. The audit flag about granularity string format was a false alarm — the translation map exists at `kraken.py:314-316`.
+
+- **Fee rates verified (2026-05-10).** `MAKER_FEE=0.0016`, `TAKER_FEE=0.0026`. All P&L data before 2026-05-10 used incorrect rates (2–2.5x too high) and should be treated as directionally correct but magnitude-inaccurate.
+
+- **System audit findings resolved (2026-05-10).** Full audit across 19 files completed by Claude Code. All P0 and P1 findings fixed in same session. Remaining known issues: shadow simulator still allows impossible fills (P2, deferred), `allocation_skew` vs `inventory_skew` drift between fills (minor, by design), 19-hour MAGI gap means trajectory context "N consecutive cycles" spans wall-clock time not hours (agents have no elapsed-time awareness between cycles).
 
 ---
 

@@ -32,19 +32,45 @@ def apply_consensus(melchior, balthasar, casper, current_grid):
     c_regime = casper.get('regime', 'UNCERTAIN')
     m_action = melchior.get('action', 'MAINTAIN')
 
+    # Conviction weighting: low-conviction calls carry less weight
+    b_conviction = balthasar.get('conviction', 'medium')
+    c_conviction = casper.get('conviction', 'medium')
+
+    # Low-conviction HALT → downgrade to PAUSE_LONGS
+    # A HALT Balthasar isn't sure about shouldn't fully suspend the grid
+    if b_action == 'HALT' and b_conviction == 'low':
+        b_action = 'PAUSE_LONGS'
+        log.info("Balthasar low-conviction HALT downgraded to PAUSE_LONGS")
+
     if b_action == 'HALT':
         return {
             'grid_action': 'HALT',
             'risk_action': 'HALT',
             'regime': c_regime,
-            'reason': 'Balthasar HALT — all grid activity suspended'
+            'reason': 'Balthasar HALT — all grid activity suspended',
+            'recentre_target': None,
+            'spacing_adjustment_pct': None,
+            'melchior_conviction': melchior.get('conviction'),
         }
 
     risk_action = b_action
 
-    if c_regime == 'TRENDING':
-        grid_action = 'MAINTAIN'
-        reason = f'Casper TRENDING — blocking Melchior {m_action}, holding grid structure'
+    if c_regime == 'TRENDING' and c_conviction != 'low':
+        if m_action == 'WIDEN':
+            # WIDEN is the correct structural response to a trending market.
+            # Blocking it forces a tighter grid into momentum — the opposite
+            # of what we want. Only TIGHTEN and RECENTRE are dangerous in trends.
+            grid_action = 'WIDEN'
+            reason = (f'Casper TRENDING ({c_conviction} conviction) — '
+                      f'allowing Melchior WIDEN (appropriate for trending market)')
+        else:
+            grid_action = 'MAINTAIN'
+            reason = (f'Casper TRENDING ({c_conviction} conviction) — '
+                      f'blocking Melchior {m_action}, holding grid structure')
+    elif c_regime == 'TRENDING' and c_conviction == 'low':
+        grid_action = m_action
+        reason = (f'Casper TRENDING (low conviction) — '
+                  f'not blocking Melchior {m_action}, regime uncertain')
     else:
         grid_action = m_action
         reason = f'Casper {c_regime} — applying Melchior {m_action}'
@@ -53,7 +79,10 @@ def apply_consensus(melchior, balthasar, casper, current_grid):
         'grid_action': grid_action,
         'risk_action': risk_action,
         'regime': c_regime,
-        'reason': reason
+        'reason': reason,
+        'recentre_target': melchior.get('recentre_target'),
+        'spacing_adjustment_pct': melchior.get('spacing_adjustment_pct'),
+        'melchior_conviction': melchior.get('conviction'),
     }
 
 
@@ -75,13 +104,20 @@ def run_cycle(trigger='scheduled', force=False):
         log.warning("No current price for Balthasar budget context — proceeding with NULL")
 
     log.info("Calling MAGI agents (stateless)...")
-    melchior = melchior_stateless(indicators, grid_state, inventory)
-    balthasar = balthasar_stateless(indicators, inventory, grid_state, current_price)
-    casper = casper_stateless(indicators)
 
-    log.info(f"Melchior: {melchior.get('action')} / {melchior.get('conviction')}")
-    log.info(f"Balthasar: {balthasar.get('action')} / {balthasar.get('conviction')}")
+    # Casper runs first — pure regime assessment, no other agent inputs
+    casper = casper_stateless(indicators)
     log.info(f"Casper: {casper.get('regime')} / {casper.get('conviction')}")
+
+    # Melchior runs second — receives Casper regime so it can self-suppress
+    # actions that will be blocked by consensus anyway
+    melchior = melchior_stateless(indicators, grid_state, inventory,
+                                   casper_regime=casper)
+    log.info(f"Melchior: {melchior.get('action')} / {melchior.get('conviction')}")
+
+    # Balthasar runs last — regime-blind by design, pure capital preservation
+    balthasar = balthasar_stateless(indicators, inventory, grid_state, current_price)
+    log.info(f"Balthasar: {balthasar.get('action')} / {balthasar.get('conviction')}")
 
     consensus = apply_consensus(melchior, balthasar, casper, grid_state)
     log.info(f"Consensus: grid={consensus['grid_action']} risk={consensus['risk_action']} — {consensus['reason']}")
@@ -95,7 +131,7 @@ def run_cycle(trigger='scheduled', force=False):
         'balthasar_action': balthasar.get('action'),
         'balthasar_conviction': balthasar.get('conviction'),
         'balthasar_reasoning': balthasar.get('reasoning'),
-        'casper_action': casper.get('regime'),
+        'casper_action': casper.get('regime'),  # column named 'action' but stores regime string (RANGING/TRENDING/UNCERTAIN) — legacy naming
         'casper_conviction': casper.get('conviction'),
         'casper_reasoning': casper.get('reasoning'),
         'consensus_grid_action': consensus['grid_action'],

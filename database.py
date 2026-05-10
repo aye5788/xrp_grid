@@ -186,12 +186,13 @@ def get_latest_indicators(timeframe='1h'):
 
 # --- Grid state helpers ---
 
-def insert_grid_state(centre_price, spacing_pct, levels, notes=None):
+def insert_grid_state(centre_price, spacing_pct, levels, pause_longs=0, pause_shorts=0, notes=None):
     conn = get_conn()
     conn.execute('''INSERT INTO grid_state
-        (timestamp, centre_price, spacing_pct, levels, notes)
-        VALUES (?,?,?,?,?)''',
-        (datetime.utcnow().isoformat(), centre_price, spacing_pct, levels, notes))
+        (timestamp, centre_price, spacing_pct, levels, pause_longs, pause_shorts, notes)
+        VALUES (?,?,?,?,?,?,?)''',
+        (datetime.utcnow().isoformat(), centre_price, spacing_pct, levels,
+         pause_longs, pause_shorts, notes))
     conn.commit()
     conn.close()
 
@@ -279,6 +280,118 @@ def get_open_orders_summary():
         'highest_buy':   max((b['price'] for b in buys),  default=None),
         'lowest_sell':   min((s['price'] for s in sells), default=None),
     }
+
+
+def get_trajectory_context():
+    """
+    Compute trajectory and positional context from recent history.
+    Returns a dict of derived metrics for agent context injection.
+    All values gracefully degrade to None if insufficient history exists.
+    """
+    from datetime import timedelta
+    conn = get_conn()
+
+    # Last 5 MAGI decisions for trajectory
+    decisions = conn.execute(
+        "SELECT timestamp, melchior_action, balthasar_action, "
+        "casper_action, consensus_risk_action, consensus_grid_action "
+        "FROM magi_decisions ORDER BY timestamp DESC LIMIT 5"
+    ).fetchall()
+
+    # Last 5 inventory snapshots for skew trajectory
+    inv_rows = conn.execute(
+        "SELECT timestamp, inventory_skew FROM inventory "
+        "ORDER BY timestamp DESC LIMIT 5"
+    ).fetchall()
+
+    # Fills since last MAGI cycle
+    last_decision_ts = decisions[0]['timestamp'] if decisions else None
+    if last_decision_ts:
+        fills = conn.execute(
+            "SELECT side, COUNT(*) as count FROM grid_orders "
+            "WHERE status='filled' AND filled_at >= ? "
+            "GROUP BY side",
+            (last_decision_ts,)
+        ).fetchall()
+    else:
+        fills = []
+
+    # Current grid state pause flags
+    grid_row = conn.execute(
+        "SELECT pause_longs, pause_shorts, timestamp FROM grid_state "
+        "ORDER BY timestamp DESC LIMIT 1"
+    ).fetchone()
+
+    conn.close()
+
+    # Compute derived metrics
+    result = {
+        'regime_consecutive': None,
+        'melchior_blocked_cycles': None,
+        'skew_delta': None,
+        'skew_trend': None,
+        'fills_since_last_magi_buys': 0,
+        'fills_since_last_magi_sells': 0,
+        'cycles_since_structural_change': None,
+        'pause_longs_active': 0,
+        'pause_shorts_active': 0,
+    }
+
+    if grid_row:
+        result['pause_longs_active'] = grid_row['pause_longs'] or 0
+        result['pause_shorts_active'] = grid_row['pause_shorts'] or 0
+
+    for f in fills:
+        if f['side'] == 'buy':
+            result['fills_since_last_magi_buys'] = f['count']
+        elif f['side'] == 'sell':
+            result['fills_since_last_magi_sells'] = f['count']
+
+    if len(inv_rows) >= 2:
+        current_skew = inv_rows[0]['inventory_skew'] or 0
+        prior_skew = inv_rows[1]['inventory_skew'] or 0
+        result['skew_delta'] = round(current_skew - prior_skew, 4)
+        if len(inv_rows) >= 3:
+            oldest_skew = inv_rows[-1]['inventory_skew'] or 0
+            if current_skew > oldest_skew + 0.05:
+                result['skew_trend'] = 'worsening_long'
+            elif current_skew < oldest_skew - 0.05:
+                result['skew_trend'] = 'worsening_short'
+            else:
+                result['skew_trend'] = 'stable'
+
+    if decisions:
+        # How many consecutive cycles has Casper called the same regime
+        current_regime = decisions[0]['casper_action']
+        count = 0
+        for d in decisions:
+            if d['casper_action'] == current_regime:
+                count += 1
+            else:
+                break
+        result['regime_consecutive'] = count
+
+        # How many consecutive cycles has Melchior's recommendation been blocked
+        # (grid action was MAINTAIN but Melchior didn't say MAINTAIN)
+        blocked = 0
+        for d in decisions:
+            if (d['consensus_grid_action'] == 'MAINTAIN' and
+                    d['melchior_action'] != 'MAINTAIN'):
+                blocked += 1
+            else:
+                break
+        result['melchior_blocked_cycles'] = blocked
+
+        # How many consecutive cycles since grid structure actually changed
+        stable = 0
+        for d in decisions:
+            if d['consensus_grid_action'] == 'MAINTAIN':
+                stable += 1
+            else:
+                break
+        result['cycles_since_structural_change'] = stable
+
+    return result
 
 
 def get_fills_today_count():

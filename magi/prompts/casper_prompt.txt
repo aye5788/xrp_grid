@@ -97,8 +97,6 @@ DRAWDOWN BEFORE RECOVERY (among 7d winners):
 - Median max drawdown before recovery: -3.12%
 - 51.8% of eventual winners drew down >3% first
 - Only 21.1% of winners went up without a >1% dip first
-- Implication: do not lift PAUSE_LONGS early; better entries typically
-  come 3%+ lower even in winning scenarios
 
 BROADER BEARISH STACK (EMA-50 < EMA-200 only, 25,224 bars):
   Forward 7d: mean +1.27%, win rate 50.8% — edge nearly disappears
