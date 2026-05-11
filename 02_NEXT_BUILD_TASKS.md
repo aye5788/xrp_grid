@@ -115,3 +115,67 @@ Track whether each agent's call was correct in hindsight. Casper TRENDING — di
 
 ### Cross-model decision audit
 Periodically sample recent agent decisions and route them to a different model for evaluation. If Balthasar produces N decisions, pass them to Melchior (or a separate call) asking "does this reasoning look sound given the inputs?" Removes self-assessment bias. Low cost, high signal for catching model quality drift.
+
+---
+
+## Asset Selection Research — Completed 2026-05-11
+
+Full 4-asset grid backtest completed on Bitstamp/Gemini hourly OHLCV
+data (Mar 2022 - May 2026, $500 universe, 0.25% Kraken maker fee).
+
+### Key findings
+
+Realized P&L (pure grid arbitrage, strips price appreciation):
+- DOGE: $606.87 over 4.2 years at 2.5% spacing / 4 levels / 0.33 fills/day
+- SOL:  $126.03 over 4.2 years at 2.0% spacing / 3 levels / 0.31 fills/day
+- XRP:   $39.26 over 4.2 years at 1.5% spacing / 5 levels / 0.31 fills/day
+- ADA:  -$20.19 — eliminated, never profitable in any config
+
+Median hourly range (Mar 2022 - May 2026):
+- SOL:  1.034%
+- DOGE: 0.885%
+- XRP:  0.800%
+- ADA:  0.570%
+
+### Critical finding: tight spacing is universally harmful
+
+At 0.8-1.0% spacing across ALL four assets, realized P&L is
+approximately -$352 to -$354. This is not asset-specific — it is
+the structural cost of high fill frequency during the 2022 bear
+market (continuous inventory accumulation into falling prices)
+combined with fee drag that exceeds grid profit at tight spacing.
+
+At 0.25% maker fee, break-even spacing = 0.50% (fees consume 100%
+of gross profit). Profitable spacing starts at ~0.8% where fee
+drag drops to 62.5% and net per round trip = 0.30%.
+
+### Optimal spacing by asset (empirical)
+
+- XRP:  1.5% (large forgiving parameter region in contour plot)
+- DOGE: 2.5% (narrow but high-reward region)
+- SOL:  2.0% (narrow parameter window — easy to get wrong)
+- ADA:  eliminate
+
+### Asset selection conclusion
+
+XRP: Most forgiving parameter space. Wide green region in IRR
+contour means MAGI errors in spacing are survivable. Recommended
+for paper validation at current scale ($50-500 universe).
+
+DOGE: Highest pure grid profit. Best candidate for live trading
+at meaningful scale. Requires 2.0-2.5% spacing and MAGI's HALT
+capability during sustained downtrends. Gap-move risk between
+hourly observer cycles is the primary operational concern.
+
+SOL: Eliminated for now. Narrow optimal parameter window makes
+it sensitive to MAGI spacing errors. 2022 drawdown (-95%) is
+structurally dangerous for a grid strategy.
+
+ADA: Eliminated. Never profitable in any tested configuration.
+
+### Next steps
+
+1. Complete XRP paper validation (current)
+2. When going live, consider DOGE as primary asset at 2.0-2.5%
+   spacing with $500+ universe
+3. Revisit SOL if Kraken improves fee tier access

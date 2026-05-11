@@ -631,7 +631,19 @@ class GridEngine:
                         f"MAGI WIDEN — spacing {spacing*100:.3f}% → "
                         f"{new_spacing*100:.3f}%"
                     )
-                    self.initialise_grid(centre=centre, spacing_pct=new_spacing)
+                    # Recentre to current market price on every WIDEN.
+                    # Using the stale grid centre causes buy levels to be
+                    # placed far below market when price has drifted up,
+                    # making fills structurally unreachable and creating
+                    # one-directional XRP drain. Recentring ensures the
+                    # new grid is bilateral and symmetric around actual price.
+                    widen_centre = self.get_current_price() or centre
+                    if widen_centre != centre:
+                        log.info(
+                            f"MAGI WIDEN — recentring from {centre:.5f} "
+                            f"to current price {widen_centre:.5f} before rebuild"
+                        )
+                    self.initialise_grid(centre=widen_centre, spacing_pct=new_spacing)
 
             else:  # MAINTAIN
                 log.info("MAGI MAINTAIN — no grid changes")
