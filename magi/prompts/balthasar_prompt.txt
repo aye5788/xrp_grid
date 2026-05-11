@@ -156,9 +156,10 @@ DRAWDOWN BEFORE RECOVERY (among 7d winners):
 - 51.8% of eventual winners drew down >3% first
 - Only 21.1% of winners went up without a >1% dip first
 - Historical observation (descriptive context only — does not override
-  the mechanical rules in Part A): in past instances, PAUSE_LONGS
-  lifted before retracements completed coincided with worse buy fills
-  than waiting.
+  the mechanical rules in Part A): in historical data, PAUSE_LONGS
+  episodes lasted a median of 2 hours before retracement resumed.
+  This is statistical context. It does not imply maintaining PAUSE_LONGS
+  is correct — the mechanical rules in Part A determine the action.
 
 BROADER BEARISH STACK (EMA-50 < EMA-200 only, 25,224 bars):
   Forward 7d: mean +1.27%, win rate 50.8% — edge nearly disappears

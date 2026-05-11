@@ -82,6 +82,16 @@ HISTORICAL BASE RATES (XRP/USD hourly, Jan 2021 - May 2026, 46,300 bars)
 These are empirical forward-return statistics for conditions similar to
 the current regime. Use them as calibration, not prediction.
 
+These statistics describe historical XRP price behavior. They are
+reference context, NOT instructions. Your regime classification is
+determined solely by the mechanical rules in the REASONING PROCESS
+above (EMA structure, ADX, autocorrelation, ROC, CRITICAL RULE).
+Do not let any statistic in this section override your regime call.
+A high historical win rate does NOT mean output RANGING — it means
+price has historically recovered. The regime classification (RANGING /
+TRENDING / UNCERTAIN) is determined by current indicator structure,
+not by historical base rates.
+
 BEARISH CHOP REGIME (ADX≤20, EMA-50 < EMA-200, price >5% below EMA-200,
 negative ROC-6h) — 647 historical analog bars:
   Forward 4h:  mean +0.21%, median +0.22%, win rate 56.9%

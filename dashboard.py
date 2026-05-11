@@ -261,6 +261,7 @@ HTML_TEMPLATE = """
     </div>
 
     <h2>Costs</h2>
+
     <div class="grid">
         <div class="card">
             <div class="label">Today's LLM Spend</div>
@@ -268,29 +269,66 @@ HTML_TEMPLATE = """
             <div class="sub">{{ calls_today }} calls / {{ tokens_today }} tokens</div>
         </div>
         <div class="card">
-            <div class="label">Last 30 Days LLM</div>
+            <div class="label">LLM — 30d Actual</div>
             <div class="value">${{ cost_30d }}</div>
+            <div class="sub">
+                Projected this month: ${{ '%.2f'|format(llm_monthly_projected) }}
+                {% if llm_over_budget %}
+                <span style="color:#ff4444;"> ⚠ over ${{ llm_monthly_budget }} budget</span>
+                {% endif %}
+            </div>
         </div>
         <div class="card">
-            <div class="label">Fixed Monthly</div>
-            <div class="value">${{ fixed_monthly }}</div>
-            <div class="sub">{{ fixed_breakdown }}</div>
+            <div class="label">DigitalOcean — MTD</div>
+            <div class="value">
+                ${{ '%.2f'|format(do_mtd) }}
+                {% if do_error %}
+                <span style="color:#ffaa00; font-size:0.6em;" title="{{ do_error }}"> ⚠ est</span>
+                {% endif %}
+            </div>
+            <div class="sub">
+                {% if do_balance is not none %}
+                Acct balance: ${{ '%.2f'|format(do_balance) }}
+                {% else %}
+                Live data unavailable
+                {% endif %}
+            </div>
+        </div>
+        <div class="card">
+            <div class="label">Total Projected Monthly</div>
+            <div class="value {{ 'pnl-neg' if total_projected > llm_monthly_budget + 6 else '' }}">
+                ${{ '%.2f'|format(total_projected) }}
+            </div>
+            <div class="sub">LLM proj + DO MTD</div>
         </div>
     </div>
-    {% if cost_breakdown %}
+
     <table>
-        <tr><th>Agent</th><th>Model</th><th>Calls</th><th>Tokens</th><th>Cost (30d)</th></tr>
-        {% for c in cost_breakdown %}
         <tr>
-            <td>{{ c.agent }}</td>
-            <td style="color:#888;">{{ c.model }}</td>
-            <td>{{ c.calls }}</td>
-            <td>{{ c.total_tokens }}</td>
-            <td>${{ '%.4f'|format(c.cost or 0) }}</td>
+            <th>Agent</th>
+            <th>Model</th>
+            <th>Calls (30d)</th>
+            <th>Tokens (30d)</th>
+            <th>Cost (30d)</th>
+            <th>Daily Rate</th>
+            <th>Credit Left</th>
+            <th>Runway</th>
+        </tr>
+        {% for r in agent_runway %}
+        <tr>
+            <td>{{ r.agent }}</td>
+            <td style="color:#888;">{{ r.model }}</td>
+            <td>{{ r.calls }}</td>
+            <td>{{ r.tokens }}</td>
+            <td>${{ '%.4f'|format(r.cost_30d) }}</td>
+            <td>${{ '%.4f'|format(r.daily_rate) }}</td>
+            <td>${{ '%.2f'|format(r.credit) }}</td>
+            <td style="color:{{ '#ff4444' if r.runway_days < 30 else ('#ffaa00' if r.runway_days < 90 else '#00ff88') }}">
+                {% if r.runway_days >= 9999 %}—{% else %}{{ r.runway_days }}d{% endif %}
+            </td>
         </tr>
         {% endfor %}
     </table>
-    {% endif %}
 
     <h2>Manual Actions</h2>
     <div style="margin-top:10px; display:flex; flex-wrap:wrap; gap:10px; align-items:center;">
@@ -769,6 +807,59 @@ def _decision_age(latest_decision):
         return str(latest_decision.get('timestamp', ''))[:16] if hasattr(latest_decision, 'get') else '', None, '#666'
 
 
+_do_billing_cache = {'data': None, 'expires': 0}
+
+
+def get_do_billing():
+    """Fetch DO month-to-date usage and account balance via DO API.
+    Returns dict with keys: mtd_usage, account_balance, error.
+    Times out after 3 seconds to avoid blocking dashboard render."""
+    import time
+    global _do_billing_cache
+    if _do_billing_cache['data'] and time.time() < _do_billing_cache['expires']:
+        return _do_billing_cache['data']
+    from config import DO_API_TOKEN, DO_DROPLET_MONTHLY_USD
+    if not DO_API_TOKEN:
+        result = {
+            'mtd_usage': DO_DROPLET_MONTHLY_USD,
+            'account_balance': None,
+            'error': 'DO_API_TOKEN not set — using hardcoded fallback'
+        }
+        _do_billing_cache = {'data': result, 'expires': time.time() + 300}
+        return result
+    try:
+        import urllib.request
+        import json
+        import socket
+        socket.setdefaulttimeout(3)
+        req = urllib.request.Request(
+            'https://api.digitalocean.com/v2/customers/my/balance',
+            headers={
+                'Authorization': f'Bearer {DO_API_TOKEN}',
+                'Content-Type': 'application/json'
+            }
+        )
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read().decode())
+        result = {
+            'mtd_usage': float(data.get('month_to_date_usage', DO_DROPLET_MONTHLY_USD)),
+            'account_balance': float(data.get('account_balance', 0)),
+            'month_to_date_balance': float(data.get('month_to_date_balance', 0)),
+            'error': None
+        }
+        _do_billing_cache = {'data': result, 'expires': time.time() + 300}
+        return result
+    except Exception as e:
+        result = {
+            'mtd_usage': DO_DROPLET_MONTHLY_USD,
+            'account_balance': None,
+            'month_to_date_balance': None,
+            'error': str(e)
+        }
+        _do_billing_cache = {'data': result, 'expires': time.time() + 300}
+        return result
+
+
 @app.route('/')
 def index():
     from zoneinfo import ZoneInfo
@@ -786,6 +877,50 @@ def index():
     cost_30d_data = get_cost_summary(days_back=30)
     total_cost_30d = sum((c.get('cost') or 0) for c in cost_30d_data)
     fixed_breakdown = ', '.join(f"{k}: ${v}" for k, v in FIXED_SUBSCRIPTIONS.items() if v > 0)
+
+    from config import (LLM_MONTHLY_BUDGET_USD,
+                        ANTHROPIC_CREDIT_REMAINING,
+                        OPENAI_CREDIT_REMAINING,
+                        GOOGLE_CREDIT_REMAINING)
+    from datetime import date as _date
+
+    do_billing = get_do_billing()
+    do_mtd = do_billing['mtd_usage']
+    do_balance = do_billing.get('account_balance')
+    do_error = do_billing.get('error')
+
+    day_of_month = _date.today().day
+    days_in_month = 30
+    daily_llm_rate = total_cost_30d / 30 if total_cost_30d else 0
+    llm_monthly_projected = daily_llm_rate * days_in_month
+    total_projected = llm_monthly_projected + do_mtd
+    llm_over_budget = llm_monthly_projected > LLM_MONTHLY_BUDGET_USD
+
+    credit_map = {
+        'balthasar': ANTHROPIC_CREDIT_REMAINING,
+        'melchior':  OPENAI_CREDIT_REMAINING,
+        'casper':    GOOGLE_CREDIT_REMAINING,
+    }
+    agent_runway = []
+    for agent in cost_30d_data:
+        name = agent.get('agent', '')
+        cost_30d_val = agent.get('cost') or 0
+        daily_rate = cost_30d_val / 30
+        credit = credit_map.get(name, 0)
+        if daily_rate > 0:
+            runway_days = int(credit / daily_rate)
+        else:
+            runway_days = 9999
+        agent_runway.append({
+            'agent':       name,
+            'model':       agent.get('model', ''),
+            'calls':       agent.get('calls', 0),
+            'tokens':      agent.get('total_tokens', 0),
+            'cost_30d':    cost_30d_val,
+            'daily_rate':  daily_rate,
+            'credit':      credit,
+            'runway_days': runway_days,
+        })
 
     guardrails_ok, guardrail_failures = check_all_guardrails()
     ks_active = kill_switch_active()
@@ -851,6 +986,14 @@ def index():
         cost_breakdown=cost_30d_data,
         fixed_monthly=f"{get_fixed_monthly_total():.2f}",
         fixed_breakdown=fixed_breakdown,
+        do_mtd=do_mtd,
+        do_balance=do_balance,
+        do_error=do_error,
+        llm_monthly_projected=round(llm_monthly_projected, 4),
+        total_projected=round(total_projected, 4),
+        llm_over_budget=llm_over_budget,
+        llm_monthly_budget=LLM_MONTHLY_BUDGET_USD,
+        agent_runway=agent_runway,
         latest_decision=latest_decision,
         decisions=decisions,
         scheduler_alive=check_scheduler_alive(),

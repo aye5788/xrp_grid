@@ -143,9 +143,14 @@ def init_db():
 def insert_candle(timestamp, timeframe, o, h, l, c_price, volume):
     conn = get_conn()
     try:
-        conn.execute('''INSERT OR IGNORE INTO candles
+        conn.execute('''INSERT INTO candles
             (timestamp, timeframe, open, high, low, close, volume)
-            VALUES (?,?,?,?,?,?,?)''',
+            VALUES (?,?,?,?,?,?,?)
+            ON CONFLICT(timestamp, timeframe) DO UPDATE SET
+                high   = MAX(excluded.high,  candles.high),
+                low    = MIN(excluded.low,   candles.low),
+                close  = excluded.close,
+                volume = excluded.volume''',
             (timestamp, timeframe, o, h, l, c_price, volume))
         conn.commit()
     finally:
@@ -507,6 +512,21 @@ def get_shadow_grid_state(level_count):
     if row and row['state_blob']:
         return json.loads(row['state_blob'])
     return None
+
+
+def get_active_shadow_level_count() -> int | None:
+    """Return the level_count currently in use by the live grid,
+    from the grid_state table. This is the authoritative source —
+    shadow_grid_state.updated_at is not reliable because persist_all()
+    always writes all variants, making the last-updated variant
+    arbitrary."""
+    conn = get_conn()
+    row = conn.execute(
+        '''SELECT levels FROM grid_state
+           ORDER BY timestamp DESC LIMIT 1'''
+    ).fetchone()
+    conn.close()
+    return int(row['levels']) if row and row['levels'] else None
 
 
 def get_all_shadow_states():

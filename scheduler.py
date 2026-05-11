@@ -59,7 +59,7 @@ def run_observer_cycle():
         if price:
             engine.process_shadow_tick(price)
             if engine.paper:
-                from database import get_latest_candle_hl
+                from database import get_current_grid_state, get_latest_candle_hl
                 candle_high, candle_low = get_latest_candle_hl('1h')
                 if candle_high and candle_low:
                     log.info(
@@ -74,6 +74,57 @@ def run_observer_cycle():
                 if filled:
                     log.info(f"Observer: {len(filled)} paper fills at {price:.4f}")
                     engine.update_inventory(price)
+
+                    # Place replacement orders at the opposite side.
+                    # A sell fill → replacement buy one spacing below fill price.
+                    # A buy fill → replacement sell one spacing above fill price.
+                    grid_state = get_current_grid_state()
+                    spacing_pct = grid_state['spacing_pct'] if grid_state else None
+
+                    if spacing_pct:
+                        replacements = 0
+                        for order in filled:
+                            try:
+                                if order['side'] == 'sell':
+                                    replacement_price = round(
+                                        order['price'] * (1 - spacing_pct), 5
+                                    )
+                                    replacement_side = 'buy'
+                                else:
+                                    replacement_price = round(
+                                        order['price'] * (1 + spacing_pct), 5
+                                    )
+                                    replacement_side = 'sell'
+
+                                result = engine.place_order(
+                                    replacement_side,
+                                    replacement_price,
+                                    order['size']
+                                )
+                                if result.get('status') in ('open', 'filled'):
+                                    replacements += 1
+                                    log.info(
+                                        f"[GRID REPLENISH] {order['side'].upper()} fill "
+                                        f"@ {order['fill_price']:.4f} → "
+                                        f"replacement {replacement_side.upper()} "
+                                        f"@ {replacement_price:.4f}"
+                                    )
+                                else:
+                                    log.warning(
+                                        f"[GRID REPLENISH] Replacement order rejected: "
+                                        f"status={result.get('status')} "
+                                        f"side={replacement_side} "
+                                        f"price={replacement_price:.4f}"
+                                    )
+                            except Exception as e:
+                                log.warning(f"[GRID REPLENISH] Failed to place replacement: {e}")
+
+                        log.info(f"Observer: {replacements}/{len(filled)} replacements placed")
+                    else:
+                        log.warning(
+                            "[GRID REPLENISH] No grid state found — skipping "
+                            "replacement orders"
+                        )
     except Exception as e:
         log.error(f"Shadow tick error: {e}")
 

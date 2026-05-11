@@ -79,6 +79,19 @@ class GridEngine:
         from grid.shadow_simulator import ShadowSimulator
         self.shadow_sim = ShadowSimulator(GRID_LEVEL_VARIANTS)
         self.shadow_sim.load_from_db()
+        # Restore _last_shadow_level_count from DB so restarts don't
+        # trigger unnecessary shadow full-rebuilds.
+        try:
+            from database import get_active_shadow_level_count
+            persisted_lc = get_active_shadow_level_count()
+            if persisted_lc is not None:
+                self._last_shadow_level_count = persisted_lc
+                log.info(
+                    f"Shadow level count restored from DB: "
+                    f"_last_shadow_level_count={persisted_lc}"
+                )
+        except Exception as e:
+            log.warning(f"Could not restore shadow level count: {e}")
         grid_state = get_current_grid_state()
         if grid_state and grid_state.get('levels'):
             self.level_count = grid_state['levels']
@@ -583,7 +596,16 @@ class GridEngine:
                 else:
                     new_spacing = spacing * 0.8
                     log.info(f"MAGI TIGHTEN — spacing {spacing*100:.3f}% → {new_spacing*100:.3f}% (hardcoded 0.8x fallback)")
-                self.initialise_grid(centre=centre, spacing_pct=new_spacing)
+                from config import MIN_GRID_SPACING_PCT
+                if new_spacing < MIN_GRID_SPACING_PCT:
+                    log.warning(
+                        f"MAGI TIGHTEN floored — proposed spacing "
+                        f"{new_spacing*100:.3f}% below MIN_GRID_SPACING_PCT "
+                        f"{MIN_GRID_SPACING_PCT*100:.3f}%. Holding at "
+                        f"{spacing*100:.3f}%."
+                    )
+                else:
+                    self.initialise_grid(centre=centre, spacing_pct=new_spacing)
 
             elif grid_action == 'WIDEN':
                 # Use Melchior's spacing_adjustment_pct if provided and valid.
@@ -596,7 +618,20 @@ class GridEngine:
                 else:
                     new_spacing = spacing * 1.2
                     log.info(f"MAGI WIDEN — spacing {spacing*100:.3f}% → {new_spacing*100:.3f}% (hardcoded 1.2x fallback)")
-                self.initialise_grid(centre=centre, spacing_pct=new_spacing)
+                from config import MAX_GRID_SPACING_PCT
+                if new_spacing > MAX_GRID_SPACING_PCT:
+                    log.warning(
+                        f"MAGI WIDEN capped — proposed spacing "
+                        f"{new_spacing*100:.3f}% exceeds MAX_GRID_SPACING_PCT "
+                        f"{MAX_GRID_SPACING_PCT*100:.3f}%. Holding at "
+                        f"{spacing*100:.3f}%."
+                    )
+                else:
+                    log.info(
+                        f"MAGI WIDEN — spacing {spacing*100:.3f}% → "
+                        f"{new_spacing*100:.3f}%"
+                    )
+                    self.initialise_grid(centre=centre, spacing_pct=new_spacing)
 
             else:  # MAINTAIN
                 log.info("MAGI MAINTAIN — no grid changes")

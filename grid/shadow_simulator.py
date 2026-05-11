@@ -72,11 +72,19 @@ class ShadowGrid:
 
             fee = order['size'] * order['price'] * self.maker_fee
             if order['side'] == 'buy':
+                cost = order['size'] * order['price'] + fee
+                if self.inventory_usd < cost:
+                    # Insufficient USD — skip fill, order stays resting
+                    continue
                 self.inventory_xrp += order['size']
-                self.inventory_usd -= order['size'] * order['price'] + fee
+                self.inventory_usd -= cost
             else:
+                if self.inventory_xrp < order['size']:
+                    # Insufficient XRP — skip fill, order stays resting
+                    continue
+                proceeds = order['size'] * order['price'] - fee
                 self.inventory_xrp -= order['size']
-                self.inventory_usd += order['size'] * order['price'] - fee
+                self.inventory_usd += proceeds
 
             self.fills.append({
                 'timestamp': datetime.now(timezone.utc).isoformat(),
