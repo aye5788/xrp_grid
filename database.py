@@ -160,6 +160,22 @@ def get_candles(timeframe, limit=500):
     return [dict(r) for r in rows]
 
 
+def get_latest_candle_hl(timeframe='1h'):
+    """Return (high, low) of the most recent completed candle,
+    or (None, None) if no candles exist."""
+    conn = get_conn()
+    row = conn.execute(
+        '''SELECT high, low FROM candles
+           WHERE timeframe=?
+           ORDER BY timestamp DESC LIMIT 1''',
+        (timeframe,)
+    ).fetchone()
+    conn.close()
+    if row:
+        return float(row['high']), float(row['low'])
+    return None, None
+
+
 # --- Indicator helpers ---
 
 def upsert_indicators(timestamp, timeframe, data: dict):
@@ -413,6 +429,25 @@ def insert_magi_decision(data: dict):
     placeholders = ', '.join(['?' for _ in data])
     conn.execute(f'INSERT INTO magi_decisions ({fields}) VALUES ({placeholders})',
         list(data.values()))
+    conn.commit()
+    conn.close()
+
+
+def get_latest_magi_decision_id():
+    conn = get_conn()
+    row = conn.execute(
+        'SELECT id FROM magi_decisions ORDER BY id DESC LIMIT 1'
+    ).fetchone()
+    conn.close()
+    return row['id'] if row else None
+
+
+def mark_magi_decision_applied(decision_id):
+    conn = get_conn()
+    conn.execute(
+        'UPDATE magi_decisions SET applied=1 WHERE id=?',
+        (decision_id,)
+    )
     conn.commit()
     conn.close()
 

@@ -140,13 +140,17 @@ def run_cycle(trigger='scheduled', force=False):
         'applied': 0,
         'notes': consensus['reason']
     }
-    insert_magi_decision(decision_data)
+    decision_id = insert_magi_decision(decision_data)
+    if decision_id is None:
+        from database import get_latest_magi_decision_id
+        decision_id = get_latest_magi_decision_id()
 
     return {
         'melchior': melchior,
         'balthasar': balthasar,
         'casper': casper,
-        'consensus': consensus
+        'consensus': consensus,
+        'decision_id': decision_id,
     }
 
 

@@ -59,7 +59,18 @@ def run_observer_cycle():
         if price:
             engine.process_shadow_tick(price)
             if engine.paper:
-                filled = engine.simulate_fills(price)
+                from database import get_latest_candle_hl
+                candle_high, candle_low = get_latest_candle_hl('1h')
+                if candle_high and candle_low:
+                    log.info(
+                        f"Observer: simulating fills — price={price:.4f} "
+                        f"candle_high={candle_high:.4f} candle_low={candle_low:.4f}"
+                    )
+                filled = engine.simulate_fills(
+                    price,
+                    candle_high=candle_high,
+                    candle_low=candle_low
+                )
                 if filled:
                     log.info(f"Observer: {len(filled)} paper fills at {price:.4f}")
                     engine.update_inventory(price)
@@ -91,6 +102,13 @@ def run_magi_cycle(trigger='scheduled'):
                     log.error(f"Shadow eval error: {e}")
 
             engine.apply_magi_decision(consensus)
+            from database import mark_magi_decision_applied
+            did = result.get('decision_id') if result else None
+            if did is not None:
+                try:
+                    mark_magi_decision_applied(did)
+                except Exception as e:
+                    log.warning(f"Failed to mark decision {did} applied: {e}")
             price = engine.get_current_price()
             if price:
                 engine.update_inventory(price)
@@ -171,8 +189,31 @@ def main():
     else:
         log.info(f"Resumed {len(engine.paper_orders)} paper orders from DB — skipping fresh grid init")
 
-    # Run initial MAGI cycle
-    run_magi_cycle(trigger='startup')
+    # Run initial MAGI cycle (debounced — skip if a cycle ran within 30 min)
+    try:
+        from database import get_conn
+        conn = get_conn()
+        row = conn.execute(
+            "SELECT timestamp FROM magi_decisions ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        skip_startup = False
+        if row:
+            last_ts = datetime.fromisoformat(row['timestamp'])
+            if last_ts.tzinfo is None:
+                last_ts = last_ts.replace(tzinfo=timezone.utc)
+            age_min = (datetime.now(timezone.utc) - last_ts).total_seconds() / 60
+            if age_min < 30:
+                log.info(
+                    f"Skipping startup MAGI — last cycle was {age_min:.1f} "
+                    f"minutes ago (< 30 min debounce)"
+                )
+                skip_startup = True
+        if not skip_startup:
+            run_magi_cycle(trigger='startup')
+    except Exception as e:
+        log.warning(f"Startup debounce check failed, running cycle anyway: {e}")
+        run_magi_cycle(trigger='startup')
 
     last_observer_time = datetime.now(timezone.utc)
 

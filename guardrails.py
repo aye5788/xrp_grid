@@ -57,7 +57,15 @@ def check_daily_loss() -> tuple:
         return True, 0.0, "OK (no current snapshot)"
 
     baseline_universe = (baseline['net_position_usd'] or 0) + (baseline['usd_held'] or 0)
-    current_universe = (current['net_position_usd'] or 0) + (current['usd_held'] or 0)
+    from grid.engine import GridEngine
+    _e = GridEngine(paper=True)
+    current_price = _e.get_current_price()
+    xrp_held = current['xrp_held'] or 0
+    usd_held = current['usd_held'] or 0
+    if current_price:
+        current_universe = xrp_held * current_price + usd_held
+    else:
+        current_universe = (current['net_position_usd'] or 0) + usd_held
 
     if baseline_universe <= 0:
         return True, 0.0, "OK (baseline universe is zero or negative)"

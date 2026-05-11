@@ -126,6 +126,14 @@ HTML_TEMPLATE = """
     </div>
 
     <h2>Paper P&amp;L</h2>
+    <div style="font-size:0.85em; color:#666; margin-bottom:8px;">
+        Last fill: <span style="color:{{ fill_age_color }};">{{ fill_age_label }}</span>
+        {% if fill_stale %}
+        <span style="color:#ff4444; margin-left:12px;">
+            ⚠ No fills in 24h+ — metrics below describe historical activity, not current operation.
+        </span>
+        {% endif %}
+    </div>
     <div class="grid">
         <div class="card">
             <div class="label">Realized P&amp;L</div>
@@ -794,6 +802,35 @@ def index():
 
     decision_ts_display, decision_age_label, decision_age_color = _decision_age(latest_decision)
 
+    mins_since = snap.get('time_since_last_fill_minutes')
+    if mins_since is None:
+        fill_age_label = "no fills yet"
+        # Check if any open orders have been sitting > 24h with no fills
+        from database import get_conn as _get_conn
+        _conn = _get_conn()
+        _old_open = _conn.execute(
+            """SELECT COUNT(*) FROM grid_orders
+               WHERE status='open'
+               AND timestamp < datetime('now', '-24 hours')"""
+        ).fetchone()[0]
+        _conn.close()
+        if _old_open > 0:
+            fill_age_color = "#ff4444"
+            fill_stale = True
+        else:
+            fill_age_color = "#888"
+            fill_stale = False
+    else:
+        hours = mins_since / 60
+        if hours < 1:
+            fill_age_label = f"{int(mins_since)} min ago"
+        elif hours < 24:
+            fill_age_label = f"{hours:.1f} h ago"
+        else:
+            fill_age_label = f"{hours/24:.1f} d ago"
+        fill_age_color = "#ff4444" if hours > 24 else "#00ff88" if hours < 2 else "#ffaa00"
+        fill_stale = hours > 24
+
     return render_template_string(HTML_TEMPLATE,
         now=now,
         price=f"{price:.4f}" if price else "N/A",
@@ -838,6 +875,9 @@ def index():
         pnl_avg_per_trip=snap['avg_pnl_per_round_trip'],
         pnl_fills_today=snap['fills_today'],
         pnl_mins_since=snap['time_since_last_fill_minutes'],
+        fill_age_label=fill_age_label,
+        fill_age_color=fill_age_color,
+        fill_stale=fill_stale,
         live_pnl_pct_fmt=f"{live_pnl_pct:.4f}",
         best_shadow_level=best_shadow_level,
         best_shadow_pnl_fmt=f"{best_shadow_pnl:.4f}",
@@ -937,6 +977,13 @@ def trigger_magi():
         # Without this call, decisions are recorded but never enforced.
         consensus = result.get('consensus', {})
         engine.apply_magi_decision(consensus)
+        from database import mark_magi_decision_applied
+        did = result.get('decision_id')
+        if did is not None:
+            try:
+                mark_magi_decision_applied(did)
+            except Exception as e:
+                log.warning(f"Failed to mark decision {did} applied: {e}")
         return jsonify({
             'ok': True,
             'consensus': consensus,

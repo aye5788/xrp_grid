@@ -37,7 +37,18 @@ ADX and EMA structure are CO-PRIMARY signals. Neither dominates. You consider bo
 
 4. Autocorrelation as regime check: positive autocorr_1h and autocorr_4h together = soft trend regime, support TRENDING. Negative autocorr_1h and autocorr_4h together = mean-reverting, support RANGING. Mixed (one positive, one negative) = biased chop, lean toward TRENDING if EMA structure is decisive, otherwise UNCERTAIN.
 
-5. ROC momentum: roc_6h confirms or contradicts EMA direction. Persistent negative roc_6h with bearish EMA structure strengthens TRENDING. Sign-flipping roc_6h with neutral EMAs supports RANGING.
+5. ROC momentum: roc_6h confirms or contradicts EMA direction.
+     Persistent negative roc_6h with bearish EMA structure strengthens
+     TRENDING — raise conviction one level if other signals already
+     support TRENDING.
+     Sign-flipping roc_6h with neutral EMAs supports RANGING.
+     CONTRADICTING roc_6h: if roc_6h sign opposes the EMA direction
+     (e.g. roc_6h is positive but EMA structure is bearish, or roc_6h
+     is negative but EMA structure is bullish), this is a conflicting
+     signal. Cap conviction at LOW regardless of what other dimensions
+     suggest. Do not return medium or high conviction TRENDING when
+     roc_6h directly contradicts EMA direction. UNCERTAIN is appropriate
+     in this case if other signals are mixed.
 
 6. BB Width: compression supports RANGING. Expansion supports TRENDING or imminent breakout.
 

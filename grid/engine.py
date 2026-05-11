@@ -373,14 +373,18 @@ class GridEngine:
 
         return self.exchange.cancel_all_open_orders()
 
-    def simulate_fills(self, current_price: float):
+    def simulate_fills(self, current_price: float,
+                       candle_high: float = None,
+                       candle_low: float = None):
         """Paper mode: check which resting orders would be filled at current price."""
         filled = []
         for order_id, order in list(self.paper_orders.items()):
             if order['status'] != 'open':
                 continue
             filled_flag = False
-            if order['side'] == 'buy' and current_price <= order['price']:
+            check_low = candle_low if candle_low is not None else current_price
+            check_high = candle_high if candle_high is not None else current_price
+            if order['side'] == 'buy' and check_low <= order['price']:
                 cost_usd = order['size'] * order['price']
                 if self.paper_inventory['usd'] < cost_usd:
                     log.warning(
@@ -392,7 +396,7 @@ class GridEngine:
                 filled_flag = True
                 self.paper_inventory['xrp'] += order['size']
                 self.paper_inventory['usd'] -= cost_usd
-            elif order['side'] == 'sell' and current_price >= order['price']:
+            elif order['side'] == 'sell' and check_high >= order['price']:
                 if self.paper_inventory['xrp'] < order['size']:
                     log.warning(
                         f"[PAPER REJECT] Sell fill rejected — insufficient XRP. "
@@ -474,7 +478,22 @@ class GridEngine:
         log.info(f"Grid initialised — {placed}/{len(levels)} orders placed")
 
         if self.shadow_sim:
-            self.shadow_sim.rebuild(centre, spacing_pct)
+            # Only do a full shadow rebuild when level count changes.
+            # On spacing/centre changes, update centre metadata only —
+            # preserves resting orders and prevents fill-count resets.
+            if getattr(self, '_last_shadow_level_count', None) != self.level_count:
+                self.shadow_sim.rebuild(centre, spacing_pct)
+                self._last_shadow_level_count = self.level_count
+                log.info(
+                    f"Shadow sim full rebuild — level count changed to "
+                    f"{self.level_count}"
+                )
+            else:
+                self.shadow_sim.update_centre(centre, spacing_pct)
+                log.info(
+                    f"Shadow sim centre update only — level count "
+                    f"{self.level_count} unchanged, orders preserved"
+                )
 
         return True
 
@@ -497,50 +516,90 @@ class GridEngine:
         centre = current_state['centre_price']
         spacing = current_state['spacing_pct']
 
-        if grid_action == 'RECENTRE':
-            # Use Melchior's computed recentre_target if provided and valid.
-            # Fall back to VWAP from indicators only if Melchior didn't supply one.
-            melchior_target = consensus.get('recentre_target')
-            if melchior_target and isinstance(melchior_target, (int, float)) and melchior_target > 0:
-                new_centre = melchior_target
-                log.info(f"MAGI RECENTRE — {centre} → {new_centre} (Melchior target)")
-            else:
-                indicators = get_latest_indicators('1h')
-                new_centre = indicators.get('vwap') if indicators else None
-                log.info(f"MAGI RECENTRE — {centre} → {new_centre} (VWAP fallback)")
-            if new_centre:
-                self.initialise_grid(centre=new_centre, spacing_pct=spacing)
-            else:
-                log.warning("MAGI RECENTRE — no valid target, skipping")
+        rebuild_requested = grid_action in ('RECENTRE', 'TIGHTEN', 'WIDEN')
+        guard_tripped = False
 
-        elif grid_action == 'TIGHTEN':
-            # Use Melchior's spacing_adjustment_pct if provided and valid.
-            # Treated as a multiplier (e.g. 0.85 means tighten to 85% of current spacing).
-            # Fall back to hardcoded 0.8x only if Melchior didn't supply a valid one.
-            adj = consensus.get('spacing_adjustment_pct')
-            if adj and isinstance(adj, (int, float)) and 0.5 <= adj <= 0.99:
-                new_spacing = spacing * adj
-                log.info(f"MAGI TIGHTEN — spacing {spacing*100:.3f}% → {new_spacing*100:.3f}% (Melchior adj={adj})")
-            else:
-                new_spacing = spacing * 0.8
-                log.info(f"MAGI TIGHTEN — spacing {spacing*100:.3f}% → {new_spacing*100:.3f}% (hardcoded 0.8x fallback)")
-            self.initialise_grid(centre=centre, spacing_pct=new_spacing)
+        if rebuild_requested:
+            price = self.get_current_price() or centre
+            order_size_xrp = self.compute_order_size(price)
+            order_size_usd = order_size_xrp * price
+            xrp_held = self.paper_inventory['xrp']
+            usd_held = self.paper_inventory['usd']
 
-        elif grid_action == 'WIDEN':
-            # Use Melchior's spacing_adjustment_pct if provided and valid.
-            # Treated as a multiplier (e.g. 1.15 means widen to 115% of current spacing).
-            # Fall back to hardcoded 1.2x only if Melchior didn't supply a valid one.
-            adj = consensus.get('spacing_adjustment_pct')
-            if adj and isinstance(adj, (int, float)) and 1.01 <= adj <= 2.0:
-                new_spacing = spacing * adj
-                log.info(f"MAGI WIDEN — spacing {spacing*100:.3f}% → {new_spacing*100:.3f}% (Melchior adj={adj})")
-            else:
-                new_spacing = spacing * 1.2
-                log.info(f"MAGI WIDEN — spacing {spacing*100:.3f}% → {new_spacing*100:.3f}% (hardcoded 1.2x fallback)")
-            self.initialise_grid(centre=centre, spacing_pct=new_spacing)
+            if risk_action == 'PAUSE_LONGS' and xrp_held < order_size_xrp:
+                log.warning(
+                    f"Empty-book guard: skipping {grid_action} — "
+                    f"PAUSE_LONGS + xrp_held={xrp_held:.4f} < "
+                    f"order_size_xrp={order_size_xrp:.4f}. Rebuild "
+                    f"would produce 0 sells; buys would be cancelled "
+                    f"by PAUSE_LONGS. Risk action still applied."
+                )
+                insert_grid_state(
+                    centre, spacing, self.level_count,
+                    notes=f"{grid_action} skipped by empty-book guard; "
+                          f"risk={risk_action} applied"
+                )
+                guard_tripped = True
+            elif risk_action == 'PAUSE_SHORTS' and usd_held < order_size_usd:
+                log.warning(
+                    f"Empty-book guard: skipping {grid_action} — "
+                    f"PAUSE_SHORTS + usd_held={usd_held:.2f} < "
+                    f"order_size_usd={order_size_usd:.2f}. Rebuild "
+                    f"would produce 0 buys; sells would be cancelled "
+                    f"by PAUSE_SHORTS. Risk action still applied."
+                )
+                insert_grid_state(
+                    centre, spacing, self.level_count,
+                    notes=f"{grid_action} skipped by empty-book guard; "
+                          f"risk={risk_action} applied"
+                )
+                guard_tripped = True
 
-        else:  # MAINTAIN
-            log.info("MAGI MAINTAIN — no grid changes")
+        if not guard_tripped:
+            if grid_action == 'RECENTRE':
+                # Use Melchior's computed recentre_target if provided and valid.
+                # Fall back to VWAP from indicators only if Melchior didn't supply one.
+                melchior_target = consensus.get('recentre_target')
+                if melchior_target and isinstance(melchior_target, (int, float)) and melchior_target > 0:
+                    new_centre = melchior_target
+                    log.info(f"MAGI RECENTRE — {centre} → {new_centre} (Melchior target)")
+                else:
+                    indicators = get_latest_indicators('1h')
+                    new_centre = indicators.get('vwap') if indicators else None
+                    log.info(f"MAGI RECENTRE — {centre} → {new_centre} (VWAP fallback)")
+                if new_centre:
+                    self.initialise_grid(centre=new_centre, spacing_pct=spacing)
+                else:
+                    log.warning("MAGI RECENTRE — no valid target, skipping")
+
+            elif grid_action == 'TIGHTEN':
+                # Use Melchior's spacing_adjustment_pct if provided and valid.
+                # Treated as a multiplier (e.g. 0.85 means tighten to 85% of current spacing).
+                # Fall back to hardcoded 0.8x only if Melchior didn't supply a valid one.
+                adj = consensus.get('spacing_adjustment_pct')
+                if adj and isinstance(adj, (int, float)) and 0.5 <= adj <= 0.99:
+                    new_spacing = spacing * adj
+                    log.info(f"MAGI TIGHTEN — spacing {spacing*100:.3f}% → {new_spacing*100:.3f}% (Melchior adj={adj})")
+                else:
+                    new_spacing = spacing * 0.8
+                    log.info(f"MAGI TIGHTEN — spacing {spacing*100:.3f}% → {new_spacing*100:.3f}% (hardcoded 0.8x fallback)")
+                self.initialise_grid(centre=centre, spacing_pct=new_spacing)
+
+            elif grid_action == 'WIDEN':
+                # Use Melchior's spacing_adjustment_pct if provided and valid.
+                # Treated as a multiplier (e.g. 1.15 means widen to 115% of current spacing).
+                # Fall back to hardcoded 1.2x only if Melchior didn't supply a valid one.
+                adj = consensus.get('spacing_adjustment_pct')
+                if adj and isinstance(adj, (int, float)) and 1.01 <= adj <= 2.0:
+                    new_spacing = spacing * adj
+                    log.info(f"MAGI WIDEN — spacing {spacing*100:.3f}% → {new_spacing*100:.3f}% (Melchior adj={adj})")
+                else:
+                    new_spacing = spacing * 1.2
+                    log.info(f"MAGI WIDEN — spacing {spacing*100:.3f}% → {new_spacing*100:.3f}% (hardcoded 1.2x fallback)")
+                self.initialise_grid(centre=centre, spacing_pct=new_spacing)
+
+            else:  # MAINTAIN
+                log.info("MAGI MAINTAIN — no grid changes")
 
         # Refresh so pause rows reflect the post-action grid configuration.
         # RECENTRE/TIGHTEN/WIDEN each call initialise_grid() which writes a new

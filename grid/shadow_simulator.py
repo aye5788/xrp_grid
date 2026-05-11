@@ -43,6 +43,18 @@ class ShadowGrid:
             sell_price = round(centre * (1 + i * spacing_pct), 5)
             self.resting_orders[i] = {'side': 'sell', 'price': sell_price, 'size': size_xrp}
 
+    def update_centre(self, centre: float, spacing_pct: float):
+        """Update centre and spacing without resetting resting orders.
+        Used when grid spacing changes but level count stays the same.
+        Preserves all resting orders and fill history."""
+        self.centre = centre
+        self.spacing_pct = spacing_pct
+        self.last_price = centre
+        log.debug(
+            f"ShadowGrid lc={self.level_count}: centre updated to "
+            f"{centre} spacing={spacing_pct} (orders preserved)"
+        )
+
     def process_tick(self, price: float):
         """Fill triggered resting orders and flip them to reverse side."""
         if not self.resting_orders or price <= 0:
@@ -197,6 +209,15 @@ class ShadowSimulator:
         for sg in self.variants.values():
             sg.rebuild(centre, spacing_pct)
         log.info(f"ShadowSimulator rebuilt {len(self.variants)} variants @ centre={centre}")
+
+    def update_centre(self, centre: float, spacing_pct: float):
+        """Fan centre update to all variants without resetting orders."""
+        for sg in self.variants.values():
+            sg.update_centre(centre, spacing_pct)
+        log.info(
+            f"ShadowSimulator centre updated {len(self.variants)} variants "
+            f"@ centre={centre} spacing={spacing_pct} (orders preserved)"
+        )
 
     def process_tick(self, price: float):
         """Fan price tick out to all variants."""

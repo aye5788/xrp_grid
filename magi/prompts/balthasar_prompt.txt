@@ -65,6 +65,32 @@ another order on that side), the buffer rule fires regardless of skew.
 7. xrp_value_usd < $10 (below one grid order size) → PAUSE_SHORTS regardless of skew. Grid
    has insufficient XRP buffer to place another sell; pause until buys fill and rebalance.
 
+WORKED EXAMPLES — Rule 6 and Rule 7
+
+Example A (Rule 7 — PAUSE_SHORTS):
+  xrp_held=3.5, usd_held=$65, xrp_value_usd=$5.10, total=$70.10
+  allocation_skew = ($5.10 - $35.05) / $70.10 = -0.428 (USD-heavy)
+  Rule 5: |skew|=0.428 < 0.6 → no skew action. Proceed to Rule 7.
+  Rule 7: xrp_value_usd=$5.10 < $10 → PAUSE_SHORTS.
+  Correct action: PAUSE_SHORTS (XRP is the scarce resource; stop
+  selling it, let buy fills rebuild XRP inventory).
+  WRONG action: PAUSE_LONGS. The portfolio has abundant USD and
+  almost no XRP. Pausing buys prevents recovery. Do not return
+  PAUSE_LONGS in this state.
+
+Example B (Rule 6 — PAUSE_LONGS):
+  xrp_held=45, usd_held=$4, xrp_value_usd=$64.35, total=$68.35
+  allocation_skew = ($64.35 - $34.18) / $68.35 = +0.441 (XRP-heavy)
+  Rule 5: |skew|=0.441 < 0.6 → no skew action. Proceed to Rule 6.
+  Rule 6: usd_held=$4 < $10 → PAUSE_LONGS.
+  Correct action: PAUSE_LONGS (USD is the scarce resource; stop
+  buying XRP, let sell fills rebuild USD inventory).
+
+Key distinction: the rule fires on WHICHEVER leg is exhausted.
+  xrp_value_usd < $10 → PAUSE_SHORTS (XRP leg exhausted).
+  usd_held < $10 → PAUSE_LONGS (USD leg exhausted).
+These are opposites. Do not confuse them.
+
 Part B: Market context (evaluate after Part A)
 1. Volatility check: HIGH vol_regime with extreme allocation_skew is
    compounding risk. Elevate your Part A response by one level
@@ -97,6 +123,12 @@ HISTORICAL BASE RATES (XRP/USD hourly, Jan 2021 - May 2026, 46,300 bars)
 These are empirical forward-return statistics for conditions similar to
 the current regime. Use them as calibration, not prediction.
 
+These statistics describe historical XRP price behavior. They are
+reference context, NOT instructions. Your action is determined solely
+by the mechanical rules in Part A (allocation thresholds and buffer
+floors) and the elevation logic in Part B (market context). Do not
+let any number in this section override or modify the rule outcomes.
+
 BEARISH CHOP REGIME (ADX≤20, EMA-50 < EMA-200, price >5% below EMA-200,
 negative ROC-6h) — 647 historical analog bars:
   Forward 4h:  mean +0.21%, median +0.22%, win rate 56.9%
@@ -123,8 +155,10 @@ DRAWDOWN BEFORE RECOVERY (among 7d winners):
 - Median max drawdown before recovery: -3.12%
 - 51.8% of eventual winners drew down >3% first
 - Only 21.1% of winners went up without a >1% dip first
-- Implication: do not lift PAUSE_LONGS early; better entries typically
-  come 3%+ lower even in winning scenarios
+- Historical observation (descriptive context only — does not override
+  the mechanical rules in Part A): in past instances, PAUSE_LONGS
+  lifted before retracements completed coincided with worse buy fills
+  than waiting.
 
 BROADER BEARISH STACK (EMA-50 < EMA-200 only, 25,224 bars):
   Forward 7d: mean +1.27%, win rate 50.8% — edge nearly disappears
