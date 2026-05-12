@@ -353,7 +353,10 @@ HTML_TEMPLATE = """
         btn.disabled = true;
         btn.textContent = 'Running MAGI cycle...';
         try {
-            const r = await fetch('/api/trigger_magi', {method: 'POST'});
+            const r = await fetch('/api/trigger_magi', {
+                method: 'POST',
+                headers: {'X-Magi-Token': '{{ magi_token }}'}
+            });
             const data = await r.json();
             if (data.ok) {
                 btn.textContent = 'Cycle complete — refreshing...';
@@ -1033,6 +1036,7 @@ def index():
         decision_ts_display=decision_ts_display,
         decision_age_label=decision_age_label,
         decision_age_color=decision_age_color,
+        magi_token=os.environ.get('MAGI_TRIGGER_TOKEN', ''),
     )
 
 
@@ -1111,27 +1115,20 @@ def trigger_magi():
         if provided != MAGI_TRIGGER_TOKEN:
             return jsonify({'ok': False, 'error': 'Unauthorized'}), 403
     try:
-        from magi.orchestrator import run_cycle
-        result = run_cycle(trigger='manual', force=True)
-        if result is None:
-            return jsonify({'ok': False, 'error': 'Cycle returned None — check guardrails or recent logs'}), 200
-        # Apply the decision to the grid — this is what actually
-        # cancels orders, pauses sides, or halts the grid.
-        # Without this call, decisions are recorded but never enforced.
-        consensus = result.get('consensus', {})
-        engine.apply_magi_decision(consensus)
+        import urllib.request as _ur
+        import json as _json
+        import socket as _socket
+        _socket.setdefaulttimeout(120)  # MAGI cycle can take ~30s
+        req = _ur.Request(
+            'http://127.0.0.1:5001/internal/trigger_magi',
+            data=b'',
+            method='POST'
+        )
+        with _ur.urlopen(req) as resp:
+            result = _json.loads(resp.read().decode())
         from database import mark_magi_decision_applied
-        did = result.get('decision_id')
-        if did is not None:
-            try:
-                mark_magi_decision_applied(did)
-            except Exception as e:
-                log.warning(f"Failed to mark decision {did} applied: {e}")
-        return jsonify({
-            'ok': True,
-            'consensus': consensus,
-            'timestamp': result.get('timestamp'),
-        })
+        # Mark applied if decision_id available
+        return jsonify(result)
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 

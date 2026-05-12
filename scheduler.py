@@ -191,6 +191,13 @@ def main():
     # Load engine state (shadow sim) after DB is ready
     engine.load_state()
 
+    # Start internal IPC server for dashboard communication
+    _ipc_thread = _threading.Thread(
+        target=_start_internal_server, daemon=True
+    )
+    _ipc_thread.start()
+    log.info("Internal IPC server started on localhost:5001")
+
     # Fund detection — only enforced when configured exchange is the trading exchange
     from config import EXCHANGE, MAX_INVENTORY_USD
     if EXCHANGE == "kraken":
@@ -320,6 +327,44 @@ def main():
         time.sleep(60)
 
     log.info("Scheduler stopped cleanly.")
+
+
+from flask import Flask as _Flask, jsonify as _jsonify, request as _request
+import threading as _threading
+
+_internal_app = _Flask('scheduler_internal')
+
+
+@_internal_app.route('/internal/trigger_magi', methods=['POST'])
+def _internal_trigger_magi():
+    """Internal endpoint — localhost only. Called by dashboard to
+    trigger a MAGI cycle on the scheduler's engine instance."""
+    try:
+        run_magi_cycle(trigger='manual')
+        from database import get_recent_magi_decisions
+        decisions = get_recent_magi_decisions(1)
+        latest = decisions[0] if decisions else {}
+        return _jsonify({
+            'ok': True,
+            'consensus': {
+                'grid_action': latest.get('consensus_grid_action'),
+                'risk_action': latest.get('consensus_risk_action'),
+                'regime': latest.get('casper_action'),
+                'spacing_adjustment_pct': None,
+                'recentre_target': None,
+                'melchior_conviction': latest.get('melchior_conviction'),
+                'reason': latest.get('consensus_reason', ''),
+            },
+            'timestamp': latest.get('timestamp'),
+        })
+    except Exception as e:
+        return _jsonify({'ok': False, 'error': str(e)}), 500
+
+
+def _start_internal_server():
+    """Start the internal IPC server on localhost:5001."""
+    _internal_app.run(host='127.0.0.1', port=5001,
+                      debug=False, use_reloader=False)
 
 
 if __name__ == "__main__":
