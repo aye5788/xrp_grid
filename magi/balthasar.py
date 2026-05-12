@@ -5,7 +5,14 @@ from config import ANTHROPIC_API_KEY, MAX_INVENTORY_USD
 
 log = logging.getLogger('magi.balthasar')
 
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+from config import cf_gateway_url, CF_AIG_TOKEN
+_gw = cf_gateway_url("anthropic")
+client = anthropic.Anthropic(
+    api_key=ANTHROPIC_API_KEY,
+    **({"base_url": _gw,
+        "default_headers": {"cf-aig-authorization": f"Bearer {CF_AIG_TOKEN}"}}
+       if _gw else {})
+)
 
 SYSTEM_PROMPT_PATH = "/root/xrp_grid/magi/prompts/balthasar_prompt.txt"
 

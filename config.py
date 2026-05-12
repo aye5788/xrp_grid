@@ -12,6 +12,19 @@ COINBASE_API_SECRET = os.getenv("COINBASE_API_SECRET")
 KRAKEN_API_KEY = os.getenv("KRAKEN_API_KEY")
 KRAKEN_API_SECRET = os.getenv("KRAKEN_API_SECRET")
 
+# --- Cloudflare AI Gateway ---
+CF_ACCOUNT_ID  = os.getenv("CF_ACCOUNT_ID", "")
+CF_GATEWAY_ID  = os.getenv("CF_GATEWAY_ID", "magi")
+CF_AIG_TOKEN   = os.getenv("CF_AIG_TOKEN", "")
+
+def cf_gateway_url(provider: str) -> str:
+    """Return the Cloudflare AI Gateway base URL for a provider.
+    Falls back to direct provider if CF vars not set."""
+    if not CF_ACCOUNT_ID or not CF_GATEWAY_ID:
+        return ""
+    return (f"https://gateway.ai.cloudflare.com/v1/"
+            f"{CF_ACCOUNT_ID}/{CF_GATEWAY_ID}/{provider}")
+
 # --- Trading Parameters ---
 SYMBOL = "XRP-USD"
 EXCHANGE = "kraken"   # "coinbase" or "kraken"

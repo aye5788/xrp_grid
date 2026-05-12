@@ -7,7 +7,16 @@ from config import GOOGLE_API_KEY
 
 log = logging.getLogger('magi.casper')
 
-client = genai.Client(api_key=GOOGLE_API_KEY)
+from config import cf_gateway_url, CF_AIG_TOKEN
+from google.genai import types as _types
+_gw = cf_gateway_url("google-ai-studio")
+client = genai.Client(
+    api_key=GOOGLE_API_KEY,
+    **({"http_options": _types.HttpOptions(
+            base_url=_gw,
+            headers={"cf-aig-authorization": f"Bearer {CF_AIG_TOKEN}"}
+        )} if _gw else {})
+)
 
 SYSTEM_PROMPT_PATH = "/root/xrp_grid/magi/prompts/casper_prompt.txt"
 

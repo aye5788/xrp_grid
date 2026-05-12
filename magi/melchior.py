@@ -5,7 +5,14 @@ from config import OPENAI_API_KEY
 
 log = logging.getLogger('magi.melchior')
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+from config import cf_gateway_url, CF_AIG_TOKEN
+_gw = cf_gateway_url("openai")
+client = OpenAI(
+    api_key=OPENAI_API_KEY,
+    **({"base_url": _gw,
+        "default_headers": {"cf-aig-authorization": f"Bearer {CF_AIG_TOKEN}"}}
+       if _gw else {})
+)
 
 SYSTEM_PROMPT_PATH = "/root/xrp_grid/magi/prompts/melchior_prompt.txt"
 
