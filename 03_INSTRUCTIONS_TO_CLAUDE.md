@@ -53,6 +53,12 @@ After restarting services, confirm the new code is live before running cycles. T
 - **Edit code in response to a diagnostic result before understanding why the result occurred.** If the first fix didn't work, do not try a second variant of the same fix. Stop, re-read the failure, and ask what it's actually telling you.
 - **Commit or push changes.** The operator runs `magi-sync` manually. Never commit or push from within a session.
 - **Edit Python code files during documentation-only tasks.** If the task says documentation only, that means documentation only.
+- **ALWAYS append to CHANGELOG.md after every significant change.**
+  Format: [DATE] [FILE(S)] — one-line description of what changed
+  and why. Do this as part of the same commit as the code change.
+  Significant = any change to trading logic, agent prompts, database
+  schema, or system architecture. Does not apply to typo fixes or
+  comment-only changes.
 
 ---
 

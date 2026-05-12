@@ -45,14 +45,19 @@ def build_context(indicators: dict, grid_state: dict, inventory: dict,
 
     try:
         from magi.market_knowledge import get_stats_for_melchior
-        regime_label = casper_regime.get('regime', '').lower() \
-            if casper_regime else 'unknown'
-        regime_map = {
-            'ranging':   'bullish_chop',
-            'trending':  'bullish_trend',
-            'uncertain': 'bearish_chop',
-        }
-        mk_regime = regime_map.get(regime_label, 'bearish_chop')
+        from database import get_latest_indicators
+        _inds = get_latest_indicators('1h') or {}
+        _ema_50  = _inds.get('ema_50', 0) or 0
+        _ema_200 = _inds.get('ema_200', 1) or 1
+        _adx     = _inds.get('adx', 0) or 0
+        if _ema_50 < _ema_200 and _adx >= 25:
+            mk_regime = 'bearish_trend'
+        elif _ema_50 < _ema_200:
+            mk_regime = 'bearish_chop'
+        elif _adx >= 25:
+            mk_regime = 'bullish_trend'
+        else:
+            mk_regime = 'bullish_chop'
         mk_block = get_stats_for_melchior(mk_regime)
     except Exception:
         mk_block = ""
@@ -61,7 +66,7 @@ def build_context(indicators: dict, grid_state: dict, inventory: dict,
 
 Grid Parameters:
 - grid_centre: {grid_state.get('centre_price', 'NULL')}
-- grid_spacing_pct: {grid_state.get('spacing_pct', 'NULL')}
+- grid_spacing_pct: {round((grid_state.get('spacing_pct') or 0) * 100, 3)}%
 - pause_longs: {grid_state.get('pause_longs', 0)}
 - pause_shorts: {grid_state.get('pause_shorts', 0)}
 

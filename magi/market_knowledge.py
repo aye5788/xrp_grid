@@ -12,36 +12,28 @@ log = logging.getLogger('magi.market_knowledge')
 # so regime labels are consistent across the system.
 
 def _classify_regime(row) -> str:
-    """Classify a single candle row into a regime label."""
+    """Classify a single row into one of 4 regimes matching what
+    agents can request: bearish_chop, bearish_trend,
+    bullish_chop, bullish_trend."""
     try:
         ema_50  = row.get('ema_50')
         ema_200 = row.get('ema_200')
         adx     = row.get('adx')
-        roc_6h  = row.get('roc_6h')
-        atr_pct = row.get('atr_percentile')
 
         if any(v is None for v in [ema_50, ema_200, adx]):
             return 'unknown'
 
-        bearish = ema_50 < ema_200
-        high_vol = atr_pct is not None and atr_pct > 75
-        low_vol  = atr_pct is not None and atr_pct < 25
+        bearish  = ema_50 < ema_200
         trending = adx > 25
 
-        if bearish and not trending and not high_vol:
-            return 'bearish_chop'
-        elif bearish and trending:
+        if bearish and trending:
             return 'bearish_trend'
-        elif bearish and high_vol:
-            return 'bearish_high_vol'
-        elif not bearish and not trending and not high_vol:
-            return 'bullish_chop'
-        elif not bearish and trending:
+        elif bearish:
+            return 'bearish_chop'
+        elif trending:
             return 'bullish_trend'
-        elif not bearish and high_vol:
-            return 'bullish_high_vol'
         else:
-            return 'neutral'
+            return 'bullish_chop'
     except Exception:
         return 'unknown'
 
@@ -93,17 +85,24 @@ def _compute_regime_stats(df: pd.DataFrame) -> dict:
             )
 
         # Drawdown before recovery (for Balthasar)
-        # Find bars where fwd_24h > 0, measure max drawdown in that window
+        # Sample winners randomly with fixed seed to avoid
+        # chronological bias (oldest-first [:500] would sample
+        # only 2018-2019 for large regimes like bearish_trend).
+        import random as _random
         winners = grp[grp['fwd_24h'] > 0].index.tolist()
+        rng_sample = _random.Random(42)
+        sampled = rng_sample.sample(winners, min(500, len(winners)))
         drawdowns = []
-        for idx in winners[:500]:  # cap for performance
+        for idx in sampled:
             pos = df.index.get_loc(idx)
             window = df['close'].iloc[pos:pos + 24]
             if len(window) >= 2:
-                peak = window.iloc[0]
-                trough = window.min()
-                dd = (trough - peak) / peak * 100
-                drawdowns.append(dd)
+                # Use rolling max as reference peak, not just entry
+                # price — correctly captures max adverse excursion
+                # if price rises before falling.
+                running_max = window.expanding().max()
+                dd = ((window - running_max) / running_max * 100).min()
+                drawdowns.append(float(dd))
         if drawdowns:
             dd_arr = np.array(drawdowns)
             s['drawdown_median']  = round(float(np.median(dd_arr)), 2)
@@ -121,35 +120,77 @@ def _compute_regime_stats(df: pd.DataFrame) -> dict:
 
 def recompute_stats() -> bool:
     """
-    Read full candles + indicators tables, compute regime stats,
-    write to market_knowledge table.
+    Read full candles table, compute indicators from raw OHLCV,
+    classify regimes, compute stats, write to market_knowledge.
     Called daily by scheduler at midnight UTC.
     Returns True on success.
     """
     try:
         conn = get_conn()
-
-        # Join candles with indicators on timestamp
         df = pd.read_sql_query(
-            """
-            SELECT c.timestamp, c.open, c.high, c.low, c.close,
-                   i.ema_50, i.ema_200, i.adx, i.roc_6h,
-                   i.atr_percentile
-            FROM candles c
-            LEFT JOIN indicators i ON c.timestamp = i.timestamp
-            WHERE c.timeframe = '1h'
-            ORDER BY c.timestamp ASC
-            """,
-            conn,
-            parse_dates=['timestamp']
+            """SELECT timestamp, open, high, low, close
+               FROM candles
+               WHERE timeframe = '1h'
+               ORDER BY timestamp ASC""",
+            conn
         )
+        # Normalize mixed tz-naive (Bitstamp) and tz-aware (Kraken) timestamp
+        # strings to a single tz-naive datetime64 column. parse_dates silently
+        # converts tz-aware strings to NaT, causing max() to return stale data.
+        df['timestamp'] = pd.to_datetime(
+            df['timestamp'], format='ISO8601', utc=True
+        ).dt.tz_localize(None)
         conn.close()
 
         if len(df) < 1000:
             log.warning(f"Only {len(df)} candles — skipping recompute")
             return False
 
-        log.info(f"Computing regime stats on {len(df)} candles...")
+        log.info(f"Computing indicators + regime stats on {len(df)} candles...")
+
+        # ── Compute indicators from raw OHLCV ──────────────────────
+        # EMA-50 and EMA-200
+        df['ema_50']  = df['close'].ewm(span=50,  adjust=False).mean()
+        df['ema_200'] = df['close'].ewm(span=200, adjust=False).mean()
+
+        # ATR (14-period)
+        df['prev_close'] = df['close'].shift(1)
+        df['tr'] = np.maximum(
+            df['high'] - df['low'],
+            np.maximum(
+                (df['high'] - df['prev_close']).abs(),
+                (df['low']  - df['prev_close']).abs()
+            )
+        )
+        df['atr'] = df['tr'].rolling(14).mean()
+        df['atr_percentile'] = df['atr'].rank(pct=True) * 100
+
+        # ADX (14-period)
+        df['up_move']   = df['high'] - df['high'].shift(1)
+        df['down_move'] = df['low'].shift(1) - df['low']
+        df['plus_dm']  = np.where(
+            (df['up_move'] > df['down_move']) & (df['up_move'] > 0),
+            df['up_move'], 0.0
+        )
+        df['minus_dm'] = np.where(
+            (df['down_move'] > df['up_move']) & (df['down_move'] > 0),
+            df['down_move'], 0.0
+        )
+        atr14    = df['tr'].ewm(alpha=1/14, adjust=False).mean()
+        plus_di  = 100 * df['plus_dm'].ewm(alpha=1/14, adjust=False).mean() / atr14
+        minus_di = 100 * df['minus_dm'].ewm(alpha=1/14, adjust=False).mean() / atr14
+        dx = (100 * (plus_di - minus_di).abs() /
+              (plus_di + minus_di).replace(0, np.nan))
+        df['adx'] = dx.ewm(alpha=1/14, adjust=False).mean()
+
+        # ROC-6h
+        df['roc_6h'] = df['close'].pct_change(6) * 100
+
+        # Drop warmup period (need 200 bars for EMA-200)
+        df = df.iloc[200:].copy().reset_index(drop=True)
+
+        log.info(f"Indicators computed, {len(df)} bars after warmup")
+
         stats = _compute_regime_stats(df)
 
         now = datetime.now(timezone.utc).isoformat()
@@ -160,15 +201,22 @@ def recompute_stats() -> bool:
                VALUES (?, ?, ?, ?, ?)""",
             (
                 now,
-                str(df['timestamp'].min()),
-                str(df['timestamp'].max()),
+                str(df['timestamp'].dt.tz_localize(None).min()
+                    if df['timestamp'].dt.tz is not None
+                    else df['timestamp'].min()),
+                str(df['timestamp'].dt.tz_localize(None).max()
+                    if df['timestamp'].dt.tz is not None
+                    else df['timestamp'].max()),
                 len(df),
                 json.dumps(stats)
             )
         )
         conn.commit()
         conn.close()
-        log.info(f"market_knowledge updated — {len(stats)} regimes computed")
+        log.info(
+            f"market_knowledge updated — {len(stats)} regimes, "
+            f"{len(df)} bars"
+        )
         return True
 
     except Exception as e:
