@@ -37,6 +37,9 @@ EST = ZoneInfo('America/New_York')
 engine = GridEngine(paper=True)
 running = True
 
+# Track last stats recompute date
+_last_recompute_date = None
+
 def signal_handler(sig, frame):
     global running
     log.info("Shutdown signal received — stopping scheduler")
@@ -313,6 +316,20 @@ def main():
         if minutes_since_observer >= OBSERVER_INTERVAL_MINUTES:
             run_observer_cycle()
             last_observer_time = now_utc
+
+            # Daily market knowledge recompute at midnight UTC
+            global _last_recompute_date
+            today_utc = now_utc.date()
+            if _last_recompute_date != today_utc:
+                try:
+                    from magi.market_knowledge import recompute_stats
+                    log.info("Running daily market knowledge recompute...")
+                    ok = recompute_stats()
+                    if ok:
+                        _last_recompute_date = today_utc
+                        log.info("Market knowledge recompute complete")
+                except Exception as e:
+                    log.error(f"Market knowledge recompute failed: {e}")
 
         # MAGI: run at 9AM and 2PM EST
         if should_run_magi(now_est, last_magi_hour):

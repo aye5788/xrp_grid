@@ -133,6 +133,15 @@ def init_db():
         updated_at TEXT
     )''')
 
+    c.execute('''CREATE TABLE IF NOT EXISTS market_knowledge (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        computed_at TEXT NOT NULL,
+        data_from TEXT,
+        data_to TEXT,
+        total_bars INTEGER,
+        stats_json TEXT
+    )''')
+
     conn.commit()
     conn.close()
     print("Database initialised.")
@@ -586,6 +595,23 @@ def get_cost_today():
         FROM token_usage WHERE timestamp > ?''', (today,)).fetchone()
     conn.close()
     return dict(row) if row else {'cost': 0, 'tokens': 0, 'calls': 0}
+
+
+def ensure_market_knowledge_table():
+    """Create market_knowledge table if it does not exist."""
+    conn = get_conn()
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS market_knowledge (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            computed_at TEXT NOT NULL,
+            data_from TEXT,
+            data_to TEXT,
+            total_bars INTEGER,
+            stats_json TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
 
 if __name__ == "__main__":

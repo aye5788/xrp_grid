@@ -27,6 +27,26 @@ def build_context(indicators: dict) -> str:
     except Exception as e:
         log.warning(f"Casper: failed to fetch current_price: {e}")
 
+    try:
+        from magi.market_knowledge import get_stats_for_casper
+        from database import get_latest_indicators
+        inds = get_latest_indicators('1h') or {}
+        ema_50  = inds.get('ema_50', 0) or 0
+        ema_200 = inds.get('ema_200', 1) or 1
+        adx     = inds.get('adx', 0) or 0
+        atr_pct = inds.get('atr_percentile', 50) or 50
+        if ema_50 < ema_200 and adx < 25:
+            mk_regime = 'bearish_chop'
+        elif ema_50 < ema_200:
+            mk_regime = 'bearish_trend'
+        elif adx >= 25:
+            mk_regime = 'bullish_trend'
+        else:
+            mk_regime = 'bullish_chop'
+        mk_block = get_stats_for_casper(mk_regime)
+    except Exception:
+        mk_block = ""
+
     return f"""CURRENT MARKET REGIME DATA — XRP/USD
 
 Price Context:
@@ -58,6 +78,7 @@ Trajectory Context:
 - cycles_since_structural_change: {traj['cycles_since_structural_change']}
 - fills_since_last_magi: {traj['fills_since_last_magi_buys']} buys / {traj['fills_since_last_magi_sells']} sells
 
+{mk_block}
 Respond with a JSON object only. No preamble, no markdown fences."""
 
 def extract_json(text: str) -> dict:

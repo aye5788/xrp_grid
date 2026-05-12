@@ -51,6 +51,26 @@ def build_context(indicators: dict, inventory: dict, grid_state: dict, current_p
     else:
         fills_lines = "  none in last 24h"
 
+    try:
+        from magi.market_knowledge import get_stats_for_balthasar
+        from database import get_latest_indicators
+        inds = get_latest_indicators('1h') or {}
+        ema_50  = inds.get('ema_50', 0) or 0
+        ema_200 = inds.get('ema_200', 1) or 1
+        adx     = inds.get('adx', 0) or 0
+        atr_pct = inds.get('atr_percentile', 50) or 50
+        if ema_50 < ema_200 and adx < 25 and atr_pct < 75:
+            mk_regime = 'bearish_chop'
+        elif ema_50 < ema_200 and adx >= 25:
+            mk_regime = 'bearish_trend'
+        elif ema_50 >= ema_200 and adx < 25:
+            mk_regime = 'bullish_chop'
+        else:
+            mk_regime = 'bullish_trend'
+        mk_block = get_stats_for_balthasar(mk_regime)
+    except Exception:
+        mk_block = ""
+
     return f"""CURRENT RISK STATE — XRP/USD GRID BOT
 
 Inventory:
@@ -89,6 +109,7 @@ Trajectory Context:
 - casper_regime_consecutive_cycles: {traj['regime_consecutive']}
 - pause_longs_active: {traj['pause_longs_active']} | pause_shorts_active: {traj['pause_shorts_active']}
 
+{mk_block}
 You must respond with a valid JSON object only. No preamble, no explanation outside the JSON."""
 
 def get_decision(indicators: dict, inventory: dict, grid_state: dict, current_price=None) -> dict:

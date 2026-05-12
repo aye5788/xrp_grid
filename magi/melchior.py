@@ -43,6 +43,20 @@ def build_context(indicators: dict, grid_state: dict, inventory: dict,
     else:
         regime_block = ""
 
+    try:
+        from magi.market_knowledge import get_stats_for_melchior
+        regime_label = casper_regime.get('regime', '').lower() \
+            if casper_regime else 'unknown'
+        regime_map = {
+            'ranging':   'bullish_chop',
+            'trending':  'bullish_trend',
+            'uncertain': 'bearish_chop',
+        }
+        mk_regime = regime_map.get(regime_label, 'bearish_chop')
+        mk_block = get_stats_for_melchior(mk_regime)
+    except Exception:
+        mk_block = ""
+
     return f"""CURRENT MARKET MICROSTRUCTURE — XRP/USD
 
 Grid Parameters:
@@ -71,6 +85,7 @@ Trajectory Context:
 - fills_since_last_magi: {traj['fills_since_last_magi_buys']} buys / {traj['fills_since_last_magi_sells']} sells
 - pause_longs_active: {traj['pause_longs_active']} | pause_shorts_active: {traj['pause_shorts_active']}
 {regime_block}
+{mk_block}
 Respond with a JSON object only. No preamble."""
 
 def get_decision(indicators: dict, grid_state: dict, inventory: dict,
