@@ -1,6 +1,6 @@
 # MAGI XRP Grid Bot — Current State
 
-**Last updated:** 2026-05-10
+**Last updated:** 2026-05-12
 
 ---
 
@@ -70,6 +70,24 @@
 
 - **Dead code removed (2026-05-10).** `LEARNING_HOUR_EST = 17` constant removed from `scheduler.py` (never used — learning is manual-only). `casper_action` column naming annotated in `orchestrator.py` to clarify it stores a regime string not an action verb.
 
+- **Candle high/low upsert (2026-05-11).** `database.py`'s `upsert_candle` switched from `INSERT OR IGNORE` to `ON CONFLICT(timestamp, timeframe) DO UPDATE SET high=MAX(high, excluded.high), low=MIN(low, excluded.low)`. Candle H/L now updates within the hour as new ticks arrive instead of locking at first-observed value. The prior behavior silently suppressed fills — intra-hour excursions through resting orders never registered.
+
+- **`simulate_fills` uses candle high/low (2026-05-11).** `simulate_fills(mark_price, candle_high, candle_low)` in `grid/engine.py` uses H/L when supplied to detect fills rather than the point-in-time close. Observer passes the latest 1h candle's H/L to `simulate_fills` each cycle.
+
+- **Self-replenishing grid (2026-05-11).** On every fill, the engine immediately places a replacement order on the opposite side at `order['price'] * (1 ± spacing_pct)`. Anchor is the original `order['price']`, not `fill_price`, preserving grid geometry across fill cycles. The grid no longer waits for the next MAGI cycle to refill levels.
+
+- **WIDEN recentres to current price (2026-05-11).** WIDEN now sets the grid centre to current market price before rebuilding levels. The prior behavior used the stale centre, placing all buy levels far below market and producing a one-directional XRP drain.
+
+- **Spacing ceiling and floor (2026-05-11).** `MAX_GRID_SPACING_PCT = 0.025` (2.5%) and `MIN_GRID_SPACING_PCT = 0.003` (0.3%) added to `config.py`. WIDEN is skipped when proposed spacing would exceed the ceiling; TIGHTEN is skipped when proposed spacing would fall below the floor.
+
+- **Empty-book guard (2026-05-11).** In `apply_magi_decision`, WIDEN/TIGHTEN/RECENTRE combined with PAUSE_LONGS now skips the rebuild and applies the risk action only when `xrp_held < order_size`. Prevents rebuild attempts on an empty book.
+
+- **Shadow sim inventory guard (2026-05-11).** `process_tick` in `grid/shadow_simulator.py` requires `xrp >= order size` for sell fills and `usd >= cost` for buy fills. Mirrors the live engine's 2026-05-06 spot fix; eliminates negative inventory and the garbage P&L numbers that resulted. All shadow variants were reset to 0 fills / 0 P&L to clear phantom-fill corruption.
+
+- **Shadow sim `update_centre` preserves fill history (2026-05-11).** New `update_centre()` method on the shadow simulator. WIDEN/TIGHTEN/RECENTRE call `update_centre()` instead of a full `rebuild()` when level count is unchanged. Fill history and resting orders are preserved across grid adjustments. `_last_shadow_level_count` is persisted across restarts via `get_active_shadow_level_count()` reading from `grid_state`.
+
+- **Dashboard DO billing + LLM runway (2026-05-11).** Dashboard now displays DigitalOcean billing (5-minute cache), per-agent LLM runway computed from known credit balances, fill age per row, and a stale-fill warning when last fill is > 24h ago.
+
 ---
 
 ## Currently executing on — Kraken paper
@@ -80,6 +98,8 @@ The exchange is Kraken Spot REST API, paper mode (`engine.paper = True`). No rea
 - **Canonical pair name:** `XXRPZUSD`. Engine passes `"XRP-USD"` (Coinbase format), `KrakenExchange` maps internally.
 - **Operator's bot universe:** XXRP and ZUSD on Kraken only. Other Kraken assets are ring-fenced out — the bot queries only `XXRP` and `ZUSD` balances.
 - **Paper inventory baseline (as of 2026-05-06 rebase):** xrp=27.4769, usd=$30.98, total ~$70 mark-to-market at ~$1.43. This mirrors the actual Kraken account balances at the time of the simulator fix. Paper inventory moves from this baseline as fills accumulate. Update this line if the numbers shift materially in future doc revisions.
+- **Current paper inventory (as of 2026-05-12):** xrp≈14, usd≈$48. Last known state from latest inventory snapshot.
+- **Current grid spacing (as of 2026-05-12):** 2.675%. Above the optimal 1.5% derived from the 4-asset backtest; expected to come down via TIGHTEN cycles as volatility normalizes. The 2.5% ceiling added in `config.py` will block further WIDENs from this level.
 - **Fees:** Standard verification tier — 0.25% maker / 0.40% taker. All orders use `oflags=post` (post-only), guaranteeing maker rate.
 - **Note on config fee constants:** `config.py` has `MAKER_FEE = 0.004` (0.4%) and `TAKER_FEE = 0.006` (0.6%). These are slightly higher than Kraken's actual rates. P&L calculations are therefore conservatively pessimistic by ~0.15% per trade on maker fees. Safe-side error; no code change required for paper validation but should be corrected before live.
 - **Trading rate counter:** max=125, decay=2.34/sec. Each `AddOrder` costs +1. Cancel cost depends on order age (0–8 points). Counter state is in-memory only — resets on service restart.
@@ -192,13 +212,14 @@ Fix is deferred. The priority is validating the corrected live simulator first. 
 
 ## What's NOT done
 
-- **Shadow simulator spot fix.** Same impossible-fill bug pattern as the live engine had. Lower priority because the shadow sim only drives level-count switching, not order placement. But shadow P&L numbers are currently idealized rather than spot-realistic. Fix when convenient after the live simulator has been validated.
 - **Risk wake mechanism.** A threshold-triggered MAGI cycle when inventory skew breaches a danger level (e.g., |skew| > 0.8), independent of the scheduled 9 AM / 2 PM windows. Design deferred pending observation of the corrected simulator's behavior. The original motivation was a -1.025 skew event that turned out to be caused by the simulator bug rather than a real risk pattern. We don't yet have evidence that scheduled cycles are too slow for genuinely-possible spot risk events — wait for real data before designing this.
 - **Stop-loss on entire grid:** cancel all orders and halt if XRP drops X% from grid centre. Not urgent in paper; required before going live.
 - **Two-factor paper→live confirmation:** explicit second confirmation required when flipping `paper=False`. Not urgent until thesis is validated; required before any live flip.
 - **Email or SMS alerts on HALT events:** operational observability when Balthasar or guardrails fire a halt. Nice-to-have for paper; important for live.
 - **Exchange downtime detection:** currently the system will retry-loop on Kraken connectivity failures rather than pausing cleanly. Nice-to-have for paper (the retry behavior is safe if ugly); required for live.
 - **Backtest framework:** validate strategy parameter changes against historical XRP data rather than waiting for live cycles. Most valuable if shadow simulation doesn't generate enough signal over the first 2-week observation period.
+- **Two GridEngine instances diverge.** The scheduler (`magi.service`) and dashboard (`magi-dashboard.service`) each instantiate their own `GridEngine`. They share the same DB tables but their in-memory `paper_orders` snapshots drift between restarts. Dashboard-triggered decisions update the dashboard's engine state but don't refresh the scheduler's `paper_orders` until the scheduler restarts. Architecture fix needed — both services should read live state per cycle rather than rely on long-lived in-memory copies.
+- **Dashboard `/api/trigger_magi` unauthenticated.** The auth-token hook added 2026-05-10 is gated on the `MAGI_TRIGGER_TOKEN` environment variable being set. It currently is not set, so the endpoint accepts any request. Token should be populated in `.env` before exposing the dashboard beyond local network.
 
 ---
 
@@ -223,3 +244,31 @@ During Melchior diagnosis, discovered the system runs two systemd services — `
 Late afternoon 2026-05-07: discovered a latent bug from the May 6 reframe. The position-size cap in `place_order` was retained at `net_position_usd >= MAX_INVENTORY_USD` ($50), but the meaning of `net_position_usd` had silently changed from "USD deployed" to "mark-to-market XRP value." With 48 XRP × ~$1.40 = $67, the cap tripped on every order placement after the 18:00 UTC WIDEN cycle, including sells. The grid sat at zero open orders for several hours until the bug was identified and the cap was reframed to use `allocation_skew` directionally. No real money exposed — paper mode throughout. Fix: replaced size cap with concentration cap at ±0.90 threshold, reading `allocation_skew` from inventory.
 
 - 18:45 UTC. Casper regime fix landed. Three new context fields (current_price, autocorr_1h, autocorr_4h) plus prompt rewrite establishing EMA structure as co-primary with ADX. New "biased chop detection" rule escalates to TRENDING when structure, directional pressure, and momentum all agree on a direction even at low ADX. Addresses today's failure mode where Casper called RANGING high conviction while EMA-50 sat 20% below EMA-200 and the grid bled into a downward drift.
+
+## Most recent significant event — 2026-05-11
+
+Full system audit conducted across the engine, the agent prompts, and the shadow simulator. The session resolved a structural fill-suppression bug in candle storage, made the grid self-replenishing between MAGI cycles, hardened the shadow simulator with the same inventory guard the live engine got on 2026-05-06, and added a centre-update method so WIDEN/TIGHTEN/RECENTRE preserves fill history across grid adjustments. A 4-asset historical backtest (Mar 2022 - May 2026) was completed in parallel and the findings were injected into Melchior's prompt and `02_NEXT_BUILD_TASKS.md`.
+
+The single most damaging finding was the candle storage and fill detection pair. `database.py`'s `upsert_candle` had been using `INSERT OR IGNORE`, which meant that once an hourly candle row was inserted, its `high` and `low` never updated within the hour. In tandem, `simulate_fills` was reading only `mark_price` (the current close) when deciding whether resting orders had filled. The combined effect was that intra-hour excursions through resting orders never registered as fills — the grid was being underfilled hour-after-hour and nobody knew. Replacing `INSERT OR IGNORE` with `ON CONFLICT(timestamp, timeframe) DO UPDATE SET high=MAX(high, excluded.high), low=MIN(low, excluded.low)` makes candle H/L update as new ticks arrive; extending `simulate_fills` to accept `candle_high` and `candle_low` and passing the latest 1h candle's H/L from the observer makes fill detection use the real intra-hour range. These two fixes will materially change paper-fill rates going forward.
+
+Order replenishment between MAGI cycles was the second big behavioral change. On every fill, the engine now places a replacement order on the opposite side at `order['price'] * (1 ± spacing_pct)`. The replacement is anchored on the original `order['price']` (not `fill_price`) so grid geometry is preserved across fill cycles. The grid is now self-replenishing between scheduled MAGI cycles instead of bleeding levels until the next rebuild.
+
+WIDEN behavior was rewritten. WIDEN previously rebuilt levels around the stale grid centre. With XRP drifting downward, this placed all buy levels far below market and produced a one-directional XRP drain. WIDEN now recentres to current market price before rebuilding. Additionally, `MAX_GRID_SPACING_PCT = 0.025` (2.5%) and `MIN_GRID_SPACING_PCT = 0.003` (0.3%) were added to `config.py`. WIDEN is skipped when proposed spacing exceeds the ceiling; TIGHTEN is skipped when proposed spacing would fall below the floor. An empty-book guard was also added to `apply_magi_decision`: when `xrp_held < order_size`, WIDEN/TIGHTEN/RECENTRE alongside PAUSE_LONGS skips the rebuild and applies the risk action only.
+
+PAUSE_LONGS and PAUSE_SHORTS now actually cancel resting orders on the relevant side. The 2026-05-10 enforcement work wrote the pause flag and persisted it through restarts, but didn't actually pull existing orders — they sat resting until they happened to fill. The new `_cancel_orders_by_side` helper on `GridEngine` closes that gap. Additionally, replacement orders generated by the new self-replenish path use `order['price']` not `fill_price` as anchor — important to call out, because using `fill_price` as anchor would have caused replacement levels to drift after every fill.
+
+Shadow simulator hardening. `process_tick` in `grid/shadow_simulator.py` got an inventory guard mirroring the live engine's 2026-05-06 fix: sell fills require `xrp >= order size`, buy fills require `usd >= cost`. This eliminates negative inventory and the garbage P&L numbers that resulted. All shadow variants were reset to 0 fills / 0 P&L to flush phantom-fill corruption that had accumulated before the guard. A new `update_centre()` method on the shadow simulator lets WIDEN/TIGHTEN/RECENTRE call `update_centre()` instead of a full `rebuild()` when level count is unchanged — preserving fill history and resting orders across grid adjustments. `_last_shadow_level_count` is now persisted across restarts via `get_active_shadow_level_count()` reading from `grid_state`. Together these close the deferred "Shadow simulator spot fix" item from the prior Not-Done list.
+
+Smaller fixes: scheduler now skips the startup MAGI cycle if the last decision was less than 30 minutes ago (prevents back-to-back cycles when restarts cluster); `mark_magi_decision_applied` is now invoked at the end of each cycle so `magi_decisions.applied` is correctly set to 1; the daily loss guardrail computes current-universe value from live price instead of the stale stored `net_position_usd`; the asymmetric-grid log line that mislabeled which side was short of inventory is fixed. Dashboard additions: fill age per row, stale-fill warning (>24h), DigitalOcean billing integration with 5-minute cache, and per-agent LLM runway from known credit balances.
+
+Prompt fixes:
+- **Balthasar.** Rule 7 worked examples added — explicit WRONG action label for PAUSE_LONGS when `xrp_value_usd < $10`. Nudging sentence in historical base rates neutralized.
+- **Casper.** Rule 5 expanded with a CONTRADICTING-`roc_6h` conviction cap (cap at LOW when `roc_6h` opposes EMA direction). Historical base rates disclaimer added.
+- **Melchior.** Rules 6 and 7 added (spacing saturation check; trajectory check using `cycles_since_structural_change` and `fills_since_last_magi`). Empirical XRP spacing calibration injected as a HISTORICAL BASE RATES section.
+
+Research. A 4-asset grid backtest (XRP, SOL, DOGE, ADA) was run on hourly OHLCV from Mar 2022 - May 2026, $500 universe, 0.25% Kraken maker fee. Highlights:
+- **DOGE** had the best realized P&L: $606 over 4.2 years at 2.5% spacing / 4 levels.
+- **XRP** had the most forgiving parameter space — broad band of profitable configurations across spacing and level counts.
+- **ADA** was eliminated; **SOL** had a narrow profitable window.
+- Optimal **XRP spacing: 1.5%**. Tight spacing (0.8-1.0%) was universally harmful — fee drag plus 2022-bear inventory loss.
+- Findings injected into Melchior's base-rates block and `02_NEXT_BUILD_TASKS.md`.
