@@ -83,3 +83,44 @@ Inventory snapshot:
 Guardrail trips: none
 
 ---
+
+## May 2026 — Deliberation Experiment & Bias Audit
+
+### What We Tested
+Ran a structured 3-round deliberation experiment on historical MAGI decisions where councils disagreed (Melchior vs Casper). Two experiment sets:
+- 29 cases: MAINTAIN vs TRENDING → 1 apparent change (tainted by API error, discarded)
+- 2 cases: RECENTRE vs TRENDING → 2 changes (both to TRENDING, a prompt artifact)
+
+Followed up with a bias audit using claude-sonnet-4-6 as an impartial auditor on the deliberation transcripts.
+
+### What We Found
+
+**Bias audit scores (both cases):**
+- Dismissiveness: LOW
+- Capitulation: MEDIUM-HIGH
+- Authority Deference: MEDIUM
+- Sycophantic Language: HIGH (Case 177), MEDIUM (Case 176)
+- Last-Speaker Bias: MEDIUM
+- Competitive Framing: LOW/ABSENT
+- Overall: MEDIUM-HIGH / MEDIUM
+
+**Core finding:** Melchior's revisions were structurally indistinguishable from social capitulation. The data points cited in revisions were available before Casper challenged — meaning revisions were driven by social pressure, not new evidence. Balthasar then cited Melchior's concession as corroborating evidence, creating a circular reinforcement loop.
+
+**Key quote from audit:** "Both decisions landed on the right answer, but the process would produce the same structural output even if Casper's argument were wrong — which is the core systemic risk."
+
+### Why the Current Design Is Better
+
+The stateless non-interacting council design avoids this failure mode entirely:
+- Councils cannot capitulate to each other (they never see each other's reasoning before voting)
+- Orchestrator applies deterministic rules (no sycophancy, no last-speaker bias)
+- Failures are predictable and detectable
+
+Deliberation produces correct decisions via flawed process. That means it would produce incorrect decisions via the same flawed process when inputs are wrong. The orchestrator's deterministic regime filter is more reliable than structured deliberation for this reason.
+
+### Implication for Future Development
+
+Before adding any inter-model interaction to MAGI, run a bias audit on sample deliberations first. Circular reinforcement loops are not obvious from outputs alone — the decisions look correct even when the reasoning process is compromised.
+
+### Meta-Observation
+
+This experiment also validated why the operator's original skepticism about interacting agents was well-founded, and why "easier to debug" was the right first principle. Stateless + deterministic = auditable. Deliberation = social dynamics that corrupt reasoning in ways that are invisible in the output.

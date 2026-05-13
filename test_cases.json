@@ -1,0 +1,30 @@
+[
+  {
+    "id": 177,
+    "timestamp": "2026-05-12T18:01:06.109079",
+    "melchior_action": "RECENTRE",
+    "melchior_reasoning": "The grid centre has drifted significantly from the fair value as indicated by a vwap_dev_pct of -2.0701%. The current high volatility regime suggests caution, but the mixed autocorrelation signals do not strongly support a trending market. Therefore, recentring is appropriate to align the grid with the current price level.",
+    "melchior_concerns": "The grid has not generated any fills in the last 24 hours, indicating potential inefficiency.",
+    "casper_action": "TRENDING",
+    "casper_reasoning": "XRP is in a structurally bearish state with price well below the EMA200 and EMA50 below EMA200. Despite low ADX, the negative ROC and positive 1h autocorrelation suggest a persistent downward drift. BTC also shows a bearish EMA structure, reinforcing the directional bias.",
+    "balthasar_action": "CLEAR",
+    "balthasar_reasoning": "Allocation skew is near-balanced at -0.059, well within normal grid oscillation range. Both USD and XRP legs hold sufficient buffer to support continued order placement on either side. Volatility regime is HIGH and ATR percentile is elevated, but with no directional skew concentration, this does not trigger an escalation. Price is modestly below VWAP, consistent with the slight USD-heavy tilt from recent grid activity.",
+    "original_decision": "MAINTAIN",
+    "regime": "TRENDING",
+    "notes": "Casper TRENDING (medium conviction) \u2014 blocking Melchior RECENTRE, holding grid structure"
+  },
+  {
+    "id": 176,
+    "timestamp": "2026-05-12T16:04:40.173897",
+    "melchior_action": "RECENTRE",
+    "melchior_reasoning": "The grid centre has drifted significantly from the VWAP, with a deviation of -2.3003%. The current volatility regime is HIGH, and the autocorrelation signals are mixed, indicating uncertainty. Given the lack of fills and the significant VWAP deviation, recentring is appropriate.",
+    "melchior_concerns": "The grid is accumulating USD with no recent buys, indicating a potential imbalance.",
+    "casper_action": "TRENDING",
+    "casper_reasoning": "XRP is in a structurally bearish state with price well below the EMA200 and EMA50 below EMA200. Although ADX is low, the negative ROC and mixed autocorrelation suggest a biased drift. BTC also shows a bearish EMA structure, reinforcing the directional bias.",
+    "balthasar_action": "CLEAR",
+    "balthasar_reasoning": "Allocation skew is near-neutral at -0.061, well within balanced range, and both USD and XRP legs hold sufficient capital to support continued grid activity on both sides. Buffer floors are comfortably met. The HIGH volatility regime and elevated ATR percentile are noted, but with no directional skew to compound against, they do not trigger escalation.",
+    "original_decision": "MAINTAIN",
+    "regime": "TRENDING",
+    "notes": "Casper TRENDING (medium conviction) \u2014 blocking Melchior RECENTRE, holding grid structure"
+  }
+]
