@@ -1,181 +1,144 @@
 # Next Build Tasks
 
-Tasks 1 (Budget-aware Balthasar) and 2 (Kraken refactor) completed 2026-05-05. The paper simulator was fixed for spot semantics on 2026-05-06 (impossible-fill bug, inventory-aware grid construction, auto-rebase on startup). The risk wake mechanism was considered and deferred — see current priority section below. See `01_CURRENT_STATE.md` for full system state.
+**Last updated:** 2026-05-14
+
+See `01_CURRENT_STATE.md` for full system state. See `00_PROJECT_OVERVIEW.md` §Roadmap for the Supervisor layer design. See the project proposal PDF for the full architectural rationale.
 
 ---
 
-## Current priority — observation period
+## Current Priority — Path 1: Recalibration
 
-The simulator fix on 2026-05-06 is a significant correctness change. The first ~14 hours of Kraken paper data (May 5 evening through May 6 ~13:20 UTC) was generated against a broken simulator and should be treated as diagnostic data only. True spot-realistic paper trading begins 2026-05-06 ~13:20 UTC after the rebase.
+The system has been in a trading deadlock since 2026-05-13. The grid is dead. Path 1 fixes must deploy before anything else. Do not add features until the core trading loop is working.
 
-Watch the dashboard over the next 24–48 hours specifically for:
+### Fix 1A — Remove RECENTRE from TRENDING veto (HIGH PRIORITY)
 
-- **Buy fills as XRP retraces.** With the corrected simulator, buys accumulate XRP into paper inventory and incrementally unlock more sell capacity on the next grid rebuild.
-- **Asymmetric grid rebuilds.** When MAGI rebuilds the grid, log lines should show `Grid asymmetric — N buys + M sells` when XRP held can't cover a full symmetric sell ladder. This is expected and correct behavior.
-- **Balthasar handling long-side skew.** As buys fill and inventory grows long, Balthasar should respond appropriately (PAUSE_LONGS or HALT at concentration thresholds). The prompt logic is symmetric — it should handle this correctly, but confirm with real data.
+**File:** `magi/magi_orchestrator.py`
 
-Beyond the immediate post-fix window, the same observation questions from before still apply:
+**Problem:** `apply_consensus()` currently blocks RECENTRE when Casper says TRENDING. RECENTRE is regime-neutral — it resets grid position without adding directional exposure. Only TIGHTEN should be blocked during TRENDING (increases fill rate into a directional move). This one-line change immediately unblocks the natural recovery path.
 
-1. **Shadow simulation fill accumulation:** do all 6 variants accumulate fills across observer cycles, or does some path silently drop ticks?
-2. **Shadow variant P&L differentiation:** does any variant generate consistent positive rolling P&L%, or do all converge near zero?
-3. **Level-count switching:** does the engine ever switch level_count based on shadow P&L, or do the gates (20 fills, 24h window, 0.10% margin) mean no switch ever fires in practice?
-4. **Live grid fills:** does the paper grid generate fills during normal XRP trading hours?
-5. **Balthasar escalation:** does Balthasar ever escalate beyond CLEAR? If never, the budget reasoning may be too conservative or the inventory never gets large enough.
-6. **Casper regime variance:** does Casper's regime call change meaningfully across cycles, or consistently output RANGING?
-7. **Operational issues:** any Kraken downtime, rate-limit hits, post-only rejections, or connectivity errors?
-8. **Actual LLM cost per day:** 2 scheduled cycles + occasional manual triggers.
+**Change:** In the TRENDING branch of `apply_consensus()`, allow RECENTRE to pass through alongside WIDEN. Only default to MAINTAIN for other actions.
 
----
+**Verification:** Trigger a manual MAGI cycle after deploy. If Melchior recommends RECENTRE and Casper says TRENDING, the system should execute RECENTRE instead of MAINTAIN.
 
-## Next tasks
+### Fix 1B — Dead-grid override rule (HIGH PRIORITY)
 
-### Shadow simulator spot fix
+**File:** `magi/magi_orchestrator.py`
 
-The shadow simulator (`grid/shadow_simulator.py`) has the same impossible-fill bug pattern that was fixed in the live engine. It accepts fills regardless of its own simulated inventory — XRP supply is effectively unlimited in its model. Shadow rolling P&L percentages are directional comparisons between variants, not spot-realistic P&L figures.
+**Problem:** No mechanism detects or escapes the state where PAUSE_LONGS + zero open buys + extended no-fill period combine. PAUSE_LONGS on a grid with zero buy orders has zero protective value — there is nothing to pause.
 
-**When urgent:** not urgent. The shadow sim only drives level-count switching gates, not order placement. The switching gates already require 20+ fills and 24h of history. Fix when convenient after the live simulator has produced a few weeks of real data and the switching behavior is understood. Do not fix before the live engine's corrected behavior is validated.
+**Change:** After computing `grid_action` and `risk_action`, add deterministic check:
+```python
+if (risk_action == 'PAUSE_LONGS'
+        and open_buy_count == 0
+        and hours_since_last_fill > 12):
+    grid_action = 'RECENTRE'
+    risk_action = 'CLEAR'
+    notes += " [DEAD_GRID_OVERRIDE]"
+```
+`open_buy_count` and `hours_since_last_fill` must be derived from DB in `apply_consensus()` context. Read from `grid_orders` and `magi_decisions` tables.
 
-### Risk wake mechanism
+**Verification:** After deploy, confirm next cycle exits deadlock. Check grid_state for `[DEAD_GRID_OVERRIDE]` note.
 
-A threshold-triggered MAGI cycle that fires when inventory skew breaches a danger level (e.g., |skew| > 0.8), independent of the scheduled 9 AM / 2 PM windows. The original motivation was the -1.025 skew event on May 6, which was caused by the simulator bug — not a real risk pattern that the scheduled cycle failed to catch in time.
+### Fix 1C — Inject grid health into all agent contexts (MEDIUM PRIORITY)
 
-**When urgent:** deferred. We don't yet have evidence from the corrected simulator that scheduled cycles are too slow for genuinely-possible spot risk events. The wake mechanism should be designed against observed failure modes, not hypotheticals. Revisit after 1–2 weeks of corrected-simulator data; if a real skew-concentration event appears that the scheduled cycle handled too slowly, that's the design input.
+**Files:** `scheduler.py`, `magi/magi_melchior.py`, `magi/magi_balthasar.py`, `magi/magi_casper.py`
 
----
+**Problem:** Agents receive `fills_since_last_magi` (resets each cycle) but not cumulative fill drought or open order count. Balthasar cannot reason about whether PAUSE_LONGS is meaningful without knowing there are zero buy orders.
 
-## Task 3 — deferred items
+**Change:** Add two fields to every agent's context block:
+- `open_buy_count`: current count of open buy orders from `grid_orders WHERE status='open' AND side='buy'`
+- `hours_since_last_fill`: hours since most recent filled order
 
-These were identified and deferred during the Kraken refactor sprint. Priority order below is a starting suggestion; adjust based on observation period findings.
+Update each agent's prompt template to reference these fields explicitly.
 
-### Stop-loss on entire grid
-Cancel all paper orders and HALT if XRP spot price drops X% below grid centre. Prevents the grid from accumulating unlimited long inventory into a sustained downtrend.
+**Verification:** Trigger a manual cycle. Check that agent reasoning references `open_buy_count` or `hours_since_last_fill` in its output.
 
-**When urgent:** required before flipping `paper=False`. Not urgent during paper validation — the guardrails (daily loss limit + Balthasar HALT) provide partial coverage in paper mode, but a sustained drop will hit the daily loss limit rather than cutting cleanly at the grid level.
+### Fix 1D — Raise PAUSE_LONGS threshold in Balthasar (MEDIUM PRIORITY)
 
-### Two-factor paper→live confirmation
-When `engine.paper` is set to `False`, require an explicit second confirmation step (e.g., a separate `--live` flag at startup plus a prompt, or a confirmation token written to a file). Prevents accidental live trading from a config typo.
+**File:** `magi/magi_balthasar.py`
 
-**When urgent:** required before any live flip. Should be the first thing built once paper validation is satisfactory.
+**Problem:** Balthasar fires PAUSE_LONGS at allocation_skew of -0.204 (mild USD-heavy lean) even when zero buy orders exist. The current prompt does not instruct Balthasar to consider whether PAUSE_LONGS has any protective value given the current order book.
 
-### Email or SMS alerts on HALT events
-When guardrails or Balthasar fire a HALT, send an out-of-band alert to the operator. Currently, HALT events are only visible in the dashboard or journal logs.
+**Change:** Update Balthasar's prompt to include explicit instruction: "If open_buy_count == 0, PAUSE_LONGS has no protective value — there are no buy orders to pause. In this state, return CLEAR unless skew exceeds ±0.6 or a buffer floor is breached."
 
-**When urgent:** nice-to-have for paper, important for live. If the system halts at 2 AM and the operator doesn't check the dashboard for 12 hours, the halt sits silent.
+Do not change the ±0.6 PAUSE_LONGS threshold or the ±0.85 HALT threshold. Only change behavior when open_buy_count == 0.
 
-### Exchange downtime detection
-Currently, if Kraken is unreachable, the observer and scheduler will log errors and continue retrying on the next scheduled cycle. There is no clean pause-and-resume path. A sustained Kraken outage could produce a partially-cancelled grid with stale open orders.
+**Verification:** With zero buy orders, Balthasar should return CLEAR at mild skew levels.
 
-**When urgent:** nice-to-have for paper (the retry behavior is safe if ugly), required for live.
+### Fix 1E — Wire pnl_daily writer (LOW PRIORITY)
 
-### Backtest framework
-Run the grid strategy + shadow simulator against historical XRP OHLCV data to validate parameter choices (spacing, level count, centre logic) without waiting for live cycles. Most valuable for calibrating GRID_SWITCH_THRESHOLD_PCT and GRID_SWITCH_MIN_FILLS.
+**Files:** `observer.py`, `database.py`
 
-**When urgent:** worth building if the shadow simulation observation period (2 weeks) doesn't generate enough fills to differentiate between variants. If 20 fills per variant requires months of paper data at normal XRP volatility, the backtest becomes the only practical calibration tool.
+**Problem:** `pnl_daily` table has existed since launch with zero rows. No writer exists. Daily PnL reporting is dark.
 
----
+**Change:** Add `insert_pnl_daily()` to `database.py`. Call it from `observer.poll_cycle()` at UTC midnight (date change detection). Compute from `grid_orders` fills for that date using existing FIFO logic in `grid/pnl.py`.
 
-## Operator preferences
-
-- **Paper first, always.** No live trading until the thesis is validated: the system is right >50% of the time and profitable after fees over a meaningful sample of fills. Two weeks of paper data minimum; likely more.
-- **Correctness over features.** If the system produces a wrong answer (stale indicators, ghost orders, misrouted credentials), fix it before adding anything new. The observation period reveals correctness bugs — fix them as they appear.
-- **Minimal blast radius on changes.** Prefer surgical edits to one file over refactors across multiple files. If a fix requires touching more than two files, reconsider the approach.
-- **No live credentials in code.** All secrets via `.env` + `load_dotenv()`. Never hardcoded, never in git.
-- **Ring-fence the budget.** The $50 bot universe is isolated from other Kraken holdings. The bot queries only `XXRP` and `ZUSD`. This constraint is intentional and must be preserved in any refactor.
-- **Read before write.** Before any change to a file that touches live state (engine.py, kraken.py, scheduler.py, database.py), read the current version first. Don't patch from memory.
-- **Verify before declaring done.** Code changes to trading logic require a verification step — either a log line in the journal confirming the new path executed, or a direct query against the DB confirming the expected state. "It should work" is not verification.
-- **Flag discrepancies.** If a fact in the docs conflicts with what the code actually does, flag it rather than silently propagating the error. The docs are for debugging — inaccurate docs are worse than no docs.
+**Verification:** After one UTC midnight passes, query `SELECT * FROM pnl_daily ORDER BY date DESC LIMIT 3` and confirm rows exist.
 
 ---
 
-## Deferred from 2026-05-07 architectural session
+## Path 2: Supervisor Layer (After Path 1 Stabilizes)
 
-- **Recent-context analytics layer — COMPLETED 2026-05-10.** Implemented as `get_trajectory_context()` in `database.py`. Queries last 5 MAGI decisions and inventory snapshots, fills since last MAGI, and current pause flags. Injected into all three agent `build_context()` calls. Each agent receives: `regime_consecutive_cycles`, `cycles_since_structural_change`, `fills_since_last_magi`, `pause_longs_active`, `pause_shorts_active`. Melchior additionally receives `melchior_blocked_cycles`. Balthasar additionally receives `skew_delta` and `skew_trend`.
+Build Supervisor v1 in parallel with Path 1 fixes. Deploy in shadow mode immediately — it logs what it would have done without affecting grid behavior. No clean baseline required. Activate with override authority after 7 days of shadow decisions if directionally sound. The Supervisor has a hard constraint: it can only override toward productive actions. A bad override produces a misplaced RECENTRE — recoverable. Weeks of waiting produces nothing.
 
-- **Historical base-rate analysis — COMPLETED 2026-05-08.** 46,300 hours of XRP/USD hourly OHLCV pulled from FMP API (Jan 2021 - May 2026). Six analyses completed. Base rates injected into all three agent prompts as static calibration block. Dataset in operator's Colab/Drive (xrp_hourly.csv). Refresh quarterly or when regime changes materially.
+### Supervisor v1 — Stateless with observer.db context
 
-- **Architectural framing recorded from this session:** agents currently make decisions against state snapshots with no shared sense of trajectory or strategy outcome. Today's failure (Casper RANGING + grid bleed) was a symptom of this gap, not just a Casper-prompt bug. The recent-context analytics layer addresses tactical recall. The historical base-rate analysis addresses pattern knowledge. Both are needed; Casper prompt fix was the minimum bounded change to address tonight's specific failure.
+**File:** `magi/magi_supervisor.py` (new)
 
-- **Forbidden moves reaffirmed:** no Letta or agent runtime adoption (rejected last week, still off the table). No Mem0 or vector-DB-backed memory framework (overhead wrong-shaped for our scale and structure). No LangGraph migration (would replace working orchestrator). No krakenex / python-kraken-sdk. No third-party historical-data wrappers — Kraken's static CSV archive is the data source.
+**Design:** Single stateless LLM call (claude-sonnet-4-6) that receives:
+- All three council outputs
+- Grid health context from observer.db (open_buy_count, hours_since_last_fill, fills_last_7d, drift_pct)
+- Recent decision history (last 5 decisions + outcomes)
+- Explicit mandate: "Is the council's recommendation serving profitable trading?"
+
+**Outputs:** APPROVE (council recommendation stands) or OVERRIDE [RECENTRE / WIDEN / CLEAR_PAUSE] with one-sentence reasoning.
+
+**Override constraints:** May only override toward productive actions. Cannot override toward HALT, TIGHTEN, or greater conservatism.
+
+**Pushback mechanism:** For each council output that is circular or disconnected from grid reality, send back prior output + specific challenge. Agent responds with its own output in context — statelessness is not a barrier. Maximum 2 rounds per agent per cycle.
+
+### Supervisor v2 — Persistent memory via Mem0
+
+**After Supervisor v1 has run for 14+ days with 20+ override decisions:**
+
+Add Mem0 (bolt-on memory layer, Python SDK) to Supervisor only. Three things to remember:
+1. Override outcome history (POSITIVE / NEGATIVE / NEUTRAL, written 6h after each override)
+2. Approval outcome history (when council recommendation was approved, what happened)
+3. Learned patterns ("PAUSE_LONGS with zero buys consistently produces continued deadlock")
+
+Councils remain stateless. Only the Supervisor accumulates memory.
 
 ---
 
-## Deferred from 2026-05-10 audit session
+## Deferred (Do Not Build Yet)
 
 ### Weekly synthesis / learning loop
-Offline weekly job that reads last 7 days of `magi_decisions` + `grid_orders` fills, runs a single LLM call for pattern synthesis, writes output to `magi/knowledge/weekly_synthesis.md` (capped ~500 words, full rewrite not append). Injected into all three agent prompts. DO NOT BUILD until 2–3 months of clean live trading data exists — synthesizing from paper data or broken-period data risks encoding artifacts as market wisdom.
+Do not build until 2-3 months of clean live trading data exists. Synthesizing from paper data or broken-period data risks encoding artifacts as market wisdom.
 
-### Paper inventory auto-rebalance
-Paper mode has no rebalancing mechanism. When fills skew heavily one side, the grid loses ability to place orders on the other side. Manual reset required 2026-05-08. Option: synthetic inventory floor in paper mode that prevents either leg from hitting zero.
+### Stop-loss on entire grid
+Required before live trading. Not urgent during paper validation.
 
-### XRP news feed for Balthasar (requires FMP re-subscription)
-Wire `search-crypto-news` (XRPUSD) into MAGI cycle. One call per cycle, last 5 headlines as `news_headlines` field in Balthasar's context. Blocked on active FMP subscription.
+### Two-factor paper→live confirmation
+Required before any live flip. Not urgent until thesis is validated.
 
-### Agent outcome tracking / retrospective accuracy
-Track whether each agent's call was correct in hindsight. Casper TRENDING — did price continue trending? Balthasar PAUSE_LONGS — did skew worsen or recover? Melchior TIGHTEN — did fills increase? This is the foundation for empirical conviction calibration. Requires 2+ months of live data before results are meaningful.
+### Email/SMS alerts on HALT
+Important for live. Nice-to-have for paper.
 
-### Cross-model decision audit
-Periodically sample recent agent decisions and route them to a different model for evaluation. If Balthasar produces N decisions, pass them to Melchior (or a separate call) asking "does this reasoning look sound given the inputs?" Removes self-assessment bias. Low cost, high signal for catching model quality drift.
+### Exchange downtime detection
+Required for live. Acceptable behavior for paper.
 
 ---
 
-## Asset Selection Research — Completed 2026-05-11
+## Operator Preferences (Hard Rules)
 
-Full 4-asset grid backtest completed on Bitstamp/Gemini hourly OHLCV
-data (Mar 2022 - May 2026, $500 universe, 0.25% Kraken maker fee).
-
-### Key findings
-
-Realized P&L (pure grid arbitrage, strips price appreciation):
-- DOGE: $606.87 over 4.2 years at 2.5% spacing / 4 levels / 0.33 fills/day
-- SOL:  $126.03 over 4.2 years at 2.0% spacing / 3 levels / 0.31 fills/day
-- XRP:   $39.26 over 4.2 years at 1.5% spacing / 5 levels / 0.31 fills/day
-- ADA:  -$20.19 — eliminated, never profitable in any config
-
-Median hourly range (Mar 2022 - May 2026):
-- SOL:  1.034%
-- DOGE: 0.885%
-- XRP:  0.800%
-- ADA:  0.570%
-
-### Critical finding: tight spacing is universally harmful
-
-At 0.8-1.0% spacing across ALL four assets, realized P&L is
-approximately -$352 to -$354. This is not asset-specific — it is
-the structural cost of high fill frequency during the 2022 bear
-market (continuous inventory accumulation into falling prices)
-combined with fee drag that exceeds grid profit at tight spacing.
-
-At 0.25% maker fee, break-even spacing = 0.50% (fees consume 100%
-of gross profit). Profitable spacing starts at ~0.8% where fee
-drag drops to 62.5% and net per round trip = 0.30%.
-
-### Optimal spacing by asset (empirical)
-
-- XRP:  1.5% (large forgiving parameter region in contour plot)
-- DOGE: 2.5% (narrow but high-reward region)
-- SOL:  2.0% (narrow parameter window — easy to get wrong)
-- ADA:  eliminate
-
-### Asset selection conclusion
-
-XRP: Most forgiving parameter space. Wide green region in IRR
-contour means MAGI errors in spacing are survivable. Recommended
-for paper validation at current scale ($50-500 universe).
-
-DOGE: Highest pure grid profit. Best candidate for live trading
-at meaningful scale. Requires 2.0-2.5% spacing and MAGI's HALT
-capability during sustained downtrends. Gap-move risk between
-hourly observer cycles is the primary operational concern.
-
-SOL: Eliminated for now. Narrow optimal parameter window makes
-it sensitive to MAGI spacing errors. 2022 drawdown (-95%) is
-structurally dangerous for a grid strategy.
-
-ADA: Eliminated. Never profitable in any tested configuration.
-
-### Next steps
-
-1. Complete XRP paper validation (current)
-2. When going live, consider DOGE as primary asset at 2.0-2.5%
-   spacing with $500+ universe
-3. Revisit SOL if Kraken improves fee tier access
+- **No live trading until:** system making sensible decisions, Supervisor catching genuine problems, realized P&L positive after fees over available sample, failure modes understood well enough to trust with real money. This is a judgment call made when there is enough information — not after an arbitrary waiting period.
+- **No Letta or agent runtimes.** Rejected. Mem0 is the correct memory layer choice.
+- **No krakenex or third-party Kraken wrappers.** Direct REST + stdlib only.
+- **No third-party historical data wrappers.** Kraken CSV archive is the source.
+- **No features the operator didn't ask for.** Do not add scope mid-task.
+- **Full files always.** Every code change delivered as complete file ready to copy-paste. No snippets.
+- **Read before write.** Before changing any file touching live state, read the current version first.
+- **Verify before declaring done.** Code changes require a log line or DB query confirming the new path executed.
+- **Restart both services after every code change:** `systemctl restart magi.service magi-dashboard.service`
+- **Flag discrepancies.** If docs conflict with code, flag it — don't silently propagate the error.
+- **No commits without operator permission.** Operator runs `magi-sync` manually.

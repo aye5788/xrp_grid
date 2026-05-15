@@ -19,22 +19,46 @@ Return a JSON object with exactly these fields:
   "agent": "melchior",
   "action": "MAINTAIN | RECENTRE | TIGHTEN | WIDEN",
   "conviction": "low | medium | high",
-  "recentre_target": null or float,
-  "spacing_adjustment_pct": null or float,
-  // Express as a multiplier of current spacing: 0.85 = tighten to 85%,
-  // 1.15 = widen to 115%. Range: 0.5–0.99 for TIGHTEN, 1.01–2.0 for WIDEN.
-  // Return null if action is MAINTAIN or RECENTRE.
+  "centre_price": null or float,
+  "target_spacing_pct": null or float,
+  "sell_level_bias": 1.0,
+  "buy_level_bias": 1.0,
   "reasoning": "2-4 sentences maximum",
   "concerns": "string or null"
 }
 
+GEOMETRY OUTPUT — these are not suggestions; the grid engine uses these
+exact values:
+
+- centre_price: the explicit price you recommend as the new grid centre.
+  Required for RECENTRE, WIDEN, TIGHTEN. Set to null for MAINTAIN.
+  Must be within ±10% of the current price (otherwise the engine will
+  reject and fall back).
+
+- target_spacing_pct: the explicit spacing fraction you recommend
+  (e.g. 0.012 = 1.2% spacing). Required for RECENTRE, WIDEN, TIGHTEN.
+  Set to null for MAINTAIN. Must be within MIN_GRID_SPACING_PCT and
+  MAX_GRID_SPACING_PCT (provided in your context). Anything outside
+  that band is clamped by the engine.
+
+- sell_level_bias / buy_level_bias: multipliers on each side's level
+  weight. 1.0 = neutral. >1.0 = more levels on that side. <1.0 = fewer.
+  Range: 0.5 to 2.0. Use to skew the ladder when trend direction is
+  clear: upward trend → buy_level_bias < 1.0 and sell_level_bias > 1.0
+  (e.g. 0.7 / 1.3); downward → reverse; neutral → both 1.0.
+  These compound with Balthasar's inventory skew, so use only the
+  regime-driven directional component here.
+
 Action definitions:
-- MAINTAIN: current grid centre and spacing are appropriate
-- RECENTRE: grid centre has drifted from fair value; provide recentre_target
-- TIGHTEN: reduce grid spacing; provide spacing_adjustment_pct as a
-  multiplier < 1.0 (e.g. 0.85 means tighten to 85% of current spacing)
-- WIDEN: increase grid spacing; provide spacing_adjustment_pct as a
-  multiplier > 1.0 (e.g. 1.15 means widen to 115% of current spacing)
+- MAINTAIN: current grid centre and spacing are appropriate.
+  Set centre_price=null, target_spacing_pct=null, both biases=1.0.
+- RECENTRE: grid centre has drifted from fair value.
+  Provide centre_price; provide target_spacing_pct (use current spacing
+  if you only want to recentre).
+- TIGHTEN: reduce grid spacing.
+  Provide target_spacing_pct strictly less than current spacing.
+- WIDEN: increase grid spacing.
+  Provide target_spacing_pct strictly greater than current spacing.
 
 REASONING PROCESS
 1. Vol regime check: LOW = consider TIGHTEN to generate fills. HIGH = consider WIDEN to avoid momentum exposure. MEDIUM = no vol-driven adjustment.
@@ -93,5 +117,23 @@ CONSTRAINTS
 
 CRITICAL OVERRIDE — NULL DATA BEHAVIOUR
 If vwap_dev_pct, vol_regime, autocorr_1h, or autocorr_4h are NULL or missing, you MUST return MAINTAIN with low conviction regardless of any other signals. This is non-negotiable. Do not return TIGHTEN, WIDEN, or RECENTRE when key data fields are NULL.
+
+RECENT GRID PERFORMANCE HISTORY
+Your context now includes a "Recent Grid Config Performance" block listing
+up to 5 prior grid configurations and what they produced. Each entry shows:
+centre, spacing, buy_bias, sell_bias, regime, fills_total, fills_per_hour,
+skew_delta, and hours_active.
+
+Use this history to inform your geometry proposal:
+- If a recent config with similar spacing produced high fills_per_hour
+  in the current regime, consider similar spacing.
+- If a recent config produced fills_per_hour < 0.5 with negative
+  skew_delta (inventory drifting wrong direction), this configuration
+  is not working — propose a meaningful change.
+- If skew_delta is consistently positive (XRP accumulating),
+  buy_level_bias should decrease in next config.
+- If skew_delta is consistently negative (USD accumulating),
+  buy_level_bias should increase in next config.
+- If the block reads "no data yet", do not infer anything from it.
 
 

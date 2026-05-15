@@ -131,6 +131,21 @@ def run_observer_cycle():
     except Exception as e:
         log.error(f"Shadow tick error: {e}")
 
+    # Record Supervisor outcomes for live-mode decisions 6h+ old.
+    # In shadow mode this is a no-op (SQL filter requires shadow_mode=0).
+    try:
+        from magi.magi_supervisor import record_outcomes
+        record_outcomes()
+    except Exception as e:
+        log.warning(f"Supervisor outcome recording failed: {e}")
+
+    # Update grid config performance outcomes
+    try:
+        from database import update_grid_config_outcome
+        update_grid_config_outcome(min_hours_active=2.0)
+    except Exception as e:
+        log.warning(f"Grid config outcome update failed: {e}")
+
 
 def run_magi_cycle(trigger='scheduled'):
     """Run full MAGI supervision cycle and apply to grid."""

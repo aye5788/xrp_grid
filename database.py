@@ -142,6 +142,45 @@ def init_db():
         stats_json TEXT
     )''')
 
+    c.execute('''CREATE TABLE IF NOT EXISTS supervisor_decisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        cycle_timestamp TEXT NOT NULL,
+        council_grid_action TEXT,
+        council_risk_action TEXT,
+        council_regime TEXT,
+        supervisor_action TEXT NOT NULL,
+        override_target TEXT,
+        reasoning TEXT,
+        shadow_mode INTEGER DEFAULT 1,
+        outcome_recorded INTEGER DEFAULT 0,
+        outcome TEXT,
+        outcome_notes TEXT,
+        outcome_recorded_at TEXT
+    )''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS grid_config_outcomes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        config_timestamp TEXT NOT NULL,
+        centre_price REAL,
+        spacing_pct REAL,
+        buy_level_bias REAL DEFAULT 1.0,
+        sell_level_bias REAL DEFAULT 1.0,
+        levels INTEGER,
+        regime_at_config TEXT,
+        hours_active REAL,
+        fills_total INTEGER DEFAULT 0,
+        fills_buy INTEGER DEFAULT 0,
+        fills_sell INTEGER DEFAULT 0,
+        fills_per_hour REAL DEFAULT 0.0,
+        skew_start REAL,
+        skew_end REAL,
+        skew_delta REAL,
+        gross_pnl_usd REAL DEFAULT 0.0,
+        outcome_recorded_at TEXT,
+        superseded_at TEXT
+    )''')
+
     conn.commit()
     conn.close()
     print("Database initialised.")
@@ -612,6 +651,172 @@ def ensure_market_knowledge_table():
     ''')
     conn.commit()
     conn.close()
+
+
+# --- Supervisor decision helpers ---
+
+def insert_supervisor_decision(cycle_timestamp, council_grid_action,
+                                council_risk_action, council_regime,
+                                supervisor_action, override_target,
+                                reasoning, shadow_mode=1):
+    conn = get_conn()
+    conn.execute('''INSERT INTO supervisor_decisions
+        (timestamp, cycle_timestamp, council_grid_action, council_risk_action,
+         council_regime, supervisor_action, override_target, reasoning, shadow_mode)
+        VALUES (?,?,?,?,?,?,?,?,?)''',
+        (datetime.utcnow().isoformat(), cycle_timestamp, council_grid_action,
+         council_risk_action, council_regime, supervisor_action,
+         override_target, reasoning, shadow_mode))
+    conn.commit()
+    conn.close()
+
+
+def record_supervisor_outcome(decision_id, outcome, outcome_notes):
+    conn = get_conn()
+    conn.execute('''UPDATE supervisor_decisions
+        SET outcome=?, outcome_notes=?, outcome_recorded=1,
+            outcome_recorded_at=?
+        WHERE id=?''',
+        (outcome, outcome_notes, datetime.utcnow().isoformat(), decision_id))
+    conn.commit()
+    conn.close()
+
+
+def get_pending_outcome_decisions(hours_threshold=6):
+    """Return supervisor decisions that need outcome recording."""
+    from datetime import timedelta
+    conn = get_conn()
+    cutoff = (datetime.utcnow() - timedelta(hours=hours_threshold)).isoformat()
+    rows = conn.execute('''SELECT id, timestamp, supervisor_action,
+                                  override_target, council_grid_action
+                           FROM supervisor_decisions
+                           WHERE outcome_recorded=0
+                             AND timestamp < ?
+                             AND shadow_mode=0''',
+                        (cutoff,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# --- Grid config outcomes (Melchior performance feedback) ---
+
+def record_grid_config(centre_price, spacing_pct, buy_level_bias,
+                        sell_level_bias, levels, regime_at_config,
+                        skew_start):
+    """
+    Called when a new grid is initialised. Records the config
+    so outcomes can be written later.
+    """
+    conn = get_conn()
+    conn.execute(
+        "UPDATE grid_config_outcomes SET superseded_at=? "
+        "WHERE superseded_at IS NULL",
+        (datetime.utcnow().isoformat(),)
+    )
+    conn.execute(
+        '''INSERT INTO grid_config_outcomes
+           (config_timestamp, centre_price, spacing_pct,
+            buy_level_bias, sell_level_bias, levels,
+            regime_at_config, skew_start)
+           VALUES (?,?,?,?,?,?,?,?)''',
+        (datetime.utcnow().isoformat(), centre_price, spacing_pct,
+         buy_level_bias, sell_level_bias, levels,
+         regime_at_config, skew_start)
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_grid_config_outcome(min_hours_active=2.0):
+    """
+    Called from observer cycle. Finds the active config
+    (superseded_at IS NULL), computes outcomes from fills
+    and inventory since config_timestamp, writes back.
+    Only updates if config has been active for min_hours_active.
+    """
+    conn = get_conn()
+
+    active = conn.execute(
+        "SELECT id, config_timestamp, skew_start "
+        "FROM grid_config_outcomes "
+        "WHERE superseded_at IS NULL "
+        "ORDER BY config_timestamp DESC LIMIT 1"
+    ).fetchone()
+
+    if not active:
+        conn.close()
+        return
+
+    config_id, config_ts, skew_start = active['id'], active['config_timestamp'], active['skew_start']
+
+    try:
+        config_dt = datetime.fromisoformat(config_ts)
+        hours_active = (datetime.utcnow() - config_dt).total_seconds() / 3600
+    except Exception:
+        conn.close()
+        return
+
+    if hours_active < min_hours_active:
+        conn.close()
+        return
+
+    fills = conn.execute(
+        """SELECT
+            COUNT(*) as total,
+            SUM(CASE WHEN side='buy' THEN 1 ELSE 0 END) as buys,
+            SUM(CASE WHEN side='sell' THEN 1 ELSE 0 END) as sells
+           FROM grid_orders
+           WHERE status='filled' AND filled_at >= ?""",
+        (config_ts,)
+    ).fetchone()
+
+    fills_total = fills['total'] or 0
+    fills_buy = fills['buys'] or 0
+    fills_sell = fills['sells'] or 0
+    fills_per_hour = fills_total / hours_active if hours_active > 0 else 0.0
+
+    inv = conn.execute(
+        "SELECT inventory_skew FROM inventory "
+        "ORDER BY timestamp DESC LIMIT 1"
+    ).fetchone()
+    skew_end = inv['inventory_skew'] if inv else skew_start
+    skew_delta = (skew_end - skew_start) if (skew_start is not None and skew_end is not None) else 0.0
+
+    conn.execute(
+        """UPDATE grid_config_outcomes SET
+            hours_active=?, fills_total=?, fills_buy=?,
+            fills_sell=?, fills_per_hour=?,
+            skew_end=?, skew_delta=?,
+            outcome_recorded_at=?
+           WHERE id=?""",
+        (hours_active, fills_total, fills_buy, fills_sell,
+         fills_per_hour, skew_end, skew_delta,
+         datetime.utcnow().isoformat(), config_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_recent_grid_config_outcomes(n=5):
+    """
+    Returns last N completed grid configs with outcomes.
+    Used to build Melchior's feedback context.
+    """
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT config_timestamp, centre_price, spacing_pct,
+                  buy_level_bias, sell_level_bias, levels,
+                  regime_at_config, hours_active, fills_total,
+                  fills_per_hour, skew_start, skew_end, skew_delta
+           FROM grid_config_outcomes
+           WHERE outcome_recorded_at IS NOT NULL
+             AND hours_active IS NOT NULL
+           ORDER BY config_timestamp DESC
+           LIMIT ?""",
+        (n,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 if __name__ == "__main__":

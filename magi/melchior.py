@@ -24,6 +24,7 @@ def build_context(indicators: dict, grid_state: dict, inventory: dict,
                   casper_regime: dict = None) -> str:
     """Build the context package Melchior receives."""
     from database import get_open_orders_summary, get_trajectory_context
+    from config import MIN_GRID_SPACING_PCT, MAX_GRID_SPACING_PCT
     orders = get_open_orders_summary()
     traj = get_trajectory_context()
     inv_skew = inventory.get('inventory_skew')
@@ -69,11 +70,38 @@ def build_context(indicators: dict, grid_state: dict, inventory: dict,
     except Exception:
         mk_block = ""
 
+    try:
+        from database import get_recent_grid_config_outcomes
+        recent_outcomes = get_recent_grid_config_outcomes(n=5)
+    except Exception:
+        recent_outcomes = []
+
+    if recent_outcomes:
+        outcomes_lines = []
+        for o in recent_outcomes:
+            outcomes_lines.append(
+                f"  [{o['config_timestamp'][:16]}] "
+                f"centre={o['centre_price']:.4f} "
+                f"spacing={o['spacing_pct']*100:.2f}% "
+                f"buy_bias={o['buy_level_bias']:.2f} "
+                f"sell_bias={o['sell_level_bias']:.2f} "
+                f"regime={o['regime_at_config']} "
+                f"→ fills={o['fills_total']} "
+                f"({o['fills_per_hour']:.2f}/hr) "
+                f"skew_delta={o['skew_delta']:+.3f} "
+                f"active={o['hours_active']:.1f}h"
+            )
+        outcomes_text = "Recent Grid Config Performance:\n" + "\n".join(outcomes_lines)
+    else:
+        outcomes_text = "Recent Grid Config Performance: no data yet"
+
     return f"""CURRENT MARKET MICROSTRUCTURE — XRP/USD
 
 Grid Parameters:
 - grid_centre: {grid_state.get('centre_price', 'NULL')}
 - grid_spacing_pct: {round((grid_state.get('spacing_pct') or 0) * 100, 3)}%
+- MIN_GRID_SPACING_PCT: {MIN_GRID_SPACING_PCT}  (engine clamps target_spacing_pct above this)
+- MAX_GRID_SPACING_PCT: {MAX_GRID_SPACING_PCT}  (engine clamps target_spacing_pct below this)
 - pause_longs: {grid_state.get('pause_longs', 0)}
 - pause_shorts: {grid_state.get('pause_shorts', 0)}
 
@@ -98,6 +126,8 @@ Trajectory Context:
 - pause_longs_active: {traj['pause_longs_active']} | pause_shorts_active: {traj['pause_shorts_active']}
 {regime_block}
 {mk_block}
+{outcomes_text}
+
 Respond with a JSON object only. No preamble."""
 
 def get_decision(indicators: dict, grid_state: dict, inventory: dict,
@@ -144,8 +174,10 @@ def get_decision(indicators: dict, grid_state: dict, inventory: dict,
             "agent": "melchior",
             "action": "MAINTAIN",
             "conviction": "low",
-            "recentre_target": None,
-            "spacing_adjustment_pct": None,
+            "centre_price": None,
+            "target_spacing_pct": None,
+            "sell_level_bias": 1.0,
+            "buy_level_bias": 1.0,
             "reasoning": f"Error: {str(e)}",
             "concerns": "Agent call failed — defaulting to MAINTAIN"
         }

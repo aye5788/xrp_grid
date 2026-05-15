@@ -95,7 +95,20 @@ class GridEngine:
         grid_state = get_current_grid_state()
         if grid_state and grid_state.get('levels'):
             self.level_count = grid_state['levels']
-        # Ensure all variant rows exist in DB (fill_count=0 for brand-new variants)
+        # If any variant has empty resting_orders after loading from DB (e.g. service
+        # restart with restored paper_orders that skips initialise_grid), rebuild all
+        # shadow variants now using the current grid_state so process_tick works immediately.
+        if any(not sg.resting_orders for sg in self.shadow_sim.variants.values()):
+            _gs_centre = grid_state.get('centre_price') if grid_state else None
+            _gs_spacing = grid_state.get('spacing_pct') if grid_state else None
+            if _gs_centre and _gs_spacing:
+                self.shadow_sim.rebuild(_gs_centre, _gs_spacing)
+                self._last_shadow_level_count = self.level_count
+                log.info(
+                    f"Shadow sim rebuilt in load_state — resting_orders were empty "
+                    f"(centre={_gs_centre}, spacing={_gs_spacing})"
+                )
+        # Persist current variant state (with populated resting_orders) to DB.
         self.shadow_sim.persist_all()
 
         # Restore paper_orders from grid_orders table — any status='open' row
@@ -266,39 +279,118 @@ class GridEngine:
     # --- Grid Construction ---
 
     def build_grid_levels(self, centre: float, spacing_pct: float,
-                           levels: int, xrp_held: float, usd_held: float) -> list:
+                           levels: int, xrp_held: float, usd_held: float,
+                           sell_level_bias: float = 1.0,
+                           buy_level_bias: float = 1.0) -> list:
         """Build grid price levels trimmed to what current holdings can cover."""
         half = levels // 2
-        size_xrp = self.compute_order_size(centre)
+
+        # Asymmetric level distribution based on inventory skew
+        # skew < 0 = USD-heavy → need more buys to reaccumulate XRP
+        # skew > 0 = XRP-heavy → need more sells to release XRP
+        # Skew range: -1 to +1. Neutral = 0.
+        # Thresholds: mild (±0.2), moderate (±0.4), heavy (±0.6+)
+
+        skew = (xrp_held * centre - usd_held) / (xrp_held * centre + usd_held) \
+               if (xrp_held * centre + usd_held) > 0 else 0.0
+
+        if skew < -0.4:      # Heavily USD-heavy — need lots more buys
+            buy_ratio = 0.65
+        elif skew < -0.2:    # Mildly USD-heavy
+            buy_ratio = 0.55
+        elif skew > 0.4:     # Heavily XRP-heavy — need lots more sells
+            buy_ratio = 0.35
+        elif skew > 0.2:     # Mildly XRP-heavy
+            buy_ratio = 0.45
+        else:                # Balanced — symmetric
+            buy_ratio = 0.50
+
+        target_buy_count = max(1, round(levels * buy_ratio))
+        target_sell_count = max(1, levels - target_buy_count)
+
+        if abs(buy_ratio - 0.5) > 0.01:
+            log.info(
+                f"Asymmetric grid: skew={skew:.3f} → "
+                f"{target_buy_count} buys / {target_sell_count} sells "
+                f"(ratio {buy_ratio:.2f})"
+            )
+
+        # Apply Melchior's regime-aware level bias on top of inventory skew.
+        # Per the geometry contract, bias scales target_buy_count and the
+        # remainder fills target_sell_count so total stays at `levels`.
+        # sell_level_bias is accepted in the signature for symmetry but does
+        # not affect level counts under the buy-only-scaling rule.
+        if abs(buy_level_bias - 1.0) > 0.01 or abs(sell_level_bias - 1.0) > 0.01:
+            pre_bias_buy = target_buy_count
+            pre_bias_sell = target_sell_count
+            target_buy_count = max(1, round(target_buy_count * buy_level_bias))
+            target_sell_count = max(1, levels - target_buy_count)
+            log.info(
+                f"Level bias applied: buy_bias={buy_level_bias:.2f} "
+                f"sell_bias={sell_level_bias:.2f} → "
+                f"buys {pre_bias_buy}→{target_buy_count}, "
+                f"sells {pre_bias_sell}→{target_sell_count}"
+            )
+
+        sell_size = self.compute_order_size(centre, 'sell', target_sell_count)
+        buy_size = self.compute_order_size(centre, 'buy', target_buy_count)
 
         # Sell ladder: walk nearest-to-centre outward, stop when XRP runs out
         sell_levels = []
         cumulative_xrp = 0.0
-        for i in range(1, half + 1):
-            if cumulative_xrp + size_xrp > xrp_held:
+        for i in range(1, target_sell_count + 1):
+            if cumulative_xrp + sell_size > xrp_held:
                 break
             price = round(centre * (1 + i * spacing_pct), 5)
-            sell_levels.append({'price': price, 'side': 'sell', 'level': i})
-            cumulative_xrp += size_xrp
+            sell_levels.append({'price': price, 'side': 'sell', 'level': i, 'size': sell_size})
+            cumulative_xrp += sell_size
 
         # Buy ladder: walk nearest-to-centre outward, stop when USD runs out
         buy_levels = []
         cumulative_usd = 0.0
-        for i in range(1, half + 1):
+        for i in range(1, target_buy_count + 1):
             level_price = round(centre * (1 - i * spacing_pct), 5)
-            cost = size_xrp * level_price
+            cost = buy_size * level_price
             if cumulative_usd + cost > usd_held:
                 break
-            buy_levels.append({'price': level_price, 'side': 'buy', 'level': -i})
+            buy_levels.append({'price': level_price, 'side': 'buy', 'level': -i, 'size': buy_size})
             cumulative_usd += cost
 
         return buy_levels + sell_levels
 
-    def compute_order_size(self, price: float) -> float:
-        """Compute XRP order size per level based on max inventory."""
-        size_usd = MAX_INVENTORY_USD / (self.level_count // 2)
-        size_xrp = size_usd / price
-        return round(size_xrp, 2)
+    def compute_order_size(self, centre: float, side: str,
+                            target_count: int) -> float:
+        """
+        Compute per-order size from actual holdings, not fixed budget.
+
+        For sells: divide actual XRP held by target sell count
+        For buys: divide actual USD held by target buy count,
+                  convert to XRP at centre price
+
+        Floor at minimum Kraken order size (1.65 XRP or $0.50).
+        Cap at MAX_INVENTORY_USD / 2 per order to prevent single
+        orders consuming all inventory.
+        """
+        if side == 'sell':
+            if target_count <= 0:
+                return 0.0
+            size_xrp = self.paper_inventory['xrp'] / target_count
+        else:  # buy
+            if target_count <= 0 or centre <= 0:
+                return 0.0
+            size_xrp = (self.paper_inventory['usd'] / target_count) / centre
+
+        # Floor: Kraken minimum
+        min_size = max(1.65, 0.50 / centre if centre > 0 else 1.65)
+
+        # Cap: no single order consumes more than half of available inventory
+        if side == 'sell':
+            max_size = self.paper_inventory['xrp'] / 2 if self.paper_inventory['xrp'] > 0 else 0
+        else:
+            max_size = (self.paper_inventory['usd'] / 2) / centre if centre > 0 else 0
+
+        size = max(min_size, min(size_xrp, max_size))
+        return round(size, 4)
 
     # --- Order Management ---
 
@@ -439,12 +531,20 @@ class GridEngine:
                 filled.append(order)
                 log.info(f"[PAPER FILL] {order['side'].upper()} {order['size']} XRP @ {current_price} fee={fee:.4f}")
 
+        if filled and self.shadow_sim:
+            try:
+                self.shadow_sim.persist_all()
+            except Exception as e:
+                log.warning(f"Shadow persist after fill failed: {e}")
+
         return filled
 
     # --- Grid Lifecycle ---
 
     def initialise_grid(self, centre: Optional[float] = None,
-                         spacing_pct: Optional[float] = None):
+                         spacing_pct: Optional[float] = None,
+                         sell_level_bias: float = 1.0,
+                         buy_level_bias: float = 1.0):
         """Set up the full grid from scratch."""
         if centre is None:
             centre = self.get_current_price()
@@ -462,6 +562,8 @@ class GridEngine:
             centre, spacing_pct, self.level_count,
             xrp_held=self.paper_inventory['xrp'],
             usd_held=self.paper_inventory['usd'],
+            sell_level_bias=sell_level_bias,
+            buy_level_bias=buy_level_bias,
         )
 
         if not levels:
@@ -477,11 +579,9 @@ class GridEngine:
                 f"(XRP held insufficient for full sell ladder)"
             )
 
-        size = self.compute_order_size(centre)
-
         placed = 0
         for level in levels:
-            order = self.place_order(level['side'], level['price'], size)
+            order = self.place_order(level['side'], level['price'], level['size'])
             if order['status'] in ('open', 'filled'):
                 placed += 1
             time.sleep(0.1)  # Rate limit buffer
@@ -490,11 +590,41 @@ class GridEngine:
                           notes=f"Grid initialised — {placed} orders placed")
         log.info(f"Grid initialised — {placed}/{len(levels)} orders placed")
 
+        # Record this config for performance feedback
+        try:
+            from database import record_grid_config
+            indicators = get_latest_indicators('1h')
+            regime = indicators.get('vol_regime', 'UNKNOWN') if indicators else 'UNKNOWN'
+            xrp_val = self.paper_inventory['xrp'] * centre
+            total_val = xrp_val + self.paper_inventory['usd']
+            skew_start_val = (xrp_val / total_val) if total_val > 0 else 0.0
+            record_grid_config(
+                centre_price=centre,
+                spacing_pct=spacing_pct,
+                buy_level_bias=buy_level_bias,
+                sell_level_bias=sell_level_bias,
+                levels=self.level_count,
+                regime_at_config=regime,
+                skew_start=skew_start_val,
+            )
+        except Exception as e:
+            log.warning(f"grid_config_outcomes record failed: {e}")
+
         if self.shadow_sim:
             # Only do a full shadow rebuild when level count changes.
             # On spacing/centre changes, update centre metadata only —
             # preserves resting orders and prevents fill-count resets.
-            if getattr(self, '_last_shadow_level_count', None) != self.level_count:
+            needs_rebuild = (getattr(self, '_last_shadow_level_count', None) != self.level_count)
+            if not needs_rebuild and any(
+                not sg.resting_orders
+                for sg in self.shadow_sim.variants.values()
+            ):
+                needs_rebuild = True
+                log.warning(
+                    "Shadow sim rebuild forced — resting_orders empty on "
+                    "one or more variants"
+                )
+            if needs_rebuild:
                 self.shadow_sim.rebuild(centre, spacing_pct)
                 self._last_shadow_level_count = self.level_count
                 log.info(
@@ -534,16 +664,18 @@ class GridEngine:
 
         if rebuild_requested:
             price = self.get_current_price() or centre
-            order_size_xrp = self.compute_order_size(price)
-            order_size_usd = order_size_xrp * price
+            target_count = self.level_count // 2
+            order_size_xrp_sell = self.compute_order_size(price, 'sell', target_count)
+            order_size_xrp_buy = self.compute_order_size(price, 'buy', target_count)
+            order_size_usd_buy = order_size_xrp_buy * price
             xrp_held = self.paper_inventory['xrp']
             usd_held = self.paper_inventory['usd']
 
-            if risk_action == 'PAUSE_LONGS' and xrp_held < order_size_xrp:
+            if risk_action == 'PAUSE_LONGS' and xrp_held < order_size_xrp_sell:
                 log.warning(
                     f"Empty-book guard: skipping {grid_action} — "
                     f"PAUSE_LONGS + xrp_held={xrp_held:.4f} < "
-                    f"order_size_xrp={order_size_xrp:.4f}. Rebuild "
+                    f"order_size_xrp_sell={order_size_xrp_sell:.4f}. Rebuild "
                     f"would produce 0 sells; buys would be cancelled "
                     f"by PAUSE_LONGS. Risk action still applied."
                 )
@@ -553,11 +685,11 @@ class GridEngine:
                           f"risk={risk_action} applied"
                 )
                 guard_tripped = True
-            elif risk_action == 'PAUSE_SHORTS' and usd_held < order_size_usd:
+            elif risk_action == 'PAUSE_SHORTS' and usd_held < order_size_usd_buy:
                 log.warning(
                     f"Empty-book guard: skipping {grid_action} — "
                     f"PAUSE_SHORTS + usd_held={usd_held:.2f} < "
-                    f"order_size_usd={order_size_usd:.2f}. Rebuild "
+                    f"order_size_usd_buy={order_size_usd_buy:.2f}. Rebuild "
                     f"would produce 0 buys; sells would be cancelled "
                     f"by PAUSE_SHORTS. Risk action still applied."
                 )
@@ -569,81 +701,91 @@ class GridEngine:
                 guard_tripped = True
 
         if not guard_tripped:
-            if grid_action == 'RECENTRE':
-                # Use Melchior's computed recentre_target if provided and valid.
-                # Fall back to VWAP from indicators only if Melchior didn't supply one.
-                melchior_target = consensus.get('recentre_target')
-                if melchior_target and isinstance(melchior_target, (int, float)) and melchior_target > 0:
-                    new_centre = melchior_target
-                    log.info(f"MAGI RECENTRE — {centre} → {new_centre} (Melchior target)")
-                else:
-                    indicators = get_latest_indicators('1h')
-                    new_centre = indicators.get('vwap') if indicators else None
-                    log.info(f"MAGI RECENTRE — {centre} → {new_centre} (VWAP fallback)")
-                if new_centre:
-                    self.initialise_grid(centre=new_centre, spacing_pct=spacing)
-                else:
-                    log.warning("MAGI RECENTRE — no valid target, skipping")
+            if grid_action in ('RECENTRE', 'TIGHTEN', 'WIDEN'):
+                from config import MIN_GRID_SPACING_PCT, MAX_GRID_SPACING_PCT
+                geometry = consensus.get('melchior_geometry') or {}
+                geom_centre = geometry.get('centre_price')
+                geom_spacing = geometry.get('target_spacing_pct')
+                sell_bias = float(geometry.get('sell_level_bias') or 1.0)
+                buy_bias = float(geometry.get('buy_level_bias') or 1.0)
+                # Clamp biases to documented Melchior contract range
+                sell_bias = max(0.5, min(2.0, sell_bias))
+                buy_bias = max(0.5, min(2.0, buy_bias))
 
-            elif grid_action == 'TIGHTEN':
-                # Use Melchior's spacing_adjustment_pct if provided and valid.
-                # Treated as a multiplier (e.g. 0.85 means tighten to 85% of current spacing).
-                # Fall back to hardcoded 0.8x only if Melchior didn't supply a valid one.
-                adj = consensus.get('spacing_adjustment_pct')
-                if adj and isinstance(adj, (int, float)) and 0.5 <= adj <= 0.99:
-                    new_spacing = spacing * adj
-                    log.info(f"MAGI TIGHTEN — spacing {spacing*100:.3f}% → {new_spacing*100:.3f}% (Melchior adj={adj})")
-                else:
-                    new_spacing = spacing * 0.8
-                    log.info(f"MAGI TIGHTEN — spacing {spacing*100:.3f}% → {new_spacing*100:.3f}% (hardcoded 0.8x fallback)")
-                from config import MIN_GRID_SPACING_PCT
-                if new_spacing < MIN_GRID_SPACING_PCT:
-                    log.warning(
-                        f"MAGI TIGHTEN floored — proposed spacing "
-                        f"{new_spacing*100:.3f}% below MIN_GRID_SPACING_PCT "
-                        f"{MIN_GRID_SPACING_PCT*100:.3f}%. Holding at "
-                        f"{spacing*100:.3f}%."
-                    )
-                else:
-                    self.initialise_grid(centre=centre, spacing_pct=new_spacing)
+                current_price = self.get_current_price() or centre
 
-            elif grid_action == 'WIDEN':
-                # Use Melchior's spacing_adjustment_pct if provided and valid.
-                # Treated as a multiplier (e.g. 1.15 means widen to 115% of current spacing).
-                # Fall back to hardcoded 1.2x only if Melchior didn't supply a valid one.
-                adj = consensus.get('spacing_adjustment_pct')
-                if adj and isinstance(adj, (int, float)) and 1.01 <= adj <= 2.0:
-                    new_spacing = spacing * adj
-                    log.info(f"MAGI WIDEN — spacing {spacing*100:.3f}% → {new_spacing*100:.3f}% (Melchior adj={adj})")
-                else:
-                    new_spacing = spacing * 1.2
-                    log.info(f"MAGI WIDEN — spacing {spacing*100:.3f}% → {new_spacing*100:.3f}% (hardcoded 1.2x fallback)")
-                from config import MAX_GRID_SPACING_PCT
-                if new_spacing > MAX_GRID_SPACING_PCT:
-                    log.warning(
-                        f"MAGI WIDEN capped — proposed spacing "
-                        f"{new_spacing*100:.3f}% exceeds MAX_GRID_SPACING_PCT "
-                        f"{MAX_GRID_SPACING_PCT*100:.3f}%. Holding at "
-                        f"{spacing*100:.3f}%."
-                    )
-                else:
+                # Centre selection: prefer geometry if within ±10% of current price,
+                # else fall back to current price, else existing centre.
+                if (geom_centre is not None
+                        and isinstance(geom_centre, (int, float))
+                        and geom_centre > 0
+                        and current_price > 0
+                        and abs(geom_centre - current_price) / current_price <= 0.10):
+                    new_centre = float(geom_centre)
                     log.info(
-                        f"MAGI WIDEN — spacing {spacing*100:.3f}% → "
-                        f"{new_spacing*100:.3f}%"
+                        f"MAGI {grid_action} — centre from Melchior geometry: "
+                        f"{new_centre} (current={current_price})"
                     )
-                    # Recentre to current market price on every WIDEN.
-                    # Using the stale grid centre causes buy levels to be
-                    # placed far below market when price has drifted up,
-                    # making fills structurally unreachable and creating
-                    # one-directional XRP drain. Recentring ensures the
-                    # new grid is bilateral and symmetric around actual price.
-                    widen_centre = self.get_current_price() or centre
-                    if widen_centre != centre:
+                elif current_price:
+                    new_centre = float(current_price)
+                    log.info(
+                        f"MAGI {grid_action} — centre fallback to current price "
+                        f"{new_centre} (geometry centre={geom_centre} rejected or null)"
+                    )
+                else:
+                    new_centre = float(centre)
+                    log.info(
+                        f"MAGI {grid_action} — centre fallback to existing {new_centre} "
+                        f"(no current price available)"
+                    )
+
+                # Spacing selection: prefer geometry, clamp to bounds; else
+                # action-specific multiplicative fallback for safety.
+                if (geom_spacing is not None
+                        and isinstance(geom_spacing, (int, float))
+                        and geom_spacing > 0):
+                    clamped = max(MIN_GRID_SPACING_PCT,
+                                   min(MAX_GRID_SPACING_PCT, float(geom_spacing)))
+                    if abs(clamped - geom_spacing) > 1e-9:
                         log.info(
-                            f"MAGI WIDEN — recentring from {centre:.5f} "
-                            f"to current price {widen_centre:.5f} before rebuild"
+                            f"MAGI {grid_action} — spacing from Melchior {geom_spacing} "
+                            f"clamped to {clamped} "
+                            f"(bounds {MIN_GRID_SPACING_PCT}–{MAX_GRID_SPACING_PCT})"
                         )
-                    self.initialise_grid(centre=widen_centre, spacing_pct=new_spacing)
+                    else:
+                        log.info(
+                            f"MAGI {grid_action} — spacing from Melchior geometry: "
+                            f"{clamped}"
+                        )
+                    new_spacing = clamped
+                else:
+                    if grid_action == 'TIGHTEN':
+                        new_spacing = max(MIN_GRID_SPACING_PCT, spacing * 0.8)
+                        log.info(
+                            f"MAGI TIGHTEN — spacing fallback 0.8x: "
+                            f"{spacing*100:.3f}% → {new_spacing*100:.3f}%"
+                        )
+                    elif grid_action == 'WIDEN':
+                        new_spacing = min(MAX_GRID_SPACING_PCT, spacing * 1.2)
+                        log.info(
+                            f"MAGI WIDEN — spacing fallback 1.2x: "
+                            f"{spacing*100:.3f}% → {new_spacing*100:.3f}%"
+                        )
+                    else:  # RECENTRE
+                        new_spacing = spacing
+                        log.info(
+                            f"MAGI RECENTRE — spacing unchanged (no geometry): "
+                            f"{new_spacing}"
+                        )
+
+                log.info(
+                    f"MAGI geometry applied — centre={new_centre} spacing={new_spacing} "
+                    f"buy_bias={buy_bias:.2f} sell_bias={sell_bias:.2f}"
+                )
+                self.initialise_grid(
+                    centre=new_centre, spacing_pct=new_spacing,
+                    sell_level_bias=sell_bias, buy_level_bias=buy_bias,
+                )
 
             else:  # MAINTAIN
                 log.info("MAGI MAINTAIN — no grid changes")

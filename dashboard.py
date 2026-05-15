@@ -48,6 +48,8 @@ HTML_TEMPLATE = """
         .MAINTAIN { color: #00ff88; } .TIGHTEN { color: #00ccff; } .WIDEN { color: #ffaa00; } .RECENTRE { color: #ff88ff; } .HALT { color: #ff0000; }
         .CLEAR { color: #00ff88; } .PAUSE_LONGS { color: #ffaa00; } .PAUSE_SHORTS { color: #ffaa00; }
         .LOW { color: #00ff88; } .MEDIUM { color: #ffaa00; } .HIGH { color: #ff4444; }
+        .APPROVE { color: #00ff88; } .OVERRIDE { color: #ffaa00; }
+        .LIVE { color: #ff4444; font-weight: bold; } .SHADOW { color: #888; }
         .status-ok { color: #00ff88; } .status-err { color: #ff4444; }
         .agent-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px; margin: 15px 0; }
         .agent-card { background: #111; border: 1px solid #00ff8833; padding: 12px; border-radius: 4px; }
@@ -61,6 +63,240 @@ HTML_TEMPLATE = """
         .status-filled { color: #00ff88; }
         .status-cancelled { color: #ff4444; }
         .status-open { color: #ffaa00; }
+
+        /* ── NGE MAGI aesthetic — scoped to council cards + supervisor only ── */
+        .magi-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 22px;
+            margin: 18px 0 8px;
+        }
+        .magi-card {
+            background:
+                repeating-linear-gradient(
+                    to bottom,
+                    transparent 0px,
+                    transparent 2px,
+                    rgba(255, 153, 0, 0.045) 2px,
+                    rgba(255, 153, 0, 0.045) 3px
+                ),
+                repeating-linear-gradient(
+                    to right,
+                    transparent 0px,
+                    transparent 28px,
+                    rgba(255, 153, 0, 0.03) 28px,
+                    rgba(255, 153, 0, 0.03) 29px
+                ),
+                #0e0a04;
+            border: 1px solid #ff9900;
+            outline: 1px solid #331100;
+            outline-offset: 2px;
+            border-radius: 0;
+            padding: 14px 16px 16px;
+            color: #ffcc66;
+            font-family: monospace;
+            position: relative;
+        }
+        .magi-card::before {
+            content: '';
+            position: absolute;
+            top: -1px; left: -1px;
+            width: 14px; height: 14px;
+            border-top: 2px solid #ff9900;
+            border-left: 2px solid #ff9900;
+            pointer-events: none;
+        }
+        .magi-card::after {
+            content: '';
+            position: absolute;
+            bottom: -1px; right: -1px;
+            width: 14px; height: 14px;
+            border-bottom: 2px solid #ff9900;
+            border-right: 2px solid #ff9900;
+            pointer-events: none;
+        }
+        .magi-name {
+            color: #ff9900;
+            font-size: 0.82em;
+            letter-spacing: 3px;
+            font-weight: bold;
+            text-transform: uppercase;
+            text-shadow: 0 0 6px #ff990044;
+        }
+        .magi-rule {
+            border: none;
+            border-top: 1px solid #ff990066;
+            margin: 8px 0 12px;
+        }
+        .magi-decision {
+            font-size: 1.6em;
+            font-weight: bold;
+            letter-spacing: 4px;
+            text-align: center;
+            padding: 6px 0 2px;
+            text-shadow: 0 0 10px currentColor;
+        }
+        .conv-bar {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            margin: 10px 0 12px;
+            justify-content: center;
+        }
+        .conv-seg {
+            width: 32px;
+            height: 8px;
+            border: 1px solid #ff990066;
+        }
+        .conv-on  { background: #ff9900; box-shadow: 0 0 8px #ff990099; }
+        .conv-off { background: #1a1006; }
+        .conv-label {
+            color: #ff9900;
+            font-size: 0.7em;
+            letter-spacing: 2px;
+            margin-left: 10px;
+        }
+        .magi-reason {
+            color: #b89060;
+            font-size: 0.75em;
+            line-height: 1.5;
+            margin-top: 4px;
+            border-top: 1px dashed #ff990022;
+            padding-top: 8px;
+        }
+
+        /* Supervisor panel — distinct, wider, override-authority styling */
+        .supervisor-panel {
+            margin: 14px auto 8px;
+            background:
+                repeating-linear-gradient(
+                    to bottom,
+                    transparent 0px,
+                    transparent 2px,
+                    rgba(255, 68, 68, 0.04) 2px,
+                    rgba(255, 68, 68, 0.04) 3px
+                ),
+                #110707;
+            border: 1px solid #ff4444;
+            outline: 1px solid #330808;
+            outline-offset: 2px;
+            border-radius: 0;
+            padding: 18px 24px 20px;
+            position: relative;
+        }
+        .supervisor-panel.approve {
+            background:
+                repeating-linear-gradient(
+                    to bottom,
+                    transparent 0px,
+                    transparent 2px,
+                    rgba(0, 255, 136, 0.03) 2px,
+                    rgba(0, 255, 136, 0.03) 3px
+                ),
+                #071109;
+            border-color: #00ff88;
+            outline-color: #083322;
+        }
+        .supervisor-panel::before {
+            content: '';
+            position: absolute;
+            top: -1px; left: -1px;
+            width: 18px; height: 18px;
+            border-top: 2px solid currentColor;
+            border-left: 2px solid currentColor;
+            color: #ff4444;
+            pointer-events: none;
+        }
+        .supervisor-panel::after {
+            content: '';
+            position: absolute;
+            bottom: -1px; right: -1px;
+            width: 18px; height: 18px;
+            border-bottom: 2px solid currentColor;
+            border-right: 2px solid currentColor;
+            color: #ff4444;
+            pointer-events: none;
+        }
+        .supervisor-panel.approve::before,
+        .supervisor-panel.approve::after { color: #00ff88; }
+        .supervisor-head {
+            color: #ff9900;
+            font-size: 0.85em;
+            letter-spacing: 5px;
+            text-transform: uppercase;
+            font-weight: bold;
+            border-bottom: 1px solid #ff990044;
+            padding-bottom: 8px;
+            margin-bottom: 14px;
+            text-shadow: 0 0 6px #ff990055;
+        }
+        .supervisor-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 32px;
+            align-items: flex-end;
+            margin-bottom: 4px;
+        }
+        .supervisor-meta .meta-label {
+            color: #ff9900aa;
+            font-size: 0.68em;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+        .supervisor-target {
+            font-size: 1.9em;
+            font-weight: bold;
+            letter-spacing: 4px;
+            color: #ff4444;
+            text-shadow: 0 0 14px #ff444466;
+        }
+        .supervisor-target.approve {
+            color: #00ff88;
+            text-shadow: 0 0 14px #00ff8866;
+        }
+        .supervisor-reason {
+            color: #ffcc99;
+            font-size: 0.82em;
+            line-height: 1.5;
+            margin-top: 14px;
+            border-top: 1px dashed #ff990033;
+            padding-top: 10px;
+        }
+        .supervisor-council {
+            color: #ffcc99;
+            letter-spacing: 1px;
+            font-size: 0.85em;
+        }
+
+        /* LIVE / SHADOW mode indicator — blinking amber for LIVE */
+        @keyframes amber-pulse {
+            0%, 100% { opacity: 1;    box-shadow: 0 0 10px #ff9900, 0 0 18px #ff9900; }
+            50%      { opacity: 0.35; box-shadow: 0 0 2px  #ff9900; }
+        }
+        .mode-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            font-weight: bold;
+            letter-spacing: 3px;
+            font-size: 1em;
+        }
+        .mode-badge.live { color: #ff9900; }
+        .mode-badge.live::before {
+            content: '';
+            width: 12px; height: 12px;
+            background: #ff9900;
+            border: 1px solid #ffaa33;
+            animation: amber-pulse 1.1s ease-in-out infinite;
+        }
+        .mode-badge.shadow { color: #666; }
+        .mode-badge.shadow::before {
+            content: '';
+            width: 12px; height: 12px;
+            background: #333;
+            border: 1px solid #555;
+        }
     </style>
 </head>
 <body>
@@ -420,24 +656,48 @@ HTML_TEMPLATE = """
         {% endif %}
     </div>
     {% if latest_decision %}
-    <div class="agent-row">
-        <div class="agent-card">
-            <div class="agent-name">Melchior — GPT-4o</div>
-            <div class="{{ latest_decision.melchior_action }}">{{ latest_decision.melchior_action }}</div>
-            <div style="color:#666; font-size:0.75em;">{{ latest_decision.melchior_conviction }} conviction</div>
-            <div style="color:#888; font-size:0.75em; margin-top:6px;">{{ latest_decision.melchior_reasoning }}</div>
+    <div class="magi-row">
+        {% set m_cv = (latest_decision.melchior_conviction or 'low')|lower %}
+        {% set m_fill = 3 if m_cv == 'high' else (2 if m_cv == 'medium' else 1) %}
+        <div class="magi-card">
+            <div class="magi-name">MELCHIOR-1 — GPT-4O</div>
+            <hr class="magi-rule">
+            <div class="magi-decision {{ latest_decision.melchior_action }}">{{ latest_decision.melchior_action }}</div>
+            <div class="conv-bar">
+                <span class="conv-seg conv-{{ 'on' if m_fill >= 1 else 'off' }}"></span>
+                <span class="conv-seg conv-{{ 'on' if m_fill >= 2 else 'off' }}"></span>
+                <span class="conv-seg conv-{{ 'on' if m_fill >= 3 else 'off' }}"></span>
+                <span class="conv-label">{{ m_cv|upper }}</span>
+            </div>
+            <div class="magi-reason">{{ latest_decision.melchior_reasoning }}</div>
         </div>
-        <div class="agent-card">
-            <div class="agent-name">Balthasar — Claude Sonnet 4.6</div>
-            <div class="{{ latest_decision.balthasar_action }}">{{ latest_decision.balthasar_action }}</div>
-            <div style="color:#666; font-size:0.75em;">{{ latest_decision.balthasar_conviction }} conviction</div>
-            <div style="color:#888; font-size:0.75em; margin-top:6px;">{{ latest_decision.balthasar_reasoning }}</div>
+        {% set b_cv = (latest_decision.balthasar_conviction or 'low')|lower %}
+        {% set b_fill = 3 if b_cv == 'high' else (2 if b_cv == 'medium' else 1) %}
+        <div class="magi-card">
+            <div class="magi-name">BALTHASAR-2 — CLAUDE SONNET 4.6</div>
+            <hr class="magi-rule">
+            <div class="magi-decision {{ latest_decision.balthasar_action }}">{{ latest_decision.balthasar_action }}</div>
+            <div class="conv-bar">
+                <span class="conv-seg conv-{{ 'on' if b_fill >= 1 else 'off' }}"></span>
+                <span class="conv-seg conv-{{ 'on' if b_fill >= 2 else 'off' }}"></span>
+                <span class="conv-seg conv-{{ 'on' if b_fill >= 3 else 'off' }}"></span>
+                <span class="conv-label">{{ b_cv|upper }}</span>
+            </div>
+            <div class="magi-reason">{{ latest_decision.balthasar_reasoning }}</div>
         </div>
-        <div class="agent-card">
-            <div class="agent-name">Casper — Gemini 2.5 Flash</div>
-            <div class="{{ latest_decision.casper_action }}">{{ latest_decision.casper_action }}</div>
-            <div style="color:#666; font-size:0.75em;">{{ latest_decision.casper_conviction }} conviction</div>
-            <div style="color:#888; font-size:0.75em; margin-top:6px;">{{ latest_decision.casper_reasoning }}</div>
+        {% set c_cv = (latest_decision.casper_conviction or 'low')|lower %}
+        {% set c_fill = 3 if c_cv == 'high' else (2 if c_cv == 'medium' else 1) %}
+        <div class="magi-card">
+            <div class="magi-name">CASPER-3 — GEMINI 2.5 FLASH</div>
+            <hr class="magi-rule">
+            <div class="magi-decision {{ latest_decision.casper_action }}">{{ latest_decision.casper_action }}</div>
+            <div class="conv-bar">
+                <span class="conv-seg conv-{{ 'on' if c_fill >= 1 else 'off' }}"></span>
+                <span class="conv-seg conv-{{ 'on' if c_fill >= 2 else 'off' }}"></span>
+                <span class="conv-seg conv-{{ 'on' if c_fill >= 3 else 'off' }}"></span>
+                <span class="conv-label">{{ c_cv|upper }}</span>
+            </div>
+            <div class="magi-reason">{{ latest_decision.casper_reasoning }}</div>
         </div>
     </div>
     <div class="card" style="margin-top:10px;">
@@ -454,6 +714,58 @@ HTML_TEMPLATE = """
     </div>
     {% else %}
     <div style="color:#666;">No MAGI decisions recorded yet.</div>
+    {% endif %}
+
+    <h2>Supervisor</h2>
+    {% if latest_supervisor %}
+    <div class="supervisor-panel {{ 'approve' if latest_supervisor.supervisor_action == 'APPROVE' else '' }}">
+        <div class="supervisor-head">⌬ SUPERVISOR — OVERRIDE AUTHORITY</div>
+        <div class="supervisor-meta">
+            <div>
+                <div class="meta-label">Verdict</div>
+                <div class="supervisor-target {{ 'approve' if latest_supervisor.supervisor_action == 'APPROVE' else '' }}">
+                    {% if latest_supervisor.supervisor_action == 'OVERRIDE' %}→ {{ latest_supervisor.override_target or 'OVERRIDE' }}{% else %}{{ latest_supervisor.supervisor_action }}{% endif %}
+                </div>
+            </div>
+            <div>
+                <div class="meta-label">Mode</div>
+                <div class="mode-badge {{ 'live' if not latest_supervisor.shadow_mode else 'shadow' }}">
+                    {{ 'LIVE' if not latest_supervisor.shadow_mode else 'SHADOW' }}
+                </div>
+            </div>
+            <div>
+                <div class="meta-label">Council Recommended</div>
+                <div class="supervisor-council">
+                    grid={{ latest_supervisor.council_grid_action or '—' }} / risk={{ latest_supervisor.council_risk_action or '—' }}
+                </div>
+            </div>
+            <div style="margin-left:auto;">
+                <div class="meta-label">Timestamp</div>
+                <div style="color:#888; font-size:0.78em; letter-spacing:1px;">{{ latest_supervisor.timestamp }}</div>
+            </div>
+        </div>
+        <div class="supervisor-reason">{{ latest_supervisor.reasoning }}</div>
+    </div>
+    <table style="margin-top:14px;">
+        <tr>
+            <th>Time</th>
+            <th>Action</th>
+            <th>Override Target</th>
+            <th>Mode</th>
+            <th>Reasoning</th>
+        </tr>
+        {% for s in supervisor_decisions %}
+        <tr>
+            <td style="color:#666;">{{ (s.timestamp or '')[:16] }}</td>
+            <td class="{{ s.supervisor_action }}">{{ s.supervisor_action }}</td>
+            <td style="color:{{ '#ffaa00' if s.override_target else '#444' }};">{{ s.override_target or '—' }}</td>
+            <td class="{{ 'LIVE' if not s.shadow_mode else 'SHADOW' }}">{{ 'LIVE' if not s.shadow_mode else 'SHADOW' }}</td>
+            <td style="color:#888; font-size:0.75em;">{{ (s.reasoning or '')[:100] }}{% if s.reasoning and s.reasoning|length > 100 %}…{% endif %}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    <div style="color:#666; font-size:0.8em;">No Supervisor decisions recorded yet — first row written on next MAGI cycle.</div>
     {% endif %}
 
     <h2>Recent Decisions</h2>
@@ -938,6 +1250,19 @@ def index():
 
     recent_orders = get_recent_grid_orders(limit=25)
 
+    # Supervisor decisions — read directly (no dedicated helper in database.py)
+    from database import get_conn as _gc
+    _sc = _gc()
+    _sup_rows = _sc.execute(
+        "SELECT timestamp, council_grid_action, council_risk_action, "
+        "supervisor_action, override_target, shadow_mode, reasoning "
+        "FROM supervisor_decisions "
+        "ORDER BY timestamp DESC LIMIT 5"
+    ).fetchall()
+    _sc.close()
+    supervisor_decisions_list = [dict(r) for r in _sup_rows]
+    latest_supervisor = supervisor_decisions_list[0] if supervisor_decisions_list else None
+
     decision_ts_display, decision_age_label, decision_age_color = _decision_age(latest_decision)
 
     mins_since = snap.get('time_since_last_fill_minutes')
@@ -999,6 +1324,8 @@ def index():
         agent_runway=agent_runway,
         latest_decision=latest_decision,
         decisions=decisions,
+        latest_supervisor=latest_supervisor,
+        supervisor_decisions=supervisor_decisions_list,
         scheduler_alive=check_scheduler_alive(),
         guardrails_ok=guardrails_ok,
         guardrail_failures=guardrail_failures,
