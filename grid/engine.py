@@ -415,6 +415,10 @@ class GridEngine:
                 return order
             if side == 'sell' and price < current_price * 0.999:
                 log.error(f"Refusing sell order — price {price} below market {current_price}")
+                log.warning(
+                    f"Sell order rejected — price {price:.5f} below sanity threshold "
+                    f"{current_price * 0.999:.5f} (current={current_price:.5f})"
+                )
                 order['status'] = 'rejected'
                 return order
 
@@ -650,6 +654,26 @@ class GridEngine:
             self.cancel_all_orders()
             return
 
+        if grid_action == 'GRID_PAUSE':
+            # Regime gate fired — cancel all orders and idle the grid.
+            # Different from HALT: kill switch is not tripped, gate re-evaluates
+            # next cycle and releases automatically when conditions no longer meet.
+            cancelled = self.cancel_all_orders()
+            cur = get_current_grid_state() or {}
+            centre = cur.get('centre_price')
+            spacing = cur.get('spacing_pct')
+            levels = cur.get('levels', self.level_count)
+            insert_grid_state(
+                centre, spacing, levels,
+                pause_longs=0, pause_shorts=0,
+                notes=f"GRID_PAUSE — {consensus.get('reason', 'regime gate')}"
+            )
+            log.warning(
+                f"GRID_PAUSE applied — {cancelled} orders cancelled. "
+                f"Grid idle until regime gate releases."
+            )
+            return
+
         current_state = get_current_grid_state()
         if not current_state:
             log.warning("No grid state — initialising fresh")
@@ -777,6 +801,19 @@ class GridEngine:
                             f"MAGI RECENTRE — spacing unchanged (no geometry): "
                             f"{new_spacing}"
                         )
+
+                # Ensure centre is not so far below market that all sells will be rejected
+                # sell sanity check rejects sells below current_price * 0.999
+                # with tight spacing, sells need to be within a few levels of current price
+                # if centre is more than MAX_GRID_SPACING_PCT * (levels//2) below market, adjust up
+                max_sell_reach = new_centre * (1 + MAX_GRID_SPACING_PCT * (self.level_count // 2))
+                if max_sell_reach < current_price * 0.995:
+                    adjusted_centre = current_price * (1 - new_spacing * (self.level_count // 4))
+                    log.warning(
+                        f"RECENTRE centre {new_centre:.4f} too far below market {current_price:.4f} "
+                        f"— sells would all be rejected. Adjusting centre to {adjusted_centre:.4f}"
+                    )
+                    new_centre = adjusted_centre
 
                 log.info(
                     f"MAGI geometry applied — centre={new_centre} spacing={new_spacing} "

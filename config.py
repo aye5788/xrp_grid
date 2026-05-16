@@ -33,11 +33,17 @@ GRID_LEVEL_VARIANTS = [6, 8, 10, 12, 14, 16]
 GRID_SWITCH_THRESHOLD_PCT = 0.10   # min P&L% margin to trigger a level switch
 GRID_SWITCH_MIN_FILLS = 20         # both live and candidate need at least this many fills
 GRID_SWITCH_MIN_HOURS = 24         # rolling window for P&L comparison
-GRID_SPACING_PCT = 0.005
+GRID_SPACING_PCT = 0.025  # Default spacing — matches MAX_GRID_SPACING_PCT
 MAX_GRID_SPACING_PCT = 0.025   # Hard ceiling: 2.5% spacing. Beyond this,
                                 # WIDEN is skipped and MAINTAIN is applied.
 MIN_GRID_SPACING_PCT = 0.003   # Hard floor: 0.3% spacing. Below this,
                                 # TIGHTEN is skipped and MAINTAIN is applied.
+# GRID_PAUSE: cancel orders and wait, triggered by regime gate in
+# magi/orchestrator.check_regime_gate(). Different from HALT: does not trip
+# kill switch, re-evaluates each cycle and releases automatically when the
+# structural-downtrend conditions (price <8% of EMA200, EMA50<EMA200,
+# vol HIGH, vwap_dev<-2%) no longer all hold.
+REGIME_GATE_ENABLED = False  # Set True for live trading, False for paper validation
 GRID_CENTRE_DEFAULT = None
 MAX_INVENTORY_USD = 50.0
 TAKER_FEE = 0.0026  # Kraken XRP/USD tier-0 taker: 0.26%

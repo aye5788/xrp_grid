@@ -101,6 +101,19 @@ def init_db():
         notes TEXT
     )''')
 
+    # Add Melchior geometry columns to magi_decisions (idempotent — wrap each
+    # ALTER in try/except so re-runs are a no-op once the column exists).
+    for _alter in (
+        "ALTER TABLE magi_decisions ADD COLUMN melchior_centre_price REAL",
+        "ALTER TABLE magi_decisions ADD COLUMN melchior_target_spacing_pct REAL",
+        "ALTER TABLE magi_decisions ADD COLUMN melchior_buy_level_bias REAL",
+        "ALTER TABLE magi_decisions ADD COLUMN melchior_sell_level_bias REAL",
+    ):
+        try:
+            c.execute(_alter)
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
     # Daily P&L
     c.execute('''CREATE TABLE IF NOT EXISTS pnl_daily (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -220,7 +233,7 @@ def get_latest_candle_hl(timeframe='1h'):
     row = conn.execute(
         '''SELECT high, low FROM candles
            WHERE timeframe=?
-           ORDER BY timestamp DESC LIMIT 1''',
+           ORDER BY id DESC LIMIT 1''',
         (timeframe,)
     ).fetchone()
     conn.close()
@@ -248,7 +261,7 @@ def upsert_indicators(timestamp, timeframe, data: dict):
 def get_latest_indicators(timeframe='1h'):
     conn = get_conn()
     row = conn.execute('''SELECT * FROM indicators WHERE timeframe=?
-        ORDER BY timestamp DESC LIMIT 1''', (timeframe,)).fetchone()
+        ORDER BY id DESC LIMIT 1''', (timeframe,)).fetchone()
     conn.close()
     return dict(row) if row else None
 
@@ -529,7 +542,7 @@ def upsert_inventory(xrp_held, usd_held, net_position_usd, inventory_skew):
 def get_latest_inventory():
     conn = get_conn()
     row = conn.execute('''SELECT * FROM inventory
-        ORDER BY timestamp DESC LIMIT 1''').fetchone()
+        ORDER BY id DESC LIMIT 1''').fetchone()
     conn.close()
     return dict(row) if row else None
 

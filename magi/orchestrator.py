@@ -77,18 +77,23 @@ def apply_consensus(melchior, balthasar, casper, current_grid):
         grid_action = m_action
         reason = f'Casper {c_regime} — applying Melchior {m_action}'
 
-    # Dead-grid override: PAUSE_LONGS with no open buys and an extended
-    # no-fill period has zero protective value — there are no buy orders
-    # to pause. Override to RECENTRE + CLEAR to escape the deadlock.
+    # Dead-grid override: a completely empty grid (zero orders on either
+    # side) is always a dead grid — it doesn't matter what Balthasar said.
+    # Override to RECENTRE + CLEAR to escape the deadlock.
     conn = get_conn()
     open_buy_count = conn.execute(
         "SELECT COUNT(*) FROM grid_orders WHERE status='open' AND side='buy'"
+    ).fetchone()[0]
+    open_sell_count = conn.execute(
+        "SELECT COUNT(*) FROM grid_orders WHERE status='open' AND side='sell'"
     ).fetchone()[0]
     last_fill = conn.execute(
         "SELECT filled_at FROM grid_orders WHERE status='filled' "
         "ORDER BY filled_at DESC LIMIT 1"
     ).fetchone()
     conn.close()
+
+    total_open = open_buy_count + open_sell_count
 
     if last_fill:
         last_fill_dt = datetime.fromisoformat(last_fill[0].replace('Z', ''))
@@ -98,13 +103,13 @@ def apply_consensus(melchior, balthasar, casper, current_grid):
     else:
         hours_since_fill = 999
 
-    if (risk_action == 'PAUSE_LONGS'
-            and open_buy_count == 0
-            and hours_since_fill > 12
-            and grid_action != 'HALT'):
+    if (total_open == 0
+            and hours_since_fill > 2
+            and grid_action != 'HALT'
+            and grid_action != 'GRID_PAUSE'):
         grid_action = 'RECENTRE'
         risk_action = 'CLEAR'
-        override_note = (f'[DEAD_GRID_OVERRIDE: open_buys=0, '
+        override_note = (f'[DEAD_GRID_OVERRIDE: total_open=0, '
                          f'hours_since_fill={hours_since_fill:.1f}]')
         reason = reason + ' ' + override_note
         log.warning(f'Dead-grid override applied — {override_note}')
@@ -132,6 +137,77 @@ def apply_consensus(melchior, balthasar, casper, current_grid):
     }
 
 
+def check_regime_gate() -> dict | None:
+    """
+    Structural regime gate. Returns a gate-tripped result dict if market
+    conditions make grid trading structurally unprofitable, else None.
+
+    Gate fires when ALL of the following are true:
+      1. price < ema_200 * 0.92  (price more than 8% below EMA200)
+      2. ema_50 < ema_200        (bearish EMA stack)
+      3. vol_regime == 'HIGH'    (trending vol, not ranging vol)
+      4. vwap_dev_pct < -2.0     (price persistently below VWAP)
+
+    All four conditions must be true simultaneously. This prevents the gate
+    from firing on temporary dips or normal oscillation.
+
+    When gate fires:
+      - All open orders cancelled
+      - Grid enters GRID_PAUSE state
+      - MAGI cycle skips council votes
+      - Gate re-evaluated every cycle; releases when conditions no longer met
+
+    Gate release: fires when ANY of the following:
+      - price > ema_200 * 0.95 (within 5% of EMA200)
+      - ema_50 > ema_200 (EMA stack turns bullish)
+      - vol_regime != 'HIGH'
+    """
+    from config import REGIME_GATE_ENABLED
+    if not REGIME_GATE_ENABLED:
+        return None
+
+    indicators = get_latest_indicators('1h')
+    if not indicators:
+        return None
+
+    price = indicators.get('close') or indicators.get('vwap')
+    ema_50 = indicators.get('ema_50')
+    ema_200 = indicators.get('ema_200')
+    vol_regime = indicators.get('vol_regime')
+    vwap_dev_pct = indicators.get('vwap_dev_pct')
+
+    if not all([price, ema_50, ema_200, vol_regime, vwap_dev_pct is not None]):
+        return None
+
+    price_below_ema200 = price < ema_200 * 0.92
+    bearish_ema_stack = ema_50 < ema_200
+    high_vol = vol_regime == 'HIGH'
+    below_vwap = vwap_dev_pct < -2.0
+
+    gate_fires = all([price_below_ema200, bearish_ema_stack,
+                      high_vol, below_vwap])
+
+    if gate_fires:
+        reason = (
+            f"REGIME_GATE: structural downtrend detected — "
+            f"price={price:.4f} is {((price/ema_200)-1)*100:.1f}% vs EMA200={ema_200:.4f}, "
+            f"EMA50={ema_50:.4f} < EMA200 (bearish stack), "
+            f"vol={vol_regime}, vwap_dev={vwap_dev_pct:.2f}%"
+        )
+        log.warning(reason)
+        return {
+            'grid_action': 'GRID_PAUSE',
+            'risk_action': 'CLEAR',
+            'regime': 'STRUCTURAL_BEAR',
+            'reason': reason,
+            'melchior_geometry': None,
+            'melchior_conviction': None,
+            'gate_fired': True,
+        }
+
+    return None
+
+
 def run_cycle(trigger='scheduled', force=False):
     log.info(f"MAGI cycle starting — trigger={trigger}")
 
@@ -142,6 +218,38 @@ def run_cycle(trigger='scheduled', force=False):
     if not indicators and not force:
         log.warning("No indicator data available — skipping cycle")
         return None
+
+    gate_result = check_regime_gate()
+    if gate_result:
+        log.warning("Regime gate fired — skipping council votes")
+        decision_data = {
+            'trigger': trigger,
+            'melchior_action': None,
+            'melchior_conviction': None,
+            'melchior_reasoning': None,
+            'melchior_concerns': None,
+            'balthasar_action': None,
+            'balthasar_conviction': None,
+            'balthasar_reasoning': None,
+            'casper_action': None,
+            'casper_conviction': None,
+            'casper_reasoning': None,
+            'consensus_grid_action': gate_result['grid_action'],
+            'consensus_risk_action': gate_result['risk_action'],
+            'consensus_regime': gate_result['regime'],
+            'applied': 0,
+            'notes': gate_result['reason'],
+        }
+        insert_magi_decision(decision_data)
+        from database import get_latest_magi_decision_id
+        decision_id = get_latest_magi_decision_id()
+        return {
+            'melchior': None,
+            'balthasar': None,
+            'casper': None,
+            'consensus': gate_result,
+            'decision_id': decision_id,
+        }
 
     from grid.engine import GridEngine
     _price_engine = GridEngine(paper=True)
@@ -219,6 +327,10 @@ def run_cycle(trigger='scheduled', force=False):
         'applied': 0,
         'notes': consensus['reason']
     }
+    decision_data['melchior_centre_price'] = melchior.get('centre_price')
+    decision_data['melchior_target_spacing_pct'] = melchior.get('target_spacing_pct')
+    decision_data['melchior_buy_level_bias'] = melchior.get('buy_level_bias')
+    decision_data['melchior_sell_level_bias'] = melchior.get('sell_level_bias')
     decision_id = insert_magi_decision(decision_data)
     if decision_id is None:
         from database import get_latest_magi_decision_id

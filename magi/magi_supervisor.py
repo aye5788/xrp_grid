@@ -24,7 +24,7 @@ load_dotenv('/root/xrp_grid/.env')
 log = logging.getLogger('magi.supervisor')
 
 # Shadow mode: True = log only, False = actually override
-SHADOW_MODE = False
+SHADOW_MODE = True
 
 # Gemini client via Cloudflare AI Gateway (matches Casper's routing)
 from config import GOOGLE_API_KEY, cf_gateway_url, CF_AIG_TOKEN
@@ -252,9 +252,21 @@ Respond in this exact JSON format:
         if not response.text:
             raise ValueError("Empty response from Gemini")
         result = json.loads(response.text)
+        # Normalize override_target: Gemini sometimes returns the full action
+        # label ("OVERRIDE RECENTRE") instead of just the target ("RECENTRE").
+        # Strip the OVERRIDE prefix, uppercase, and validate against the
+        # allowed set; anything else collapses to None.
+        override_target = result.get('override_target')
+        if isinstance(override_target, str):
+            ot = override_target.strip().upper()
+            if ot.startswith('OVERRIDE '):
+                ot = ot[len('OVERRIDE '):].strip()
+            override_target = ot if ot in ('RECENTRE', 'WIDEN', 'CLEAR_PAUSE') else None
+        else:
+            override_target = None
         return {
             'action': result.get('action', 'APPROVE'),
-            'override_target': result.get('override_target'),
+            'override_target': override_target,
             'reasoning': result.get('reasoning', ''),
             'concerns': result.get('concerns')
         }

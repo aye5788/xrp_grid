@@ -27,6 +27,39 @@ Return a JSON object with exactly these fields:
 
 REASONING PROCESS
 
+STRUCTURAL TREND DETECTION — evaluate this FIRST before other regime signals:
+
+A market is STRUCTURALLY TRENDING when ALL of the following are true:
+  1. price < ema_200 * 0.95 OR price > ema_200 * 1.05  (price >5% from EMA200)
+  2. ema_50 and ema_200 are in directional alignment:
+     - Bearish: ema_50 < ema_200
+     - Bullish: ema_50 > ema_200
+  3. The EMA alignment matches the price direction
+     (price below EMA200 AND ema_50 < ema_200 = confirmed bearish)
+     (price above EMA200 AND ema_50 > ema_200 = confirmed bullish)
+
+When ALL THREE conditions are true:
+  - Return regime: TRENDING
+  - Return conviction: medium if ADX < 20, high if ADX >= 20
+  - Return trend_direction: bearish or bullish accordingly
+  - Do NOT return UNCERTAIN regardless of ADX level
+
+CRITICAL: Low ADX does not mean ranging when price is far from EMA200
+with a confirming EMA stack. Low ADX + bearish EMA stack = slow downtrend.
+Low ADX + ranging price near EMA200 = ranging. These are different conditions.
+
+Only return UNCERTAIN when:
+  - price is within ±3% of EMA200, AND
+  - EMA50 and EMA200 are within 2% of each other (no clear stack direction)
+  - Autocorrelation signals are genuinely mixed
+
+Only return RANGING when:
+  - price is within ±5% of EMA200, AND
+  - EMA stack is flat or recently crossed, AND
+  - ADX < 20 with no dominant directional pressure
+
+If the STRUCTURAL TREND DETECTION above does not fire, proceed through the dimensions below.
+
 ADX and EMA structure are CO-PRIMARY signals. Neither dominates. You consider both before deciding regime.
 
 1. EMA structure with distance: compute price-vs-EMA-200 distance as (current_price - ema_200) / ema_200 * 100. If price is more than 10% below ema_200 AND ema_50 is below ema_200, the market is in a structurally bearish state. If price is more than 10% above ema_200 AND ema_50 is above ema_200, structurally bullish. The DISTANCE matters — being 2% below ema_200 is normal pullback; being 20% below is deep bearish territory.
@@ -67,6 +100,12 @@ CONVICTION CALIBRATION
 - high: 4-5 dimensions agree clearly
 - medium: 3 dimensions agree, 1-2 mixed
 - low: dimensions conflict, or 2+ key fields are NULL
+
+TRENDING conviction calibration (overrides the general rule above when STRUCTURAL TREND DETECTION fires):
+- high conviction TRENDING: price >8% from EMA200 + confirming EMA stack + ADX > 15
+- medium conviction TRENDING: price 5-8% from EMA200 + confirming EMA stack
+- low conviction TRENDING: price 3-5% from EMA200 with mixed signals
+- Never return high conviction UNCERTAIN — uncertainty is by definition not certain
 
 MISSING DATA RULE
 If adx, ema_50, ema_200, and roc_6h are all NULL: output UNCERTAIN with low conviction.

@@ -124,16 +124,33 @@ up to 5 prior grid configurations and what they produced. Each entry shows:
 centre, spacing, buy_bias, sell_bias, regime, fills_total, fills_per_hour,
 skew_delta, and hours_active.
 
-Use this history to inform your geometry proposal:
-- If a recent config with similar spacing produced high fills_per_hour
-  in the current regime, consider similar spacing.
-- If a recent config produced fills_per_hour < 0.5 with negative
-  skew_delta (inventory drifting wrong direction), this configuration
-  is not working — propose a meaningful change.
-- If skew_delta is consistently positive (XRP accumulating),
-  buy_level_bias should decrease in next config.
-- If skew_delta is consistently negative (USD accumulating),
-  buy_level_bias should increase in next config.
-- If the block reads "no data yet", do not infer anything from it.
+LEVEL BIAS RULES — follow these precisely:
+
+skew_delta is the change in inventory skew since the last grid config.
+Negative skew_delta means the portfolio is accumulating USD (XRP draining).
+Positive skew_delta means the portfolio is accumulating XRP (USD draining).
+
+RULE 1 — If the most recent config shows skew_delta < -0.1 (USD accumulating):
+  buy_level_bias MUST be > 1.0. Use 1.3 if skew_delta < -0.2, use 1.5 if < -0.3.
+  sell_level_bias MUST be < 1.0. Use 0.7 if skew_delta < -0.2, use 0.5 if < -0.3.
+  Rationale: grid is draining XRP — bias toward buying more XRP to rebalance.
+
+RULE 2 — If the most recent config shows skew_delta > 0.1 (XRP accumulating):
+  buy_level_bias MUST be < 1.0. Use 0.7 if skew_delta > 0.2, use 0.5 if > 0.3.
+  sell_level_bias MUST be > 1.0. Use 1.3 if skew_delta > 0.2, use 1.5 if > 0.3.
+  Rationale: grid is accumulating too much XRP — bias toward selling to rebalance.
+
+RULE 3 — If fills_per_hour < 0.5 in the most recent config:
+  Do NOT propose WIDEN — spacing is already too wide relative to market movement.
+  Propose TIGHTEN with target_spacing_pct reduced by 20-30% from current.
+  Exception: if current spacing is already at MIN_GRID_SPACING_PCT, propose MAINTAIN.
+
+RULE 4 — If no outcome data exists yet ("no data yet"):
+  Default buy_level_bias=1.0, sell_level_bias=1.0. Do not invent signals.
+
+These rules take precedence over general vol_regime reasoning when outcome
+data is available. A HIGH vol_regime does not justify WIDEN if fills_per_hour
+is already low — high vol with low fills means the market is trending, not
+oscillating, and wider spacing makes this worse.
 
 
