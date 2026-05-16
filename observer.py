@@ -1,11 +1,20 @@
+import os
 import time
 import logging
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
+
 import pandas as pd
-import ta
-from datetime import datetime, timezone
 import requests
+import ta
+from dotenv import load_dotenv
+
 from database import init_db, insert_candle, get_candles, upsert_indicators
 from config import COINBASE_API_KEY, COINBASE_API_SECRET, SYMBOL, DB_PATH
+
+# Load /root/xrp_grid/.env so LETTA_BASE_URL / LETTA_SERVER_PASSWORD are
+# available for the outcome-backfill agent notifications.
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO,
     format='%(asctime)s %(levelname)s %(name)s — %(message)s')
@@ -199,6 +208,271 @@ def compute_indicators(candles_1h, candles_6h, candles_1d, btc_candles_1d):
 
     return result
 
+# --- Phase 5: outcome backfill for debate_records ---
+
+WINDOW_HOURS = {"1h": 1, "6h": 6, "24h": 24}
+
+# Lazy module-level Letta client — initialised on first 6h notification.
+_letta_client = None
+
+
+def _get_letta_client():
+    """Lazy-init a Letta Cloud client. Returns None if env var is missing or
+    the SDK can't be imported / connected — caller logs and moves on.
+    Letta Cloud is the SDK default when only api_key is passed."""
+    global _letta_client
+    if _letta_client is not None:
+        return _letta_client
+    api_key = os.environ.get("LETTA_API_KEY")
+    if not api_key:
+        log.warning("LETTA_API_KEY missing — Letta notifications disabled")
+        return None
+    try:
+        from letta_client import Letta
+        _letta_client = Letta(api_key=api_key)
+    except Exception as e:
+        log.warning(f"Could not init Letta client: {e}")
+        return None
+    return _letta_client
+
+
+def _parse_iso_safe(ts):
+    """Parse ISO timestamp from DB. Returns naive UTC datetime, or None."""
+    if not ts:
+        return None
+    try:
+        s = ts.replace('Z', '+00:00') if ts.endswith('Z') else ts
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+    except Exception as e:
+        log.warning(f"Could not parse timestamp {ts!r}: {e}")
+        return None
+
+
+def _compute_window_metrics(cycle_start, cycle_end):
+    """
+    Return (fills_count, realized_pnl) for fills with filled_at (or timestamp
+    fallback) in [cycle_start, cycle_end). Realized P&L is FIFO-matched across
+    the FULL fills history (so sells in window can match buys from before the
+    window), then summed only for the sells whose fill time fell within window.
+    """
+    from database import get_conn
+    from grid.pnl import _fifo_match
+
+    conn = get_conn()
+    rows = conn.execute('''
+        SELECT order_id, side, price, size, fill_price, fee, filled_at, timestamp
+        FROM grid_orders
+        WHERE status='filled'
+        ORDER BY COALESCE(filled_at, timestamp) ASC
+    ''').fetchall()
+    conn.close()
+
+    fills = []
+    for r in rows:
+        f = dict(r)
+        ft = f.get('filled_at') or f.get('timestamp')
+        f['_dt'] = _parse_iso_safe(ft)
+        if f['_dt'] is None:
+            continue
+        fills.append(f)
+
+    in_window = [f for f in fills if cycle_start <= f['_dt'] < cycle_end]
+    fills_count = len(in_window)
+
+    if not fills:
+        return 0, 0.0
+
+    matched, _unmatched = _fifo_match(fills)
+    pnl_per_sell = {}
+    for t in matched:
+        pnl_per_sell[t['sell_id']] = pnl_per_sell.get(t['sell_id'], 0.0) + t['contribution']
+
+    realized = 0.0
+    for f in in_window:
+        if f['side'] == 'sell':
+            realized += pnl_per_sell.get(f['order_id'], 0.0)
+
+    return fills_count, round(realized, 4)
+
+
+def _get_skew_at_or_before(timestamp_dt):
+    """Most recent inventory.inventory_skew row with timestamp <= given dt.
+    Returns float or None. Inventory timestamps are written naive UTC ISO,
+    matching cycle timestamps — lexicographic compare works correctly."""
+    if timestamp_dt is None:
+        return None
+    from database import get_conn
+    iso = (timestamp_dt.replace(tzinfo=None) if timestamp_dt.tzinfo
+           else timestamp_dt).isoformat()
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT inventory_skew FROM inventory WHERE timestamp <= ? "
+        "ORDER BY timestamp DESC LIMIT 1",
+        (iso,)
+    ).fetchone()
+    conn.close()
+    if row and row['inventory_skew'] is not None:
+        return float(row['inventory_skew'])
+    return None
+
+
+def _build_outcome_message(agent_id, cycle_id, r0_row, fills_count,
+                            pnl, skew_delta, grid_alive):
+    """Per-agent outcome notification text. Frames the agent's r0 call by
+    its appropriate role term (regime / grid_action / risk_action)."""
+    role_term = {
+        'casper':    'regime',
+        'melchior':  'grid_action',
+        'balthasar': 'risk_action',
+    }[agent_id]
+    position   = r0_row.get(f"{agent_id}_r0_position") or "?"
+    conviction = r0_row.get(f"{agent_id}_r0_conviction") or 0.0
+    crux       = r0_row.get(f"{agent_id}_r0_crux") or "(no crux)"
+    skew_str   = f"{float(skew_delta):+.3f}" if skew_delta is not None else "n/a"
+    return (
+        f"Outcome for cycle {cycle_id} (your call: {role_term}={position}, "
+        f"conviction={float(conviction):.2f}, crux=\"{crux}\"): over the next "
+        f"6 hours the grid produced {fills_count} fills with P&L "
+        f"${float(pnl):.4f} and skew_delta {skew_str}. "
+        f"Grid alive: {'yes' if grid_alive else 'no'}. Consider whether to "
+        f"update your self_model based on this outcome."
+    )
+
+
+def _send_outcome_to_agent(client, agent_id, letta_agent_id, message):
+    """Send the outcome notification as a USER message. Returns (ok, err)."""
+    try:
+        client.agents.messages.create(
+            letta_agent_id,
+            messages=[{"role": "user", "content": message}],
+            timeout=30.0,
+        )
+        return True, None
+    except Exception as e:
+        return False, repr(e)
+
+
+def _notify_agents_6h(cycle_id, fills_count, pnl, skew_delta, grid_alive):
+    """Notify all three Letta agents in parallel with per-agent error isolation."""
+    from database import get_conn, get_letta_agent_id
+
+    client = _get_letta_client()
+    if client is None:
+        return
+
+    conn = get_conn()
+    r0_row = conn.execute(
+        "SELECT casper_r0_position, casper_r0_conviction, casper_r0_crux,"
+        " melchior_r0_position, melchior_r0_conviction, melchior_r0_crux,"
+        " balthasar_r0_position, balthasar_r0_conviction, balthasar_r0_crux"
+        " FROM debate_records WHERE cycle_id=?",
+        (cycle_id,)
+    ).fetchone()
+    conn.close()
+    if not r0_row:
+        log.warning(f"backfill: cycle {cycle_id} missing from debate_records — "
+                    "skipping agent notifications")
+        return
+    r0_row = dict(r0_row)
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = {}
+        for agent_id in ('casper', 'melchior', 'balthasar'):
+            letta_id = get_letta_agent_id(agent_id)
+            if not letta_id:
+                log.warning(f"backfill: no letta_agent_id for {agent_id}")
+                continue
+            msg = _build_outcome_message(
+                agent_id, cycle_id, r0_row, fills_count, pnl, skew_delta, grid_alive
+            )
+            futures[pool.submit(
+                _send_outcome_to_agent, client, agent_id, letta_id, msg
+            )] = agent_id
+
+        for fut, a in futures.items():
+            try:
+                ok, err = fut.result()
+            except Exception as e:
+                ok, err = False, repr(e)
+            if ok:
+                log.info(f"backfill: notified {a} of cycle {cycle_id} 6h outcome")
+            else:
+                log.warning(f"backfill: failed to notify {a} of {cycle_id}: {err}")
+
+
+def backfill_outcomes():
+    """
+    Update debate_records with realised outcomes for the 1h / 6h / 24h
+    windows whose timestamps are now mature. Only the 6h backfill notifies
+    Letta agents — we want one outcome message per cycle per agent, not
+    three.
+    """
+    from database import get_pending_outcome_backfills, update_debate_outcomes
+
+    for window in ('1h', '6h', '24h'):
+        try:
+            pending = get_pending_outcome_backfills(window)
+        except Exception as e:
+            log.error(f"backfill: get_pending_outcome_backfills({window}) failed: {e}")
+            continue
+
+        if not pending:
+            continue
+
+        log.info(f"backfill: {len(pending)} cycle(s) pending {window} backfill")
+        hours = WINDOW_HOURS[window]
+
+        for row in pending:
+            cycle_id = row['cycle_id']
+            cycle_start = _parse_iso_safe(row['timestamp'])
+            if cycle_start is None:
+                log.warning(f"backfill: bad timestamp for {cycle_id} — skip")
+                continue
+            cycle_end = cycle_start + timedelta(hours=hours)
+
+            try:
+                fills_count, pnl_value = _compute_window_metrics(
+                    cycle_start, cycle_end
+                )
+            except Exception as e:
+                log.error(f"backfill: metrics for {cycle_id} {window} failed: {e}")
+                continue
+
+            try:
+                if window == '6h':
+                    skew_start = _get_skew_at_or_before(cycle_start)
+                    skew_end   = _get_skew_at_or_before(cycle_end)
+                    skew_delta = ((skew_end - skew_start)
+                                  if (skew_start is not None and skew_end is not None)
+                                  else None)
+                    grid_alive = 1 if fills_count > 0 else 0
+                    update_debate_outcomes(
+                        cycle_id, '6h', fills_count, pnl_value,
+                        skew_delta=skew_delta, grid_alive=grid_alive,
+                    )
+                    log.info(
+                        f"backfill: {cycle_id} 6h → fills={fills_count} "
+                        f"pnl=${pnl_value:.4f} skew_delta={skew_delta} "
+                        f"grid_alive={grid_alive}"
+                    )
+                    _notify_agents_6h(
+                        cycle_id, fills_count, pnl_value,
+                        skew_delta if skew_delta is not None else 0.0,
+                        grid_alive,
+                    )
+                else:
+                    update_debate_outcomes(cycle_id, window, fills_count, pnl_value)
+                    log.info(
+                        f"backfill: {cycle_id} {window} → fills={fills_count} "
+                        f"pnl=${pnl_value:.4f}"
+                    )
+            except Exception as e:
+                log.error(f"backfill: update for {cycle_id} {window} failed: {e}")
+
+
 def poll_cycle():
     """One full data collection cycle."""
     log.info("Poll cycle starting")
@@ -224,6 +498,13 @@ def poll_cycle():
         log.info(f"Indicators updated — vol_regime={indicators.get('vol_regime')} vwap_dev={indicators.get('vwap_dev_pct')}")
     else:
         log.warning("No indicators computed this cycle")
+
+    # Phase 5: backfill realised outcomes for matured debate_records cycles.
+    # Failures here must not break the rest of the poll cycle.
+    try:
+        backfill_outcomes()
+    except Exception as e:
+        log.error(f"backfill_outcomes failed: {e}")
 
 def run_daemon(interval_seconds=3600):
     """Run observer as daemon, polling every interval."""

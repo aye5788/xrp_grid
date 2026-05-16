@@ -194,6 +194,100 @@ def init_db():
         superseded_at TEXT
     )''')
 
+    # --- Phase 5: structured debate records (one row per MAGI cycle) ---
+    c.execute('''CREATE TABLE IF NOT EXISTS debate_records (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cycle_id TEXT UNIQUE NOT NULL,
+        timestamp TEXT NOT NULL,
+        trigger TEXT,
+
+        casper_r0_position TEXT,
+        casper_r0_conviction REAL,
+        casper_r0_crux TEXT,
+        casper_r0_evidence TEXT,
+
+        melchior_r0_position TEXT,
+        melchior_r0_conviction REAL,
+        melchior_r0_crux TEXT,
+        melchior_r0_evidence TEXT,
+
+        balthasar_r0_position TEXT,
+        balthasar_r0_conviction REAL,
+        balthasar_r0_crux TEXT,
+        balthasar_r0_evidence TEXT,
+
+        debate_triggered INTEGER DEFAULT 0,
+        conflict_pair TEXT,
+
+        casper_r1_held INTEGER,
+        melchior_r1_held INTEGER,
+        balthasar_r1_held INTEGER,
+
+        casper_revision_valid INTEGER,
+        melchior_revision_valid INTEGER,
+        balthasar_revision_valid INTEGER,
+
+        casper_r1_text TEXT,
+        melchior_r1_text TEXT,
+        balthasar_r1_text TEXT,
+
+        final_grid_action TEXT,
+        final_risk_action TEXT,
+        deadlock INTEGER DEFAULT 0,
+
+        applied_grid_action TEXT,
+        applied_spacing REAL,
+        engine_clamped INTEGER DEFAULT 0,
+        clamp_reason TEXT,
+
+        fills_1h INTEGER,
+        fills_6h INTEGER,
+        fills_24h INTEGER,
+        pnl_1h REAL,
+        pnl_6h REAL,
+        pnl_24h REAL,
+        skew_delta_6h REAL,
+        grid_alive_6h INTEGER,
+
+        outcome_1h_backfilled INTEGER DEFAULT 0,
+        outcome_6h_backfilled INTEGER DEFAULT 0,
+        outcome_24h_backfilled INTEGER DEFAULT 0
+    )''')
+    c.execute('''CREATE INDEX IF NOT EXISTS idx_debate_records_cycle_id
+        ON debate_records (cycle_id)''')
+    c.execute('''CREATE INDEX IF NOT EXISTS idx_debate_records_timestamp
+        ON debate_records (timestamp)''')
+
+    # Future-proof ALTERs for debate_records (idempotent — match the
+    # try/except pattern used above for magi_decisions).
+    for _alter in (
+        # placeholder; e.g. "ALTER TABLE debate_records ADD COLUMN notes TEXT"
+    ):
+        try:
+            c.execute(_alter)
+        except sqlite3.OperationalError:
+            pass
+
+    # --- Phase 5: Letta agent registry (logical agent ↔ Letta UUID) ---
+    c.execute('''CREATE TABLE IF NOT EXISTS agent_registry (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id TEXT UNIQUE NOT NULL,
+        letta_agent_id TEXT NOT NULL,
+        shared_world_block_id TEXT,
+        shared_peer_block_ids TEXT,
+        model TEXT,
+        created_at TEXT NOT NULL,
+        last_active TEXT
+    )''')
+
+    for _alter in (
+        # placeholder; e.g. "ALTER TABLE agent_registry ADD COLUMN notes TEXT"
+    ):
+        try:
+            c.execute(_alter)
+        except sqlite3.OperationalError:
+            pass
+
     conn.commit()
     conn.close()
     print("Database initialised.")
@@ -830,6 +924,252 @@ def get_recent_grid_config_outcomes(n=5):
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# --- Phase 5: agent registry helpers ---
+
+_VALID_AGENT_IDS = ('casper', 'melchior', 'balthasar')
+_VALID_WINDOWS = ('1h', '6h', '24h')
+
+
+def register_agent(agent_id, letta_agent_id, model,
+                    shared_world_block_id=None, shared_peer_block_ids=None):
+    """
+    Upsert a logical agent ↔ Letta UUID mapping. shared_peer_block_ids
+    may be a list/dict (JSON-serialised) or already-serialised string.
+    Updates last_active on every call; created_at is preserved on update.
+    """
+    if isinstance(shared_peer_block_ids, (list, dict)):
+        shared_peer_block_ids = json.dumps(shared_peer_block_ids)
+    now = datetime.utcnow().isoformat()
+    conn = get_conn()
+    existing = conn.execute(
+        "SELECT id FROM agent_registry WHERE agent_id=?", (agent_id,)
+    ).fetchone()
+    if existing:
+        conn.execute(
+            '''UPDATE agent_registry
+               SET letta_agent_id=?, shared_world_block_id=?,
+                   shared_peer_block_ids=?, model=?, last_active=?
+               WHERE agent_id=?''',
+            (letta_agent_id, shared_world_block_id, shared_peer_block_ids,
+             model, now, agent_id)
+        )
+    else:
+        conn.execute(
+            '''INSERT INTO agent_registry
+               (agent_id, letta_agent_id, shared_world_block_id,
+                shared_peer_block_ids, model, created_at, last_active)
+               VALUES (?,?,?,?,?,?,?)''',
+            (agent_id, letta_agent_id, shared_world_block_id,
+             shared_peer_block_ids, model, now, now)
+        )
+    conn.commit()
+    conn.close()
+
+
+def get_letta_agent_id(agent_id):
+    """Return the Letta UUID for the given logical agent, or None."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT letta_agent_id FROM agent_registry WHERE agent_id=?",
+        (agent_id,)
+    ).fetchone()
+    conn.close()
+    return row['letta_agent_id'] if row else None
+
+
+def get_agent_registry_row(agent_id):
+    """
+    Return the full agent_registry row as a dict, or None.
+    shared_peer_block_ids is parsed back into a list/dict if it was JSON.
+    """
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM agent_registry WHERE agent_id=?", (agent_id,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    d = dict(row)
+    if d.get('shared_peer_block_ids'):
+        try:
+            d['shared_peer_block_ids'] = json.loads(d['shared_peer_block_ids'])
+        except (ValueError, TypeError):
+            pass  # leave as raw string if not JSON
+    return d
+
+
+# --- Phase 5: debate record helpers ---
+
+def insert_debate_record(record_dict):
+    """
+    Insert a row into debate_records. record_dict keys map directly to
+    column names. Any list/dict value for a column ending in _evidence is
+    JSON-serialised before insert. If timestamp is omitted it is filled
+    with datetime.utcnow().isoformat(). Returns cycle_id.
+    """
+    data = dict(record_dict)  # shallow copy so caller's dict is untouched
+    data.setdefault('timestamp', datetime.utcnow().isoformat())
+
+    for key, val in list(data.items()):
+        if key.endswith('_evidence') and isinstance(val, (list, dict)):
+            data[key] = json.dumps(val)
+
+    fields = ', '.join(data.keys())
+    placeholders = ', '.join(['?' for _ in data])
+    conn = get_conn()
+    conn.execute(
+        f'INSERT INTO debate_records ({fields}) VALUES ({placeholders})',
+        list(data.values())
+    )
+    conn.commit()
+    conn.close()
+    return data.get('cycle_id')
+
+
+def update_debate_outcomes(cycle_id, window, fills, pnl,
+                            skew_delta=None, grid_alive=None):
+    """
+    Backfill outcome metrics on a debate_records row.
+    window is one of '1h', '6h', '24h'. Sets fills_{window},
+    pnl_{window}, outcome_{window}_backfilled=1. For the 6h window also
+    optionally sets skew_delta_6h and grid_alive_6h.
+    """
+    if window not in _VALID_WINDOWS:
+        raise ValueError(f"window must be one of {_VALID_WINDOWS}, got {window!r}")
+
+    sets = [
+        f"fills_{window}=?",
+        f"pnl_{window}=?",
+        f"outcome_{window}_backfilled=1",
+    ]
+    vals = [fills, pnl]
+
+    if window == '6h':
+        if skew_delta is not None:
+            sets.append("skew_delta_6h=?")
+            vals.append(skew_delta)
+        if grid_alive is not None:
+            sets.append("grid_alive_6h=?")
+            vals.append(int(bool(grid_alive)))
+
+    vals.append(cycle_id)
+    conn = get_conn()
+    conn.execute(
+        f"UPDATE debate_records SET {', '.join(sets)} WHERE cycle_id=?",
+        vals
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_pending_outcome_backfills(window):
+    """
+    Return list of {cycle_id, timestamp} for debate_records whose
+    outcome_{window}_backfilled=0 AND whose timestamp is at least N hours
+    old (1, 6, or 24 depending on window). Ordered oldest-first.
+    """
+    if window not in _VALID_WINDOWS:
+        raise ValueError(f"window must be one of {_VALID_WINDOWS}, got {window!r}")
+
+    from datetime import timedelta
+    hours_map = {'1h': 1, '6h': 6, '24h': 24}
+    cutoff = (datetime.utcnow() - timedelta(hours=hours_map[window])).isoformat()
+
+    conn = get_conn()
+    rows = conn.execute(
+        f'''SELECT cycle_id, timestamp FROM debate_records
+            WHERE outcome_{window}_backfilled=0
+              AND timestamp <= ?
+            ORDER BY timestamp ASC''',
+        (cutoff,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_recent_debate_records(limit=20):
+    """Return the most recent N debate_records ordered by timestamp DESC."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM debate_records ORDER BY timestamp DESC LIMIT ?",
+        (limit,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_agent_accuracy(agent_id, days=7):
+    """
+    Return {total_calls, positive_outcomes, accuracy_pct} for the agent's
+    r0 calls over the last `days` days. A 'positive outcome' is
+    fills_6h > 0 AND pnl_6h >= 0. Only counts rows where the agent's
+    r0_position is non-null and the 6h outcome has been backfilled.
+    """
+    if agent_id not in _VALID_AGENT_IDS:
+        raise ValueError(f"unknown agent_id: {agent_id!r}")
+
+    from datetime import timedelta
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    pos_col = f"{agent_id}_r0_position"
+
+    conn = get_conn()
+    rows = conn.execute(
+        f'''SELECT {pos_col} AS position, fills_6h, pnl_6h
+            FROM debate_records
+            WHERE timestamp >= ?
+              AND outcome_6h_backfilled=1
+              AND {pos_col} IS NOT NULL''',
+        (cutoff,)
+    ).fetchall()
+    conn.close()
+
+    total = len(rows)
+    positive = sum(
+        1 for r in rows
+        if (r['fills_6h'] or 0) > 0
+        and r['pnl_6h'] is not None and r['pnl_6h'] >= 0
+    )
+    accuracy_pct = (positive / total * 100.0) if total > 0 else 0.0
+    return {
+        'total_calls': total,
+        'positive_outcomes': positive,
+        'accuracy_pct': round(accuracy_pct, 2),
+    }
+
+
+def get_capitulation_rate(agent_id, days=7):
+    """
+    Return {total_revisions, invalid_revisions, capitulation_pct} for the
+    agent's r1 revisions over the last `days` days. A 'revision' is any
+    row where the agent did NOT hold (revision_valid is non-null);
+    'invalid' means revision_valid=0.
+    """
+    if agent_id not in _VALID_AGENT_IDS:
+        raise ValueError(f"unknown agent_id: {agent_id!r}")
+
+    from datetime import timedelta
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    rev_col = f"{agent_id}_revision_valid"
+
+    conn = get_conn()
+    rows = conn.execute(
+        f'''SELECT {rev_col} AS rev FROM debate_records
+            WHERE timestamp >= ?
+              AND {rev_col} IS NOT NULL''',
+        (cutoff,)
+    ).fetchall()
+    conn.close()
+
+    total = len(rows)
+    invalid = sum(1 for r in rows if r['rev'] == 0)
+    pct = (invalid / total * 100.0) if total > 0 else 0.0
+    return {
+        'total_revisions': total,
+        'invalid_revisions': invalid,
+        'capitulation_pct': round(pct, 2),
+    }
 
 
 if __name__ == "__main__":

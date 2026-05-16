@@ -1,0 +1,22 @@
+services:
+  letta:
+    image: letta/letta:latest
+    container_name: letta
+    restart: unless-stopped
+    env_file:
+      - /root/xrp_grid/letta/.env
+    ports:
+      # Localhost only — do NOT expose externally. Auth is via SECURE=true +
+      # LETTA_SERVER_PASSWORD bearer token, but we still bind to loopback so
+      # the only attack surface is anyone who already has shell on the box.
+      - "127.0.0.1:8283:8283"
+    volumes:
+      # Letta bundles Postgres internally and stores all agent state, blocks,
+      # messages, etc. here. Bind-mounted so state survives container rebuilds.
+      - /root/xrp_grid/letta/pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8283/v1/health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s

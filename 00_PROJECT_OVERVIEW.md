@@ -1,129 +1,99 @@
-# MAGI XRP Grid Bot — Project Overview
+# MAGI — XRP Grid Bot — Project Overview
 
-**Last architecture review:** 2026-05-14
+## What this system is
 
----
-
-## What is this
-
-An automated XRP/USD spot grid trading bot supervised by three AI agents (the MAGI) and a fourth Supervisor agent (under design). The bot places a ladder of buy and sell limit orders symmetrically around a centre price. When price oscillates, orders fill and the bot earns the spread. The AI agents assess market regime, microstructure, and risk exposure twice daily, then vote on whether the grid should maintain, reconfigure, or halt.
-
-The system is designed to run continuously as a systemd service on a VPS. A ~$70 USD universe (mirroring the actual Kraken account) is ring-fenced within the strategy.
-
-**Current mode:** Kraken paper trading (no real orders placed). The paper layer simulates fills against live price data and tracks a hypothetical inventory, but nothing touches the Kraken order book.
-
-**Primary goal:** Build a system that is right >50% of the time and profitable after fees at meaningful scale with real capital. Paper trading is validation only. The end goal is live trading.
-
----
+MAGI is a grid-trading bot for XRP/USD on Kraken, currently in paper mode. The
+end goal is profitable live trading at meaningful scale. Paper mode is
+validation only. Hard constraint: right >50% of the time AND profitable after
+fees.
 
 ## Architecture
-scheduler.py — main loop: observer every 60min, MAGI at 9AM + 2PM EST ├── observer.py — pulls candles, computes indicators, writes to SQLite ├── magi/ — three stateless AI agents + orchestrator + consensus │ └── [PLANNED] magi/magi_supervisor.py — Supervisor agent (see §Roadmap) ├── grid/engine.py — grid construction, paper fill simulation, shadow sim │ └── grid/exchanges/ — BaseExchange → CoinbaseExchange | KrakenExchange ├── guardrails.py — kill switch + daily loss limit check (runs before each MAGI cycle) └── dashboard.py — Flask read-only dashboard + trigger endpoints
 
-**Database:** SQLite at `/root/xrp_grid/observer.db`
+Grid engine (Python) places symmetric buy/sell orders around a centre price on
+Kraken. Three LLM agents form a council that runs each cycle (twice daily +
+manual triggers + startup) and decides whether to MAINTAIN, TIGHTEN, WIDEN,
+RECENTRE, or PAUSE the grid, and whether the risk regime is CLEAR, PAUSE_LONGS,
+or HALT.
 
-**Hosting:** DigitalOcean droplet, $6/month. Dashboard externally accessible at `https://api.ethobs.uk`.
+Agents are **stateful Letta Cloud agents** with persistent memory blocks. The
+runtime is api.letta.com (not self-hosted). Each agent's memory survives
+across cycles, sessions, and droplet restarts.
 
-**Services:** TWO systemd services must both be restarted after any code change:
-- `magi.service` — runs `python3 -m scheduler` (observer, scheduled cycles)
-- `magi-dashboard.service` — runs `python3 -m dashboard` (Flask API, manual triggers)
+### The three agents
+| agent_id | Display | Model | Role |
+|---|---|---|---|
+| casper | Casper | google_ai/gemini-3-flash-preview | Regime classifier (TRENDING/RANGE/SIDEWAYS) |
+| melchior | Melchior | openai/gpt-4o | Grid optimizer (spacing/levels) |
+| balthasar | Balthasar | anthropic/claude-sonnet-4-6 | Risk steward (skew/buffers/HALT) |
 
-Standard restart: `systemctl restart magi.service magi-dashboard.service`
+Lowercase `agent_id` is the canonical key everywhere in code, database,
+CONFLICT_MATRIX, and column prefixes in debate_records. Capitalized display
+names appear only in the Letta dashboard.
 
----
+### Per-agent memory blocks (7)
+- `persona` — full role spec from `/root/xrp_grid/magi/prompts/<agent>_prompt.txt`
+- `self_model` — agent-editable scratchpad for self-reflection
+- `world_state` — shared, updated by orchestrator each cycle
+- `casper_r0_output` / `melchior_r0_output` / `balthasar_r0_output` — shared, each agent's latest Round 0 response
+- `cycle_phase` — round_0 or round_1
 
-## Exchange abstraction
+## Cycle protocol
 
-`grid/exchanges/base.py` defines `BaseExchange`. Two concrete implementations:
+1. **build_world_state()** (orchestrator.py) assembles indicators, inventory,
+   open orders, market knowledge, HARD_RULES → writes to the shared
+   `world_state` block.
+2. **Round 0 (parallel)** — all three agents receive the cycle prompt and
+   return `{position, conviction, key_evidence, crux}` as JSON. Outputs are
+   written to the three shared `*_r0_output` blocks so peers can read them
+   in Round 1.
+3. **detect_conflict()** scans the three R0 positions against CONFLICT_MATRIX
+   (e.g. TRENDING+TIGHTEN, WIDEN+PAUSE_LONGS, HALT-high-conv-vs-anything).
+4. **Round 1 (only if conflict)** — each agent reads peers' R0 outputs from the
+   shared blocks and either holds or revises. `validate_revision()` heuristically
+   checks revisions cite new evidence not present in the agent's own R0.
+5. **resolve_consensus()** — if any held → most conservative wins; if all
+   capitulated → deadlock → most conservative position + human alert.
+6. **enforce_hard_rules()** — Python clamps the consensus against HARD_RULES
+   (max spacing, min buffers, HALT file, etc.) before the grid engine sees it.
 
-- `grid/exchanges/coinbase.py` — `CoinbaseExchange`
-- `grid/exchanges/kraken.py` — `KrakenExchange`: Kraken Spot REST API, HMAC-SHA512, hand-rolled. No third-party Kraken SDK — ever.
+## The learning loop (outcome backfill)
 
-Active exchange controlled by `EXCHANGE` in `config.py`. BTC candles always come from Coinbase regardless of `EXCHANGE` setting.
+`observer.py` runs `backfill_outcomes()` each poll cycle. For every completed
+cycle, it computes fills + P&L at 1h / 6h / 24h windows and writes them to
+`debate_records`. At the 6h backfill, it sends an "Outcome for cycle X..."
+user-role message to each agent's persistent Letta thread. Over time the
+agents accumulate experience inside their persistent context.
 
----
+## Hard rules (enforced in Python, not by agents)
+- `max_allocation_skew`: 0.85 (HALT)
+- `min_usd_buffer`: $10
+- `min_xrp_buffer_usd`: $10
+- `daily_loss_limit_pct`: 0.15
+- `halt_file`: `/root/xrp_grid/HALT`
+- `max_grid_spacing_pct`: 0.025
+- `min_grid_spacing_pct`: 0.003
 
-## The MAGI Council
+## Data layout
 
-| Agent | Provider | Model | Role |
-|-------|----------|-------|------|
-| Melchior | OpenAI | gpt-4o | Grid microstructure — spacing, centering, grid action |
-| Balthasar | Anthropic | claude-sonnet-4-6 | Survival guardian — capital adequacy, inventory risk |
-| Casper | Google | gemini-2.5-flash | Market regime — RANGING / TRENDING / UNCERTAIN |
+- **observer.db** SQLite — new tables: `debate_records` (40-col per-cycle),
+  `agent_registry` (logical agent ↔ Letta UUID). Legacy `magi_decisions`
+  still dual-written for backward compat.
+- **Letta Cloud** (api.letta.com) — agent state, memory blocks, message threads.
+  Authenticated via `LETTA_API_KEY` in `/root/xrp_grid/.env`.
 
-All three agents are **stateless**: each call receives current state from the database. No memory of prior decisions is passed.
+## Services
+| Service | Expected state |
+|---|---|
+| `magi.service` | active (scheduler, observer, MAGI cycles) |
+| `magi-dashboard.service` | active (Flask :5000, exposed via nginx as api.ethobs.uk) |
+| `letta.service` | inactive + disabled (self-hosted Docker, dormant for rollback only) |
 
-### Output schemas
+Restart together: `systemctl restart magi.service magi-dashboard.service`.
 
-**Melchior:** `action` (MAINTAIN / RECENTRE / TIGHTEN / WIDEN), `conviction`, `reasoning`, `concerns`
-
-**Balthasar:** `action` (CLEAR / PAUSE_LONGS / PAUSE_SHORTS / HALT), `conviction`, `reasoning`, `concerns`
-
-**Casper:** `regime` (RANGING / TRENDING / UNCERTAIN), `conviction`, `trend_direction`, `reasoning`, `concerns`
-
----
-
-## Consensus rules (current — under revision)
-
-Evaluated in `magi/orchestrator.py:apply_consensus()`:
-
-1. **Balthasar HALT** → everything halts. Cannot be overridden.
-2. **Casper TRENDING** → `grid_action = MAINTAIN` regardless of Melchior. *(Known issue: this veto is too broad — RECENTRE should be exempt. Fix pending.)*
-3. **Casper RANGING or UNCERTAIN** → `grid_action = Melchior's action`.
-4. **`risk_action`** is always Balthasar's action, applied independently.
-
-**Known architectural gap:** No component asks whether the collective output serves the trading objective. When PAUSE_LONGS + TRENDING + MAINTAIN combine, the system has no self-recovery path. This is the primary motivator for the Supervisor layer (see §Roadmap).
-
----
-
-## Roadmap — Supervisor Layer
-
-The system is missing a component whose explicit job is: **is this achieving profitable trading?**
-
-The planned Supervisor agent sits above the three councils and has two functions:
-
-1. **Quality control:** pushes back on circular or disconnected reasoning before it reaches the grid engine. Uses multi-turn dialogue — prior council output injected back into context with a specific challenge. Stateless agents can engage with their own prior output when it's provided explicitly.
-
-2. **Strategic override:** when inaction costs more than the council's stated risks justify, overrides toward RECENTRE, WIDEN, or CLEAR_PAUSE. Cannot override toward greater conservatism.
-
-The Supervisor has **bounded persistent memory** via Mem0 (bolt-on memory layer, not a runtime). The three councils remain stateless. The Supervisor accumulates outcome history — what happened after each override or approval — and uses that to calibrate future decisions.
-
-**Sequencing:** Path 1 fixes deploy immediately (see 02_NEXT_BUILD_TASKS.md). Supervisor v1 builds in parallel in shadow mode — it starts logging decisions from day one without affecting grid behavior. Shadow mode requires no clean baseline. Activate Supervisor after 7 days of shadow decisions, not 14. The downside of a bad override is a recoverable RECENTRE. The cost of waiting is weeks of the system not trading.
-
----
-
-## Schedule
-Every 60 minutes observer cycle: candle fetch → indicator compute → shadow tick → paper fill sim 9 AM EST scheduled MAGI cycle 2 PM EST scheduled MAGI cycle On startup observer cycle → grid init or restore → startup MAGI cycle
-
----
-
-## Risk model and guardrails
-
-**Spot-only trading.** No margin, no leverage. Grid construction trims the sell ladder to XRP held and buy ladder to USD held. `simulate_fills` rejects any fill that would push inventory negative.
-
-**Allocation-based risk (Balthasar).** `allocation_skew = (xrp_value - target) / total_universe_usd` where target = 50/50 neutral. Range ±1. Thresholds: HALT at ±0.85, PAUSE_LONGS/PAUSE_SHORTS at ±0.6, CLEAR inside ±0.6.
-
-**Kill switch.** `/root/xrp_grid/HALT` file blocks all cycles and cancels orders.
-
-**Daily loss limit.** Trips when total universe value drops >15% from UTC midnight baseline.
-
-**Spacing cap.** `MAX_GRID_SPACING_PCT = 2.5%`. WIDEN decisions are clamped to this ceiling before grid rebuild.
-
----
-
-## Shadow grid simulator
-
-Six parallel virtual grids (level_count ∈ {6, 8, 10, 12, 14, 16}) run on every price tick. Automatic level-count switching when a better variant clears all four gates: ≥0.10% margin, ≥20 fills, ≥24h history, not already current.
-
-**Known limitation:** Shadow buy levels have never filled since launch (lowest shadow buy ~$1.361, XRP low since launch ~$1.377). Level switching has never fired. Shadow fills are not a current priority — the core trading loop must stabilize first.
-
----
-
-## P&L tracking
-
-FIFO-matched realized P&L, unrealized P&L mark-to-market, win rate, fees. `pnl_daily` table exists but has no writer — this is a known gap to fix.
-
----
-
-## Cost tracking
-
-Every agent call logs tokens and estimated cost to `token_usage`. Current 30-day actuals: Balthasar ~$1.25, Melchior ~$0.60, Casper ~$0.12. Total projected ~$1.97/month — within budget.
+## Out of scope / dead code
+- Self-hosted Letta Docker (dormant; `/root/xrp_grid/letta/` and pgdata preserved for rollback)
+- Old stateless `apply_consensus()` three-agent orchestrator (replaced)
+- Supervisor / override authority concept (rejected; removed from dashboard)
+- Mem0, Graphiti, persistent thread-only approaches (rejected — Letta Cloud is the runtime)
+- ETH futures system (dead — do not reference)
+- krakenex, python-kraken-sdk, any third-party Kraken wrapper (banned)

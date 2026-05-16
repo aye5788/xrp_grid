@@ -64,238 +64,65 @@ HTML_TEMPLATE = """
         .status-cancelled { color: #ff4444; }
         .status-open { color: #ffaa00; }
 
-        /* ── NGE MAGI aesthetic — scoped to council cards + supervisor only ── */
-        .magi-row {
-            display: grid;
-            grid-template-columns: 1fr 1fr 1fr;
-            gap: 22px;
-            margin: 18px 0 8px;
-        }
-        .magi-card {
-            background:
-                repeating-linear-gradient(
-                    to bottom,
-                    transparent 0px,
-                    transparent 2px,
-                    rgba(255, 153, 0, 0.045) 2px,
-                    rgba(255, 153, 0, 0.045) 3px
-                ),
-                repeating-linear-gradient(
-                    to right,
-                    transparent 0px,
-                    transparent 28px,
-                    rgba(255, 153, 0, 0.03) 28px,
-                    rgba(255, 153, 0, 0.03) 29px
-                ),
-                #0e0a04;
-            border: 1px solid #ff9900;
-            outline: 1px solid #331100;
-            outline-offset: 2px;
-            border-radius: 0;
-            padding: 14px 16px 16px;
-            color: #ffcc66;
-            font-family: monospace;
+        /* ── Phase 5: agent council panels ───────────────────────── */
+        .council-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin: 14px 0; }
+        .council-card {
+            background: #0e0e16;
+            border: 1px solid #4488ff66;
+            padding: 14px;
+            border-radius: 4px;
             position: relative;
         }
-        .magi-card::before {
-            content: '';
-            position: absolute;
-            top: -1px; left: -1px;
-            width: 14px; height: 14px;
-            border-top: 2px solid #ff9900;
-            border-left: 2px solid #ff9900;
-            pointer-events: none;
+        .council-name {
+            color: #88aaff; font-size: 0.8em; letter-spacing: 2px;
+            text-transform: uppercase; margin-bottom: 6px;
         }
-        .magi-card::after {
-            content: '';
-            position: absolute;
-            bottom: -1px; right: -1px;
-            width: 14px; height: 14px;
-            border-bottom: 2px solid #ff9900;
-            border-right: 2px solid #ff9900;
-            pointer-events: none;
+        .council-pos {
+            font-size: 1.4em; font-weight: bold; letter-spacing: 2px;
+            margin: 4px 0 8px;
         }
-        .magi-name {
-            color: #ff9900;
-            font-size: 0.82em;
-            letter-spacing: 3px;
-            font-weight: bold;
-            text-transform: uppercase;
-            text-shadow: 0 0 6px #ff990044;
+        .conv-track {
+            height: 6px; background: #1a1a26; border: 1px solid #444;
+            border-radius: 2px; overflow: hidden; margin: 6px 0 8px;
         }
-        .magi-rule {
-            border: none;
-            border-top: 1px solid #ff990066;
-            margin: 8px 0 12px;
+        .conv-fill { height: 100%; background: linear-gradient(to right, #4488ff, #66ccff); }
+        .conv-pct { color: #88aaff; font-size: 0.75em; margin-left: 6px; }
+        .council-crux { color: #ccccdd; font-size: 0.82em; font-style: italic;
+            border-left: 2px solid #4488ff; padding-left: 8px; margin: 8px 0; }
+        .council-evidence { color: #aaaacc; font-size: 0.75em; line-height: 1.5;
+            margin: 6px 0 0 14px; padding: 0; }
+        .council-evidence li { margin: 0; }
+        .debate-flag-yes { color: #ffaa00; font-weight: bold; }
+        .debate-flag-no  { color: #66cc88; }
+        .deadlock-banner {
+            background: #330000; border: 2px solid #ff4444;
+            color: #ff8888; padding: 10px 14px; margin: 12px 0; text-align: center;
+            font-weight: bold; letter-spacing: 1px;
         }
-        .magi-decision {
-            font-size: 1.6em;
-            font-weight: bold;
-            letter-spacing: 4px;
-            text-align: center;
-            padding: 6px 0 2px;
-            text-shadow: 0 0 10px currentColor;
+        .override-line {
+            background: #221a00; border-left: 3px solid #ffaa00;
+            color: #ffcc66; padding: 6px 10px; margin: 8px 0; font-size: 0.82em;
         }
-        .conv-bar {
-            display: flex;
-            align-items: center;
-            gap: 5px;
-            margin: 10px 0 12px;
-            justify-content: center;
+        .accuracy-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+        .accuracy-card {
+            background: #0a0e0a; border: 1px solid #00aa6644;
+            padding: 12px; border-radius: 4px;
         }
-        .conv-seg {
-            width: 32px;
-            height: 8px;
-            border: 1px solid #ff990066;
-        }
-        .conv-on  { background: #ff9900; box-shadow: 0 0 8px #ff990099; }
-        .conv-off { background: #1a1006; }
-        .conv-label {
-            color: #ff9900;
-            font-size: 0.7em;
-            letter-spacing: 2px;
-            margin-left: 10px;
-        }
-        .magi-reason {
-            color: #b89060;
-            font-size: 0.75em;
-            line-height: 1.5;
-            margin-top: 4px;
-            border-top: 1px dashed #ff990022;
-            padding-top: 8px;
-        }
-
-        /* Supervisor panel — distinct, wider, override-authority styling */
-        .supervisor-panel {
-            margin: 14px auto 8px;
-            background:
-                repeating-linear-gradient(
-                    to bottom,
-                    transparent 0px,
-                    transparent 2px,
-                    rgba(255, 68, 68, 0.04) 2px,
-                    rgba(255, 68, 68, 0.04) 3px
-                ),
-                #110707;
-            border: 1px solid #ff4444;
-            outline: 1px solid #330808;
-            outline-offset: 2px;
-            border-radius: 0;
-            padding: 18px 24px 20px;
-            position: relative;
-        }
-        .supervisor-panel.approve {
-            background:
-                repeating-linear-gradient(
-                    to bottom,
-                    transparent 0px,
-                    transparent 2px,
-                    rgba(0, 255, 136, 0.03) 2px,
-                    rgba(0, 255, 136, 0.03) 3px
-                ),
-                #071109;
-            border-color: #00ff88;
-            outline-color: #083322;
-        }
-        .supervisor-panel::before {
-            content: '';
-            position: absolute;
-            top: -1px; left: -1px;
-            width: 18px; height: 18px;
-            border-top: 2px solid currentColor;
-            border-left: 2px solid currentColor;
-            color: #ff4444;
-            pointer-events: none;
-        }
-        .supervisor-panel::after {
-            content: '';
-            position: absolute;
-            bottom: -1px; right: -1px;
-            width: 18px; height: 18px;
-            border-bottom: 2px solid currentColor;
-            border-right: 2px solid currentColor;
-            color: #ff4444;
-            pointer-events: none;
-        }
-        .supervisor-panel.approve::before,
-        .supervisor-panel.approve::after { color: #00ff88; }
-        .supervisor-head {
-            color: #ff9900;
-            font-size: 0.85em;
-            letter-spacing: 5px;
-            text-transform: uppercase;
-            font-weight: bold;
-            border-bottom: 1px solid #ff990044;
-            padding-bottom: 8px;
-            margin-bottom: 14px;
-            text-shadow: 0 0 6px #ff990055;
-        }
-        .supervisor-meta {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 32px;
-            align-items: flex-end;
-            margin-bottom: 4px;
-        }
-        .supervisor-meta .meta-label {
-            color: #ff9900aa;
-            font-size: 0.68em;
-            letter-spacing: 2px;
-            text-transform: uppercase;
-            margin-bottom: 4px;
-        }
-        .supervisor-target {
-            font-size: 1.9em;
-            font-weight: bold;
-            letter-spacing: 4px;
-            color: #ff4444;
-            text-shadow: 0 0 14px #ff444466;
-        }
-        .supervisor-target.approve {
-            color: #00ff88;
-            text-shadow: 0 0 14px #00ff8866;
-        }
-        .supervisor-reason {
-            color: #ffcc99;
-            font-size: 0.82em;
-            line-height: 1.5;
-            margin-top: 14px;
-            border-top: 1px dashed #ff990033;
-            padding-top: 10px;
-        }
-        .supervisor-council {
-            color: #ffcc99;
-            letter-spacing: 1px;
-            font-size: 0.85em;
-        }
-
-        /* LIVE / SHADOW mode indicator — blinking amber for LIVE */
-        @keyframes amber-pulse {
-            0%, 100% { opacity: 1;    box-shadow: 0 0 10px #ff9900, 0 0 18px #ff9900; }
-            50%      { opacity: 0.35; box-shadow: 0 0 2px  #ff9900; }
-        }
-        .mode-badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 10px;
-            font-weight: bold;
-            letter-spacing: 3px;
-            font-size: 1em;
-        }
-        .mode-badge.live { color: #ff9900; }
-        .mode-badge.live::before {
-            content: '';
-            width: 12px; height: 12px;
-            background: #ff9900;
-            border: 1px solid #ffaa33;
-            animation: amber-pulse 1.1s ease-in-out infinite;
-        }
-        .mode-badge.shadow { color: #666; }
-        .mode-badge.shadow::before {
-            content: '';
-            width: 12px; height: 12px;
-            background: #333;
-            border: 1px solid #555;
+        .accuracy-line { font-size: 0.85em; color: #88cc88; margin: 4px 0; }
+        .accuracy-line .num { color: #00ff88; font-weight: bold; }
+        .accuracy-line .num.bad { color: #ff8866; }
+        details.debate-row > summary { cursor: pointer; padding: 4px; }
+        details.debate-row > summary:hover { background: #1a1a2a; }
+        details.debate-row[open] > summary { background: #161624; }
+        .evolution-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+        .evo-card { background: #0c0c14; border: 1px solid #444466;
+            padding: 14px; border-radius: 4px; }
+        .evo-title { color: #99aacc; font-size: 0.8em; letter-spacing: 1px;
+            text-transform: uppercase; margin-bottom: 8px; }
+        .attribution-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+        .attribution-card {
+            background: #0c0c14; border: 1px solid #444466;
+            padding: 14px; border-radius: 4px;
         }
     </style>
 </head>
@@ -361,6 +188,50 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
+    <!-- ── Phase 5 PANEL 1: Agent Council ───────────────────────── -->
+    <h2>Agent Council</h2>
+    {% if latest_debate %}
+    <div style="color:#666; font-size:0.78em; margin-bottom:6px;">
+        cycle <span style="color:#88aaff;">{{ latest_debate.cycle_id }}</span>
+        &nbsp;|&nbsp; {{ latest_debate.timestamp }}
+        &nbsp;|&nbsp; Debate triggered:
+        {% if latest_debate.debate_triggered %}
+            <span class="debate-flag-yes">YES</span>
+            ({{ latest_debate.conflict_pair or '?' }})
+        {% else %}
+            <span class="debate-flag-no">no</span>
+        {% endif %}
+    </div>
+    {% if latest_debate.deadlock %}
+    <div class="deadlock-banner">⚠ DEADLOCK ON LAST CYCLE — HUMAN REVIEW REQUESTED</div>
+    {% endif %}
+    {% if council_override_tags %}
+    <div class="override-line">Hard rule overrides applied: {{ council_override_tags|join(', ') }}</div>
+    {% endif %}
+    <div class="council-row">
+        {% for agent in ['casper', 'melchior', 'balthasar'] %}
+        {% set pos = latest_debate[agent + '_r0_position'] or '—' %}
+        {% set conv = latest_debate[agent + '_r0_conviction'] or 0 %}
+        {% set crux = latest_debate[agent + '_r0_crux'] or '' %}
+        {% set evidence = latest_debate[agent + '_r0_evidence_list'] or [] %}
+        <div class="council-card">
+            <div class="council-name">{{ agent }}</div>
+            <div class="council-pos {{ pos }}">{{ pos }}</div>
+            <div class="conv-track"><div class="conv-fill" style="width:{{ (conv*100)|round(0)|int }}%;"></div></div>
+            <div class="conv-pct">conviction {{ (conv*100)|round(0)|int }}%</div>
+            {% if crux %}<div class="council-crux">"{{ crux }}"</div>{% endif %}
+            {% if evidence %}
+            <ul class="council-evidence">
+                {% for e in evidence %}<li>{{ e }}</li>{% endfor %}
+            </ul>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div style="color:#666; margin-bottom:18px;">No debate records yet — first cycle pending.</div>
+    {% endif %}
+
     <h2>Paper P&amp;L</h2>
     <div style="font-size:0.85em; color:#666; margin-bottom:8px;">
         Last fill: <span style="color:{{ fill_age_color }};">{{ fill_age_label }}</span>
@@ -418,38 +289,60 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
+    <h2>Inventory</h2>
+    <div class="grid">
+        <div class="card">
+            <div class="label">XRP Held</div>
+            <div class="value">{{ xrp_held }}</div>
+        </div>
+        <div class="card">
+            <div class="label">USD Held</div>
+            <div class="value">${{ usd_held }}</div>
+        </div>
+        <div class="card">
+            <div class="label">Net Position</div>
+            <div class="value">${{ net_position }}</div>
+            <div class="sub">Skew: {{ inventory_skew }}</div>
+        </div>
+    </div>
+
     <h2>Recent Orders</h2>
-    {% if recent_orders %}
-    <table>
-        <tr>
-            <th>Time</th>
-            <th>Side</th>
-            <th>Price</th>
-            <th>Size</th>
-            <th>Status</th>
-            <th>Fill Price</th>
-            <th>Fee</th>
-            <th>P&amp;L</th>
-        </tr>
-        {% for o in recent_orders %}
-        {% set order_pnl = order_pnl_map.get(o.order_id) %}
-        <tr>
-            <td style="color:#666;">{{ (o.filled_at or o.timestamp or '')[:16] }}</td>
-            <td class="side-{{ o.side }}">{{ o.side }}</td>
-            <td>${{ '%.4f'|format(o.price or 0) }}</td>
-            <td>{{ '%.2f'|format(o.size or 0) }}</td>
-            <td class="status-{{ o.status }}">{{ o.status }}</td>
-            <td>{{ '$%.4f'|format(o.fill_price) if o.fill_price else '—' }}</td>
-            <td>{{ '$%.5f'|format(o.fee) if o.fee else '—' }}</td>
-            <td class="{{ 'pnl-pos' if order_pnl and order_pnl > 0 else ('pnl-neg' if order_pnl and order_pnl < 0 else 'pnl-zero') }}">
-                {{ '$%.4f'|format(order_pnl) if order_pnl is not none else '—' }}
-            </td>
-        </tr>
-        {% endfor %}
-    </table>
-    {% else %}
-    <div style="color:#666; font-size:0.8em;">No orders recorded yet — starts after first MAGI cycle.</div>
-    {% endif %}
+    <details>
+        <summary style="cursor:pointer; color:#88aaff;">
+            {% if recent_orders %}Recent Orders ({{ recent_orders|length }} rows){% else %}Recent Orders (none yet){% endif %}
+        </summary>
+        {% if recent_orders %}
+        <table>
+            <tr>
+                <th>Time</th>
+                <th>Side</th>
+                <th>Price</th>
+                <th>Size</th>
+                <th>Status</th>
+                <th>Fill Price</th>
+                <th>Fee</th>
+                <th>P&amp;L</th>
+            </tr>
+            {% for o in recent_orders %}
+            {% set order_pnl = order_pnl_map.get(o.order_id) %}
+            <tr>
+                <td style="color:#666;">{{ (o.filled_at or o.timestamp or '')[:16] }}</td>
+                <td class="side-{{ o.side }}">{{ o.side }}</td>
+                <td>${{ '%.4f'|format(o.price or 0) }}</td>
+                <td>{{ '%.2f'|format(o.size or 0) }}</td>
+                <td class="status-{{ o.status }}">{{ o.status }}</td>
+                <td>{{ '$%.4f'|format(o.fill_price) if o.fill_price else '—' }}</td>
+                <td>{{ '$%.5f'|format(o.fee) if o.fee else '—' }}</td>
+                <td class="{{ 'pnl-pos' if order_pnl and order_pnl > 0 else ('pnl-neg' if order_pnl and order_pnl < 0 else 'pnl-zero') }}">
+                    {{ '$%.4f'|format(order_pnl) if order_pnl is not none else '—' }}
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+        {% else %}
+        <div style="color:#666; font-size:0.8em; margin-top:8px;">No orders recorded yet — starts after first MAGI cycle.</div>
+        {% endif %}
+    </details>
 
     <h2>Shadow Grid Variants</h2>
     {% if shadow_variants %}
@@ -478,23 +371,6 @@ HTML_TEMPLATE = """
     {% else %}
     <div style="color:#666; font-size:0.8em;">Shadow simulation not yet initialised — starts after first observer cycle.</div>
     {% endif %}
-
-    <h2>Inventory</h2>
-    <div class="grid">
-        <div class="card">
-            <div class="label">XRP Held</div>
-            <div class="value">{{ xrp_held }}</div>
-        </div>
-        <div class="card">
-            <div class="label">USD Held</div>
-            <div class="value">${{ usd_held }}</div>
-        </div>
-        <div class="card">
-            <div class="label">Net Position</div>
-            <div class="value">${{ net_position }}</div>
-            <div class="sub">Skew: {{ inventory_skew }}</div>
-        </div>
-    </div>
 
     <h2>Costs</h2>
 
@@ -644,153 +520,190 @@ HTML_TEMPLATE = """
     }
     </script>
 
-    <h2>Latest MAGI Decision</h2>
-    <div style="font-size:0.8em; color:#555; margin-bottom:10px;">
-        {% if latest_decision and decision_age_label %}
-            Latest cycle: <span style="color:#888;">{{ decision_ts_display }}</span>
-            &nbsp;(<span style="color:{{ decision_age_color }};">{{ decision_age_label }}</span>)
-        {% elif latest_decision %}
-            Latest cycle: <span style="color:#888;">{{ decision_ts_display }}</span>
+    <!-- ── Phase 5 PANEL 2: Accuracy Tracker ─────────────────────── -->
+    <h2>Council Accuracy</h2>
+    <div class="accuracy-grid">
+        {% for agent in ['casper', 'melchior', 'balthasar'] %}
+        {% set a = council_accuracy[agent] %}
+        <div class="accuracy-card">
+            <div style="color:#88cc88; font-size:0.78em; letter-spacing:2px;
+                        text-transform:uppercase; margin-bottom:6px;">
+                {{ agent }}
+            </div>
+            <div class="accuracy-line">
+                7d accuracy: <span class="num">{{ a.acc_7d.accuracy_pct }}%</span>
+                <span style="color:#666;">({{ a.acc_7d.positive_outcomes }}/{{ a.acc_7d.total_calls }})</span>
+            </div>
+            <div class="accuracy-line">
+                30d accuracy: <span class="num">{{ a.acc_30d.accuracy_pct }}%</span>
+                <span style="color:#666;">({{ a.acc_30d.positive_outcomes }}/{{ a.acc_30d.total_calls }})</span>
+            </div>
+            <div class="accuracy-line">
+                30d capitulation:
+                <span class="num {{ 'bad' if a.capit_30d.invalid_revisions > 0 else '' }}">
+                    {{ a.capit_30d.invalid_revisions }}/{{ a.capit_30d.total_revisions }}
+                </span>
+                <span style="color:#666;">({{ a.capit_30d.capitulation_pct }}%)</span>
+            </div>
+            <div style="margin-top:10px;">
+                <div style="color:#666; font-size:0.7em; margin-bottom:4px;">conviction (last 30 cycles)</div>
+                {{ conviction_sparklines_svg[agent]|safe }}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    <!-- ── Phase 5 PANEL 4: Evolution ────────────────────────────── -->
+    <h2>Council Evolution (30d)</h2>
+    <div class="evolution-grid">
+        <div class="evo-card">
+            <div class="evo-title">Daily agreement rate (% no-debate)</div>
+            {{ evolution_agreement_svg|safe }}
+            <div style="color:#666; font-size:0.7em; margin-top:4px;">
+                {{ evolution_agreement|length }} day{{ '' if evolution_agreement|length == 1 else 's' }} of data
+            </div>
+        </div>
+        <div class="evo-card">
+            <div class="evo-title">Average conviction per agent (daily)</div>
+            {{ evolution_convictions_svg|safe }}
+            <div style="font-size:0.7em; margin-top:6px;">
+                <span style="color:#66ccff;">■</span> casper
+                &nbsp;<span style="color:#ffcc66;">■</span> melchior
+                &nbsp;<span style="color:#ff88aa;">■</span> balthasar
+            </div>
+        </div>
+        <div class="evo-card" style="grid-column:1 / span 2;">
+            <div class="evo-title">Hard-rule override counts (30d)</div>
+            {% if evolution_overrides %}
+                {{ evolution_overrides_svg|safe }}
+            {% else %}
+                <div style="color:#666; font-size:0.8em;">No overrides triggered in last 30d.</div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- ── Phase 5 PANEL 5: Outcome Attribution ──────────────────── -->
+    <h2>Outcome Attribution (30d)</h2>
+    <div class="attribution-grid">
+        <div class="attribution-card">
+            <div class="evo-title" style="color:#00ff88;">Best 5 by 24h P&amp;L</div>
+            {% if attribution_best %}
+            <table>
+                <tr><th>Time</th><th>Grid</th><th>C/M/B r0</th><th>Fills 24h</th><th>P&amp;L 24h</th></tr>
+                {% for r in attribution_best %}
+                <tr>
+                    <td style="color:#888;">{{ r.timestamp[:16] }}</td>
+                    <td class="{{ r.final_grid_action }}">{{ r.final_grid_action }}</td>
+                    <td style="font-size:0.78em;">{{ r.casper_r0_position }} / {{ r.melchior_r0_position }} / {{ r.balthasar_r0_position }}</td>
+                    <td>{{ r.fills_24h }}</td>
+                    <td class="pnl-pos">${{ '%.4f'|format(r.pnl_24h or 0) }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+            {% else %}
+            <div style="color:#666;">No 24h-backfilled cycles yet.</div>
+            {% endif %}
+        </div>
+        <div class="attribution-card">
+            <div class="evo-title" style="color:#ff8866;">Worst 5 by 24h P&amp;L</div>
+            {% if attribution_worst %}
+            <table>
+                <tr><th>Time</th><th>Grid</th><th>C/M/B r0</th><th>Fills 24h</th><th>P&amp;L 24h</th></tr>
+                {% for r in attribution_worst %}
+                <tr>
+                    <td style="color:#888;">{{ r.timestamp[:16] }}</td>
+                    <td class="{{ r.final_grid_action }}">{{ r.final_grid_action }}</td>
+                    <td style="font-size:0.78em;">{{ r.casper_r0_position }} / {{ r.melchior_r0_position }} / {{ r.balthasar_r0_position }}</td>
+                    <td>{{ r.fills_24h }}</td>
+                    <td class="{{ 'pnl-neg' if (r.pnl_24h or 0) < 0 else 'pnl-pos' }}">${{ '%.4f'|format(r.pnl_24h or 0) }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+            {% else %}
+            <div style="color:#666;">No 24h-backfilled cycles yet.</div>
+            {% endif %}
+        </div>
+    </div>
+    <div class="evo-card" style="margin-top:14px;">
+        <div class="evo-title">Fill rate &amp; P&amp;L by grid_action (30d)</div>
+        {% if action_summary %}
+        <table>
+            <tr><th>Action</th><th>Cycles</th><th>Avg fills 24h</th><th>Avg P&amp;L 24h</th></tr>
+            {% for r in action_summary %}
+            <tr>
+                <td class="{{ r.action }}">{{ r.action }}</td>
+                <td>{{ r.count }}</td>
+                <td>{{ '%.2f'|format(r.avg_fills or 0) }}</td>
+                <td class="{{ 'pnl-neg' if (r.avg_pnl or 0) < 0 else 'pnl-pos' }}">${{ '%.4f'|format(r.avg_pnl or 0) }}</td>
+            </tr>
+            {% endfor %}
+        </table>
         {% else %}
-            No MAGI cycles run yet.
+        <div style="color:#666;">No 24h-backfilled cycles yet.</div>
         {% endif %}
     </div>
-    {% if latest_decision %}
-    <div class="magi-row">
-        {% set m_cv = (latest_decision.melchior_conviction or 'low')|lower %}
-        {% set m_fill = 3 if m_cv == 'high' else (2 if m_cv == 'medium' else 1) %}
-        <div class="magi-card">
-            <div class="magi-name">MELCHIOR-1 — GPT-4O</div>
-            <hr class="magi-rule">
-            <div class="magi-decision {{ latest_decision.melchior_action }}">{{ latest_decision.melchior_action }}</div>
-            <div class="conv-bar">
-                <span class="conv-seg conv-{{ 'on' if m_fill >= 1 else 'off' }}"></span>
-                <span class="conv-seg conv-{{ 'on' if m_fill >= 2 else 'off' }}"></span>
-                <span class="conv-seg conv-{{ 'on' if m_fill >= 3 else 'off' }}"></span>
-                <span class="conv-label">{{ m_cv|upper }}</span>
-            </div>
-            <div class="magi-reason">{{ latest_decision.melchior_reasoning }}</div>
-        </div>
-        {% set b_cv = (latest_decision.balthasar_conviction or 'low')|lower %}
-        {% set b_fill = 3 if b_cv == 'high' else (2 if b_cv == 'medium' else 1) %}
-        <div class="magi-card">
-            <div class="magi-name">BALTHASAR-2 — CLAUDE SONNET 4.6</div>
-            <hr class="magi-rule">
-            <div class="magi-decision {{ latest_decision.balthasar_action }}">{{ latest_decision.balthasar_action }}</div>
-            <div class="conv-bar">
-                <span class="conv-seg conv-{{ 'on' if b_fill >= 1 else 'off' }}"></span>
-                <span class="conv-seg conv-{{ 'on' if b_fill >= 2 else 'off' }}"></span>
-                <span class="conv-seg conv-{{ 'on' if b_fill >= 3 else 'off' }}"></span>
-                <span class="conv-label">{{ b_cv|upper }}</span>
-            </div>
-            <div class="magi-reason">{{ latest_decision.balthasar_reasoning }}</div>
-        </div>
-        {% set c_cv = (latest_decision.casper_conviction or 'low')|lower %}
-        {% set c_fill = 3 if c_cv == 'high' else (2 if c_cv == 'medium' else 1) %}
-        <div class="magi-card">
-            <div class="magi-name">CASPER-3 — GEMINI 2.5 FLASH</div>
-            <hr class="magi-rule">
-            <div class="magi-decision {{ latest_decision.casper_action }}">{{ latest_decision.casper_action }}</div>
-            <div class="conv-bar">
-                <span class="conv-seg conv-{{ 'on' if c_fill >= 1 else 'off' }}"></span>
-                <span class="conv-seg conv-{{ 'on' if c_fill >= 2 else 'off' }}"></span>
-                <span class="conv-seg conv-{{ 'on' if c_fill >= 3 else 'off' }}"></span>
-                <span class="conv-label">{{ c_cv|upper }}</span>
-            </div>
-            <div class="magi-reason">{{ latest_decision.casper_reasoning }}</div>
-        </div>
-    </div>
-    <div class="card" style="margin-top:10px;">
-        <div class="label">Consensus</div>
-        <div style="margin-top:6px;">
-            Grid: <span class="{{ latest_decision.consensus_grid_action }}">{{ latest_decision.consensus_grid_action }}</span>
-            &nbsp;|&nbsp;
-            Risk: <span class="{{ latest_decision.consensus_risk_action }}">{{ latest_decision.consensus_risk_action }}</span>
-            &nbsp;|&nbsp;
-            Regime: <span class="{{ latest_decision.consensus_regime }}">{{ latest_decision.consensus_regime }}</span>
-        </div>
-        <div style="color:#666; font-size:0.75em; margin-top:6px;">{{ latest_decision.notes }}</div>
-        <div style="color:#444; font-size:0.7em; margin-top:4px;">{{ latest_decision.timestamp }}</div>
-    </div>
-    {% else %}
-    <div style="color:#666;">No MAGI decisions recorded yet.</div>
-    {% endif %}
 
-    <h2>Supervisor</h2>
-    {% if latest_supervisor %}
-    <div class="supervisor-panel {{ 'approve' if latest_supervisor.supervisor_action == 'APPROVE' else '' }}">
-        <div class="supervisor-head">⌬ SUPERVISOR — OVERRIDE AUTHORITY</div>
-        <div class="supervisor-meta">
-            <div>
-                <div class="meta-label">Verdict</div>
-                <div class="supervisor-target {{ 'approve' if latest_supervisor.supervisor_action == 'APPROVE' else '' }}">
-                    {% if latest_supervisor.supervisor_action == 'OVERRIDE' %}→ {{ latest_supervisor.override_target or 'OVERRIDE' }}{% else %}{{ latest_supervisor.supervisor_action }}{% endif %}
-                </div>
-            </div>
-            <div>
-                <div class="meta-label">Mode</div>
-                <div class="mode-badge {{ 'live' if not latest_supervisor.shadow_mode else 'shadow' }}">
-                    {{ 'LIVE' if not latest_supervisor.shadow_mode else 'SHADOW' }}
-                </div>
-            </div>
-            <div>
-                <div class="meta-label">Council Recommended</div>
-                <div class="supervisor-council">
-                    grid={{ latest_supervisor.council_grid_action or '—' }} / risk={{ latest_supervisor.council_risk_action or '—' }}
-                </div>
-            </div>
-            <div style="margin-left:auto;">
-                <div class="meta-label">Timestamp</div>
-                <div style="color:#888; font-size:0.78em; letter-spacing:1px;">{{ latest_supervisor.timestamp }}</div>
-            </div>
-        </div>
-        <div class="supervisor-reason">{{ latest_supervisor.reasoning }}</div>
-    </div>
-    <table style="margin-top:14px;">
-        <tr>
-            <th>Time</th>
-            <th>Action</th>
-            <th>Override Target</th>
-            <th>Mode</th>
-            <th>Reasoning</th>
-        </tr>
-        {% for s in supervisor_decisions %}
-        <tr>
-            <td style="color:#666;">{{ (s.timestamp or '')[:16] }}</td>
-            <td class="{{ s.supervisor_action }}">{{ s.supervisor_action }}</td>
-            <td style="color:{{ '#ffaa00' if s.override_target else '#444' }};">{{ s.override_target or '—' }}</td>
-            <td class="{{ 'LIVE' if not s.shadow_mode else 'SHADOW' }}">{{ 'LIVE' if not s.shadow_mode else 'SHADOW' }}</td>
-            <td style="color:#888; font-size:0.75em;">{{ (s.reasoning or '')[:100] }}{% if s.reasoning and s.reasoning|length > 100 %}…{% endif %}</td>
-        </tr>
-        {% endfor %}
-    </table>
-    {% else %}
-    <div style="color:#666; font-size:0.8em;">No Supervisor decisions recorded yet — first row written on next MAGI cycle.</div>
-    {% endif %}
-
-    <h2>Recent Decisions</h2>
-    <table>
-        <tr>
-            <th>Time</th>
-            <th>Trigger</th>
-            <th>Melchior</th>
-            <th>Balthasar</th>
-            <th>Casper</th>
-            <th>Grid</th>
-            <th>Risk</th>
-        </tr>
-        {% for d in decisions %}
-        <tr>
-            <td style="color:#666;">{{ d.timestamp[:16] }}</td>
-            <td style="color:#888;">{{ d.trigger }}</td>
-            <td class="{{ d.melchior_action }}">{{ d.melchior_action }}</td>
-            <td class="{{ d.balthasar_action }}">{{ d.balthasar_action }}</td>
-            <td class="{{ d.casper_action }}">{{ d.casper_action }}</td>
-            <td class="{{ d.consensus_grid_action }}">{{ d.consensus_grid_action }}</td>
-            <td class="{{ d.consensus_risk_action }}">{{ d.consensus_risk_action }}</td>
-        </tr>
-        {% endfor %}
-    </table>
+    <!-- ── Phase 5 PANEL 3: Debate Log ───────────────────────────── -->
+    <h2>Debate Log</h2>
+    <details>
+        <summary style="cursor:pointer; color:#88aaff;">
+            Last {{ debate_log_rows|length }} triggered debates (click to expand)
+        </summary>
+        {% if debate_log_rows %}
+        <table style="margin-top:10px;">
+            <tr>
+                <th>Time</th>
+                <th>Pair</th>
+                <th>Casper held</th>
+                <th>Melchior held</th>
+                <th>Balthasar held</th>
+                <th>Any valid revision</th>
+                <th>Grid</th>
+                <th>Deadlock</th>
+                <th>Fills 6h</th>
+            </tr>
+            {% for d in debate_log_rows %}
+            <tr>
+                <td colspan="9" style="padding:0;">
+                <details class="debate-row">
+                    <summary>
+                        <table style="margin:0;"><tr>
+                            <td style="width:14%; color:#888;">{{ d.timestamp[:19] }}</td>
+                            <td style="width:14%; color:#ffaa00;">{{ d.conflict_pair or '—' }}</td>
+                            <td style="width:9%;">{% if d.casper_r1_held    is none %}—{% elif d.casper_r1_held    %}HELD{% else %}revised{% endif %}</td>
+                            <td style="width:9%;">{% if d.melchior_r1_held  is none %}—{% elif d.melchior_r1_held  %}HELD{% else %}revised{% endif %}</td>
+                            <td style="width:9%;">{% if d.balthasar_r1_held is none %}—{% elif d.balthasar_r1_held %}HELD{% else %}revised{% endif %}</td>
+                            <td style="width:11%; color:{{ '#00ff88' if d.any_revision_valid else '#888' }};">
+                                {{ 'yes' if d.any_revision_valid else 'no' }}
+                            </td>
+                            <td style="width:10%;" class="{{ d.final_grid_action }}">{{ d.final_grid_action }}</td>
+                            <td style="width:10%;" class="{{ 'HALT' if d.deadlock else '' }}">{{ 'YES' if d.deadlock else '—' }}</td>
+                            <td style="width:8%;">{{ d.fills_6h if d.fills_6h is not none else '—' }}</td>
+                        </tr></table>
+                    </summary>
+                    <div style="background:#0c0c14; padding:10px 14px; margin:4px 0; border:1px dashed #444466;">
+                        {% for ag in ['casper', 'melchior', 'balthasar'] %}
+                        <div style="margin-bottom:8px;">
+                            <span style="color:#88aaff; letter-spacing:2px; font-size:0.75em;">{{ ag|upper }}</span>
+                            {% set ev = d[ag + '_r0_evidence_list'] or [] %}
+                            {% if ev %}<ul style="margin:4px 0 4px 18px; color:#aaaacc; font-size:0.8em;">
+                                {% for e in ev %}<li>{{ e }}</li>{% endfor %}
+                            </ul>{% endif %}
+                            {% set r1 = d[ag + '_r1_text'] %}
+                            {% if r1 %}<div style="color:#ccccdd; font-size:0.78em; font-style:italic;
+                                margin:4px 0 0 18px;">r1: "{{ r1 }}"</div>{% endif %}
+                        </div>
+                        {% endfor %}
+                    </div>
+                </details>
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+        {% else %}
+        <div style="color:#666; margin-top:10px;">No triggered debates yet.</div>
+        {% endif %}
+    </details>
 
     <div class="footer">
         MAGI Phase 5 — XRP/USD Spot Grid Bot — {{ 'Paper' if paper_mode else 'Live' }} Mode
@@ -1078,6 +991,284 @@ CHART_HTML_TEMPLATE = """<!DOCTYPE html>
 </html>
 """
 
+
+# ── Phase 5: council data fetch + SVG sparkline helpers ──────────────
+
+def _svg_sparkline(values, w=80, h=24, color='#66ccff'):
+    """One-line polyline sparkline. Returns SVG markup as a string."""
+    if not values:
+        return '<svg width="{}" height="{}"></svg>'.format(w, h)
+    vmin = min(values)
+    vmax = max(values)
+    span = (vmax - vmin) or 1
+    n = len(values)
+    if n == 1:
+        y = h / 2
+        return (f'<svg width="{w}" height="{h}">'
+                f'<line x1="0" y1="{y}" x2="{w}" y2="{y}" '
+                f'stroke="{color}" stroke-width="1.5"/></svg>')
+    pts = []
+    for i, v in enumerate(values):
+        x = i * (w / (n - 1))
+        y = h - ((v - vmin) / span) * h
+        pts.append(f"{x:.1f},{y:.1f}")
+    return (f'<svg width="{w}" height="{h}">'
+            f'<polyline points="{" ".join(pts)}" '
+            f'fill="none" stroke="{color}" stroke-width="1.5"/></svg>')
+
+
+def _svg_multiline(series_dict, w=560, h=140,
+                   colors=None, y_min=0.0, y_max=1.0):
+    """Multi-series line chart on a 0..1 y-axis (default). Returns SVG."""
+    colors = colors or {'casper': '#66ccff', 'melchior': '#ffcc66',
+                        'balthasar': '#ff88aa'}
+    if not series_dict or not any(len(v) > 0 for v in series_dict.values()):
+        return '<div style="color:#666; font-size:0.8em;">No data yet.</div>'
+    n = max(len(v) for v in series_dict.values())
+    if n < 2:
+        return '<div style="color:#666; font-size:0.8em;">Need ≥2 data points.</div>'
+    span = (y_max - y_min) or 1
+    pad = 4
+    inner_w = w - 2 * pad
+    inner_h = h - 2 * pad
+    parts = [f'<svg width="{w}" height="{h}" style="background:#08080f;">']
+    # y-axis baseline
+    parts.append(f'<line x1="{pad}" y1="{h - pad}" x2="{w - pad}" y2="{h - pad}" '
+                 f'stroke="#222" stroke-width="1"/>')
+    for label, series in series_dict.items():
+        if not series:
+            continue
+        pts = []
+        for i, v in enumerate(series):
+            x = pad + i * (inner_w / (n - 1))
+            y = pad + inner_h - ((float(v) - y_min) / span) * inner_h
+            pts.append(f"{x:.1f},{y:.1f}")
+        parts.append(f'<polyline points="{" ".join(pts)}" '
+                     f'fill="none" stroke="{colors.get(label, "#888")}" '
+                     f'stroke-width="1.5"/>')
+    parts.append('</svg>')
+    return ''.join(parts)
+
+
+def _svg_agreement(series, w=560, h=140, color='#88cc88'):
+    """Single-series area + line for agreement rate 0..100."""
+    if not series:
+        return '<div style="color:#666; font-size:0.8em;">No data yet.</div>'
+    values = [s.get('rate', 0) for s in series]
+    return _svg_multiline({'rate': values}, w=w, h=h,
+                          colors={'rate': color}, y_min=0.0, y_max=100.0)
+
+
+def _svg_bars(items, w=540, h=120, color='#ffaa00'):
+    """Horizontal bar chart for (tag, count) tuples. Items sorted by caller."""
+    if not items:
+        return '<div style="color:#666; font-size:0.8em;">No overrides.</div>'
+    n = len(items)
+    bar_h = max(10, min(22, (h - 8) // n - 4))
+    label_w = 160
+    total_h = (bar_h + 6) * n + 8
+    max_v = max((c for _, c in items), default=1) or 1
+    parts = [f'<svg width="{w}" height="{total_h}" style="background:#08080f;">']
+    for i, (tag, count) in enumerate(items):
+        y = 4 + i * (bar_h + 6)
+        bar_w = int((count / max_v) * (w - label_w - 50))
+        parts.append(f'<text x="0" y="{y + bar_h - 3}" fill="#ccc" '
+                     f'font-size="11">{tag}</text>')
+        parts.append(f'<rect x="{label_w}" y="{y}" width="{bar_w}" '
+                     f'height="{bar_h}" fill="{color}" opacity="0.85"/>')
+        parts.append(f'<text x="{label_w + bar_w + 6}" y="{y + bar_h - 3}" '
+                     f'fill="#ffcc66" font-size="11">{count}</text>')
+    parts.append('</svg>')
+    return ''.join(parts)
+
+
+def _fetch_council_data():
+    """
+    Single-call fetcher for all five council panels. Returns a dict that the
+    index() route can splat into render_template_string. All values are
+    JSON-serialisable (no SQLite Row objects).
+    """
+    import json as _json
+    import re as _re
+    from datetime import datetime as _dt, timedelta as _td
+    from database import (
+        get_conn, get_recent_debate_records,
+        get_agent_accuracy, get_capitulation_rate,
+    )
+
+    recent = get_recent_debate_records(limit=1)
+    latest_debate = recent[0] if recent else None
+
+    override_tags = []
+    if latest_debate:
+        # Parse JSON-encoded evidence into Python lists for the template
+        for agent in ('casper', 'melchior', 'balthasar'):
+            ev = latest_debate.get(f'{agent}_r0_evidence')
+            if ev and isinstance(ev, str):
+                try:
+                    latest_debate[f'{agent}_r0_evidence_list'] = _json.loads(ev)
+                except (ValueError, TypeError):
+                    latest_debate[f'{agent}_r0_evidence_list'] = []
+            else:
+                latest_debate[f'{agent}_r0_evidence_list'] = ev or []
+        # Look up the matching legacy magi_decisions row to recover the
+        # bracketed override tags from the `notes` field (hard_rule_overrides
+        # is not persisted in debate_records).
+        conn0 = get_conn()
+        nrow = conn0.execute(
+            "SELECT notes FROM magi_decisions ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn0.close()
+        if nrow and nrow['notes']:
+            override_tags = sorted(set(_re.findall(r"\[([A-Z_]+)\]", nrow['notes'])))
+
+    # Per-agent accuracy + capitulation cards
+    council_accuracy = {}
+    for a in ('casper', 'melchior', 'balthasar'):
+        council_accuracy[a] = {
+            'acc_7d':    get_agent_accuracy(a, 7),
+            'acc_30d':   get_agent_accuracy(a, 30),
+            'capit_30d': get_capitulation_rate(a, 30),
+        }
+
+    conn = get_conn()
+
+    # Sparkline data — last 30 cycles, ordered oldest → newest
+    rows = conn.execute(
+        "SELECT casper_r0_conviction, melchior_r0_conviction, balthasar_r0_conviction "
+        "FROM debate_records ORDER BY id DESC LIMIT 30"
+    ).fetchall()
+    sparkline_data = {a: [] for a in ('casper', 'melchior', 'balthasar')}
+    for r in reversed(rows):
+        for a in sparkline_data:
+            v = r[f'{a}_r0_conviction']
+            sparkline_data[a].append(float(v) if v is not None else 0.0)
+    sparklines_svg = {
+        a: _svg_sparkline(sparkline_data[a], w=140, h=28,
+                          color={'casper': '#66ccff', 'melchior': '#ffcc66',
+                                 'balthasar': '#ff88aa'}[a])
+        for a in sparkline_data
+    }
+
+    # Debate log — last 30 triggered debates
+    debate_rows = conn.execute(
+        "SELECT cycle_id, timestamp, conflict_pair, "
+        "casper_r1_held, melchior_r1_held, balthasar_r1_held, "
+        "casper_revision_valid, melchior_revision_valid, balthasar_revision_valid, "
+        "casper_r1_text, melchior_r1_text, balthasar_r1_text, "
+        "casper_r0_evidence, melchior_r0_evidence, balthasar_r0_evidence, "
+        "final_grid_action, deadlock, fills_6h "
+        "FROM debate_records WHERE debate_triggered=1 "
+        "ORDER BY id DESC LIMIT 30"
+    ).fetchall()
+    debate_log = []
+    for r in debate_rows:
+        d = dict(r)
+        for a in ('casper', 'melchior', 'balthasar'):
+            ev = d.get(f'{a}_r0_evidence')
+            try:
+                d[f'{a}_r0_evidence_list'] = _json.loads(ev) if ev else []
+            except (ValueError, TypeError):
+                d[f'{a}_r0_evidence_list'] = []
+        d['any_revision_valid'] = (
+            d.get('casper_revision_valid') == 1
+            or d.get('melchior_revision_valid') == 1
+            or d.get('balthasar_revision_valid') == 1
+        )
+        debate_log.append(d)
+
+    cutoff = (_dt.utcnow() - _td(days=30)).isoformat()
+
+    # Daily agreement rate
+    agreement_rows = conn.execute(
+        "SELECT DATE(timestamp) AS d, "
+        "SUM(CASE WHEN debate_triggered=0 THEN 1 ELSE 0 END) AS agree, "
+        "COUNT(*) AS total "
+        "FROM debate_records WHERE timestamp >= ? "
+        "GROUP BY DATE(timestamp) ORDER BY d ASC",
+        (cutoff,)
+    ).fetchall()
+    agreement_series = [
+        {'date': r['d'], 'rate': round((r['agree'] / r['total'] * 100), 2) if r['total'] else 0.0}
+        for r in agreement_rows
+    ]
+
+    # Daily avg conviction per agent
+    conv_rows = conn.execute(
+        "SELECT DATE(timestamp) AS d, "
+        "AVG(casper_r0_conviction) AS c, "
+        "AVG(melchior_r0_conviction) AS m, "
+        "AVG(balthasar_r0_conviction) AS b "
+        "FROM debate_records WHERE timestamp >= ? "
+        "GROUP BY DATE(timestamp) ORDER BY d ASC",
+        (cutoff,)
+    ).fetchall()
+    conviction_series = {
+        'dates':     [r['d'] for r in conv_rows],
+        'casper':    [float(r['c'] or 0) for r in conv_rows],
+        'melchior':  [float(r['m'] or 0) for r in conv_rows],
+        'balthasar': [float(r['b'] or 0) for r in conv_rows],
+    }
+
+    # Hard-rule overrides — parse from magi_decisions.notes
+    notes_rows = conn.execute(
+        "SELECT notes FROM magi_decisions WHERE timestamp >= ?", (cutoff,)
+    ).fetchall()
+    tag_counts = {}
+    for r in notes_rows:
+        for tag in _re.findall(r"\[([A-Z_]+)\]", r['notes'] or ''):
+            tag_counts[tag] = tag_counts.get(tag, 0) + 1
+    override_counts = sorted(tag_counts.items(), key=lambda kv: kv[1], reverse=True)
+
+    # Outcome attribution
+    best_rows = conn.execute(
+        "SELECT timestamp, final_grid_action, "
+        "casper_r0_position, melchior_r0_position, balthasar_r0_position, "
+        "fills_24h, pnl_24h FROM debate_records "
+        "WHERE timestamp >= ? AND outcome_24h_backfilled=1 "
+        "ORDER BY pnl_24h DESC LIMIT 5", (cutoff,)
+    ).fetchall()
+    worst_rows = conn.execute(
+        "SELECT timestamp, final_grid_action, "
+        "casper_r0_position, melchior_r0_position, balthasar_r0_position, "
+        "fills_24h, pnl_24h FROM debate_records "
+        "WHERE timestamp >= ? AND outcome_24h_backfilled=1 "
+        "ORDER BY pnl_24h ASC LIMIT 5", (cutoff,)
+    ).fetchall()
+    summary_rows = conn.execute(
+        "SELECT final_grid_action AS action, COUNT(*) AS count, "
+        "AVG(fills_24h) AS avg_fills, AVG(pnl_24h) AS avg_pnl "
+        "FROM debate_records WHERE timestamp >= ? AND outcome_24h_backfilled=1 "
+        "GROUP BY final_grid_action ORDER BY avg_pnl DESC",
+        (cutoff,)
+    ).fetchall()
+
+    conn.close()
+
+    # Convert convictions 0..1 → 0..100% so the multiline chart shares a y-axis
+    conv_for_chart = {k: [v * 100.0 for v in conviction_series[k]]
+                      for k in ('casper', 'melchior', 'balthasar')}
+
+    return {
+        'latest_debate':          latest_debate,
+        'council_override_tags':  override_tags,
+        'council_accuracy':       council_accuracy,
+        'conviction_sparklines_svg': sparklines_svg,
+        'debate_log_rows':        debate_log,
+        'evolution_agreement':    agreement_series,
+        'evolution_agreement_svg': _svg_agreement(agreement_series, w=480, h=120),
+        'evolution_convictions':  conviction_series,
+        'evolution_convictions_svg': _svg_multiline(
+            conv_for_chart, w=480, h=120, y_min=0.0, y_max=100.0
+        ),
+        'evolution_overrides':    override_counts,
+        'evolution_overrides_svg': _svg_bars(override_counts, w=960, h=200),
+        'attribution_best':       [dict(r) for r in best_rows],
+        'attribution_worst':      [dict(r) for r in worst_rows],
+        'action_summary':         [dict(r) for r in summary_rows],
+    }
+
+
 def check_scheduler_alive():
     try:
         log_path = '/root/xrp_grid/magi.log'
@@ -1088,38 +1279,6 @@ def check_scheduler_alive():
         return age_minutes < 90
     except Exception:
         return False
-
-
-def _decision_age(latest_decision):
-    """Return (display_ts, age_label, age_color) for the latest MAGI decision."""
-    if not latest_decision:
-        return '', None, '#666'
-    try:
-        ts_str = latest_decision['timestamp']
-        if not ts_str:
-            return '', None, '#666'
-        ts = datetime.fromisoformat(str(ts_str).replace('Z', '+00:00'))
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        display_ts = ts_str[:16]
-        age_secs = (datetime.now(timezone.utc) - ts).total_seconds()
-        age_mins = int(age_secs / 60)
-        if age_mins < 60:
-            age_label = f"{age_mins} minute{'s' if age_mins != 1 else ''} ago"
-        elif age_mins < 120:
-            h, m = divmod(age_mins, 60)
-            age_label = f"{h}h {m}m ago"
-        else:
-            age_label = f"{age_mins // 60:.0f} hours ago"
-        if age_mins < 120:
-            color = '#00ff88'
-        elif age_mins < 480:
-            color = '#ffaa00'
-        else:
-            color = '#ff4444'
-        return display_ts, age_label, color
-    except Exception:
-        return str(latest_decision.get('timestamp', ''))[:16] if hasattr(latest_decision, 'get') else '', None, '#666'
 
 
 _do_billing_cache = {'data': None, 'expires': 0}
@@ -1184,8 +1343,6 @@ def index():
     indicators = get_latest_indicators('1h') or {}
     grid = get_current_grid_state() or {}
     inventory = get_latest_inventory() or {}
-    decisions = get_recent_magi_decisions(10)
-    latest_decision = decisions[0] if decisions else None
     price = engine.get_current_price() or 0.0
 
     cost_today_data = get_cost_today()
@@ -1250,21 +1407,6 @@ def index():
 
     recent_orders = get_recent_grid_orders(limit=25)
 
-    # Supervisor decisions — read directly (no dedicated helper in database.py)
-    from database import get_conn as _gc
-    _sc = _gc()
-    _sup_rows = _sc.execute(
-        "SELECT timestamp, council_grid_action, council_risk_action, "
-        "supervisor_action, override_target, shadow_mode, reasoning "
-        "FROM supervisor_decisions "
-        "ORDER BY timestamp DESC LIMIT 5"
-    ).fetchall()
-    _sc.close()
-    supervisor_decisions_list = [dict(r) for r in _sup_rows]
-    latest_supervisor = supervisor_decisions_list[0] if supervisor_decisions_list else None
-
-    decision_ts_display, decision_age_label, decision_age_color = _decision_age(latest_decision)
-
     mins_since = snap.get('time_since_last_fill_minutes')
     if mins_since is None:
         fill_age_label = "no fills yet"
@@ -1322,10 +1464,6 @@ def index():
         llm_over_budget=llm_over_budget,
         llm_monthly_budget=LLM_MONTHLY_BUDGET_USD,
         agent_runway=agent_runway,
-        latest_decision=latest_decision,
-        decisions=decisions,
-        latest_supervisor=latest_supervisor,
-        supervisor_decisions=supervisor_decisions_list,
         scheduler_alive=check_scheduler_alive(),
         guardrails_ok=guardrails_ok,
         guardrail_failures=guardrail_failures,
@@ -1359,11 +1497,9 @@ def index():
         # Recent orders table
         recent_orders=recent_orders,
         order_pnl_map=snap['order_pnl_map'],
-        # MAGI decision age (FIX 3)
-        decision_ts_display=decision_ts_display,
-        decision_age_label=decision_age_label,
-        decision_age_color=decision_age_color,
         magi_token=os.environ.get('MAGI_TRIGGER_TOKEN', ''),
+        # Phase 5: agent council panels (single splat from helper)
+        **_fetch_council_data(),
     )
 
 
@@ -1499,6 +1635,77 @@ def api_active_grid_levels():
 @app.route('/chart')
 def chart():
     return CHART_HTML_TEMPLATE
+
+
+# ── Phase 5: council API routes ─────────────────────────────────────
+
+@app.route('/api/council/latest')
+def api_council_latest():
+    """Most recent debate_records row as JSON (evidence parsed to list)."""
+    from database import get_recent_debate_records
+    import json as _json
+    rows = get_recent_debate_records(limit=1)
+    if not rows:
+        return jsonify(None)
+    row = rows[0]
+    for agent in ('casper', 'melchior', 'balthasar'):
+        ev = row.get(f'{agent}_r0_evidence')
+        if isinstance(ev, str) and ev:
+            try:
+                row[f'{agent}_r0_evidence'] = _json.loads(ev)
+            except (ValueError, TypeError):
+                pass
+    return jsonify(row)
+
+
+@app.route('/api/council/history')
+def api_council_history():
+    """List of recent debate_records. ?limit=N (default 20, max 200)."""
+    from database import get_recent_debate_records
+    import json as _json
+    try:
+        n = int(request.args.get('limit', 20))
+    except (TypeError, ValueError):
+        n = 20
+    n = max(1, min(n, 200))
+    rows = get_recent_debate_records(limit=n)
+    for row in rows:
+        for agent in ('casper', 'melchior', 'balthasar'):
+            ev = row.get(f'{agent}_r0_evidence')
+            if isinstance(ev, str) and ev:
+                try:
+                    row[f'{agent}_r0_evidence'] = _json.loads(ev)
+                except (ValueError, TypeError):
+                    pass
+    return jsonify(rows)
+
+
+@app.route('/api/council/accuracy')
+def api_council_accuracy():
+    """{casper, melchior, balthasar} → {acc_7d, acc_30d, capit_30d}."""
+    from database import get_agent_accuracy, get_capitulation_rate
+    out = {}
+    for a in ('casper', 'melchior', 'balthasar'):
+        out[a] = {
+            'acc_7d':    get_agent_accuracy(a, 7),
+            'acc_30d':   get_agent_accuracy(a, 30),
+            'capit_30d': get_capitulation_rate(a, 30),
+        }
+    return jsonify(out)
+
+
+@app.route('/api/council/evolution')
+def api_council_evolution():
+    """Time-series data for the evolution charts (30d). All JSON-serialisable."""
+    data = _fetch_council_data()
+    return jsonify({
+        'agreement':         data['evolution_agreement'],
+        'convictions':       data['evolution_convictions'],
+        'overrides':         data['evolution_overrides'],
+        'attribution_best':  data['attribution_best'],
+        'attribution_worst': data['attribution_worst'],
+        'action_summary':    data['action_summary'],
+    })
 
 
 if __name__ == "__main__":

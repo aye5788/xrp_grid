@@ -6,3 +6,8 @@ __pycache__/
 venv/
 HALT
 magi.log
+
+# Env files and backups — never commit (added 2026-05-16 after push protection block)
+.env
+.env.*
+*.bak
