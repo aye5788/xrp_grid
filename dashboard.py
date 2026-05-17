@@ -33,97 +33,359 @@ HTML_TEMPLATE = """
     <title>MAGI — XRP Grid Bot</title>
     <meta http-equiv="refresh" content="30">
     <style>
-        body { font-family: monospace; background: #0a0a0a; color: #00ff88; margin: 0; padding: 20px; }
-        h1 { color: #00ffcc; border-bottom: 1px solid #00ff88; padding-bottom: 10px; }
-        h2 { color: #00ccff; margin-top: 30px; font-size: 1em; text-transform: uppercase; letter-spacing: 2px; }
-        .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin: 20px 0; }
-        .card { background: #111; border: 1px solid #00ff8844; padding: 15px; border-radius: 4px; }
-        .card .label { color: #888; font-size: 0.8em; margin-bottom: 5px; }
-        .card .value { color: #00ff88; font-size: 1.4em; font-weight: bold; }
-        .card .sub { color: #666; font-size: 0.75em; margin-top: 4px; }
-        table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.8em; }
-        th { color: #00ccff; text-align: left; padding: 6px; border-bottom: 1px solid #00ff8844; }
-        td { padding: 6px; border-bottom: 1px solid #ffffff11; }
-        .RANGING { color: #00ff88; } .TRENDING { color: #ff4444; } .UNCERTAIN { color: #ffaa00; }
-        .MAINTAIN { color: #00ff88; } .TIGHTEN { color: #00ccff; } .WIDEN { color: #ffaa00; } .RECENTRE { color: #ff88ff; } .HALT { color: #ff0000; }
-        .CLEAR { color: #00ff88; } .PAUSE_LONGS { color: #ffaa00; } .PAUSE_SHORTS { color: #ffaa00; }
-        .LOW { color: #00ff88; } .MEDIUM { color: #ffaa00; } .HIGH { color: #ff4444; }
-        .APPROVE { color: #00ff88; } .OVERRIDE { color: #ffaa00; }
-        .LIVE { color: #ff4444; font-weight: bold; } .SHADOW { color: #888; }
-        .status-ok { color: #00ff88; } .status-err { color: #ff4444; }
-        .agent-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px; margin: 15px 0; }
-        .agent-card { background: #111; border: 1px solid #00ff8833; padding: 12px; border-radius: 4px; }
-        .agent-name { color: #00ccff; font-size: 0.75em; margin-bottom: 6px; text-transform: uppercase; }
-        .footer { margin-top: 40px; color: #333; font-size: 0.7em; border-top: 1px solid #222; padding-top: 10px; }
-        .pnl-pos { color: #00ff88; }
-        .pnl-neg { color: #ff4444; }
-        .pnl-zero { color: #666; }
-        .side-buy { color: #00ff88; }
-        .side-sell { color: #ff4444; }
-        .status-filled { color: #00ff88; }
-        .status-cancelled { color: #ff4444; }
-        .status-open { color: #ffaa00; }
+      :root {
+        --bg: #000000;
+        --panel-bg: #0a0a0a;
+        --magi-cyan: #00d4d4;
+        --magi-cyan-fill: #1a8c8c;
+        --magi-orange: #ff6600;
+        --magi-orange-bright: #ff9933;
+        --magi-red: #cc0000;
+        --magi-red-bright: #ff3333;
+        --magi-text: #ff9933;
+        --magi-text-dim: #cc7722;
+        --magi-grid: #221100;
+        --signal-green: #00ff66;
+        --signal-amber: #ffaa00;
+        --signal-red: #ff3333;
+      }
 
-        /* ── Phase 5: agent council panels ───────────────────────── */
-        .council-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin: 14px 0; }
-        .council-card {
-            background: #0e0e16;
-            border: 1px solid #4488ff66;
-            padding: 14px;
-            border-radius: 4px;
-            position: relative;
-        }
-        .council-name {
-            color: #88aaff; font-size: 0.8em; letter-spacing: 2px;
-            text-transform: uppercase; margin-bottom: 6px;
-        }
-        .council-pos {
-            font-size: 1.4em; font-weight: bold; letter-spacing: 2px;
-            margin: 4px 0 8px;
-        }
-        .conv-track {
-            height: 6px; background: #1a1a26; border: 1px solid #444;
-            border-radius: 2px; overflow: hidden; margin: 6px 0 8px;
-        }
-        .conv-fill { height: 100%; background: linear-gradient(to right, #4488ff, #66ccff); }
-        .conv-pct { color: #88aaff; font-size: 0.75em; margin-left: 6px; }
-        .council-crux { color: #ccccdd; font-size: 0.82em; font-style: italic;
-            border-left: 2px solid #4488ff; padding-left: 8px; margin: 8px 0; }
-        .council-evidence { color: #aaaacc; font-size: 0.75em; line-height: 1.5;
-            margin: 6px 0 0 14px; padding: 0; }
-        .council-evidence li { margin: 0; }
-        .debate-flag-yes { color: #ffaa00; font-weight: bold; }
-        .debate-flag-no  { color: #66cc88; }
-        .deadlock-banner {
-            background: #330000; border: 2px solid #ff4444;
-            color: #ff8888; padding: 10px 14px; margin: 12px 0; text-align: center;
-            font-weight: bold; letter-spacing: 1px;
-        }
-        .override-line {
-            background: #221a00; border-left: 3px solid #ffaa00;
-            color: #ffcc66; padding: 6px 10px; margin: 8px 0; font-size: 0.82em;
-        }
-        .accuracy-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
-        .accuracy-card {
-            background: #0a0e0a; border: 1px solid #00aa6644;
-            padding: 12px; border-radius: 4px;
-        }
-        .accuracy-line { font-size: 0.85em; color: #88cc88; margin: 4px 0; }
-        .accuracy-line .num { color: #00ff88; font-weight: bold; }
-        .accuracy-line .num.bad { color: #ff8866; }
-        details.debate-row > summary { cursor: pointer; padding: 4px; }
-        details.debate-row > summary:hover { background: #1a1a2a; }
-        details.debate-row[open] > summary { background: #161624; }
-        .evolution-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
-        .evo-card { background: #0c0c14; border: 1px solid #444466;
-            padding: 14px; border-radius: 4px; }
-        .evo-title { color: #99aacc; font-size: 0.8em; letter-spacing: 1px;
-            text-transform: uppercase; margin-bottom: 8px; }
-        .attribution-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
-        .attribution-card {
-            background: #0c0c14; border: 1px solid #444466;
-            padding: 14px; border-radius: 4px;
-        }
+      body {
+        background: var(--bg);
+        background-image:
+          repeating-linear-gradient(0deg,
+            transparent 0, transparent 39px,
+            var(--magi-grid) 39px, var(--magi-grid) 40px),
+          repeating-linear-gradient(90deg,
+            transparent 0, transparent 39px,
+            var(--magi-grid) 39px, var(--magi-grid) 40px);
+        color: var(--magi-text);
+        font-family: "Courier New", "Consolas", "Liberation Mono", monospace;
+        margin: 0;
+        padding: 20px;
+        letter-spacing: 0.5px;
+      }
+
+      h1 {
+        color: var(--magi-orange-bright);
+        font-family: "Arial Black", "Helvetica", sans-serif;
+        font-weight: 900;
+        font-size: 22px;
+        letter-spacing: 4px;
+        text-transform: uppercase;
+        border-bottom: 2px solid var(--magi-orange);
+        padding-bottom: 8px;
+        margin: 0 0 12px 0;
+      }
+
+      h2 {
+        color: var(--magi-orange);
+        font-family: "Arial Black", "Helvetica", sans-serif;
+        font-weight: 900;
+        font-size: 13px;
+        letter-spacing: 3px;
+        text-transform: uppercase;
+        margin: 28px 0 12px 0;
+        border-left: 4px solid var(--magi-orange);
+        padding-left: 10px;
+      }
+
+      /* Generic cards (Market, Grid State, Paper P&L, Inventory, Costs) */
+      .card {
+        background: var(--panel-bg);
+        border: 2px solid var(--magi-orange);
+        padding: 14px 18px;
+        margin-bottom: 8px;
+        position: relative;
+      }
+      .card::before {
+        content: "";
+        position: absolute;
+        top: -2px; left: -2px;
+        width: 12px; height: 12px;
+        border-top: 2px solid var(--magi-orange-bright);
+        border-left: 2px solid var(--magi-orange-bright);
+      }
+      .card::after {
+        content: "";
+        position: absolute;
+        bottom: -2px; right: -2px;
+        width: 12px; height: 12px;
+        border-bottom: 2px solid var(--magi-orange-bright);
+        border-right: 2px solid var(--magi-orange-bright);
+      }
+      .card .label, .card .field-label {
+        color: var(--magi-text-dim);
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 2px;
+        margin-bottom: 4px;
+      }
+      .card .value {
+        color: var(--magi-orange-bright);
+        font-size: 22px;
+        font-weight: bold;
+        font-family: "Courier New", monospace;
+      }
+      .card .sub {
+        color: var(--magi-text-dim);
+        font-size: 11px;
+        margin-top: 2px;
+      }
+
+      /* Multi-card rows (3-up, 2-up) */
+      .row {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 12px;
+      }
+      .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+      /* AGENT COUNCIL — the three MAGI panels */
+      .council-row {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 16px;
+        margin-bottom: 20px;
+      }
+      .council-card {
+        background: #0a0a0a;
+        background-image: repeating-linear-gradient(
+          to bottom,
+          transparent 0px, transparent 2px,
+          rgba(255, 153, 0, 0.05) 2px, rgba(255, 153, 0, 0.05) 3px
+        );
+        border: 1px solid #ff9900;
+        outline: 1px solid #331100;
+        outline-offset: 2px;
+        color: #ffaa00;
+        padding: 20px 22px;
+        position: relative;
+        font-family: "Courier New", "Consolas", monospace;
+      }
+      .council-card .council-name {
+        font-family: "Courier New", monospace;
+        color: #ff9900;
+        font-size: 13px;
+        letter-spacing: 4px;
+        text-transform: uppercase;
+        font-weight: bold;
+        padding-bottom: 10px;
+        border-bottom: 1px solid #663300;
+        margin-bottom: 16px;
+        display: block;
+      }
+      .council-card .council-pos {
+        font-family: "Arial Black", "Helvetica", sans-serif;
+        font-weight: 900;
+        font-size: 38px;
+        letter-spacing: 6px;
+        color: #ffaa00;
+        text-shadow: 0 0 12px rgba(255, 170, 0, 0.5);
+        margin: 10px 0 18px 0;
+        text-transform: uppercase;
+        line-height: 1.1;
+        display: block;
+      }
+      .council-card .conv-track {
+        display: flex;
+        gap: 4px;
+        height: 16px;
+        background: transparent;
+        border: none;
+        margin: 10px 0 16px 0;
+        align-items: center;
+      }
+      .council-card .conv-track::before {
+        content: "CONV";
+        color: #cc7722;
+        font-size: 10px;
+        letter-spacing: 2px;
+        margin-right: 10px;
+        font-family: "Courier New", monospace;
+      }
+      .council-card .conv-fill {
+        display: none;
+      }
+      .council-card .conv-seg {
+        flex: 1;
+        height: 100%;
+        border: 1px solid #ff9900;
+        background: transparent;
+        box-sizing: border-box;
+      }
+      .council-card .conv-seg.active {
+        background: #ffaa00;
+        box-shadow: inset 0 0 6px rgba(255, 170, 0, 0.7), 0 0 4px rgba(255, 170, 0, 0.4);
+      }
+      .council-card .council-crux {
+        font-style: italic;
+        color: #cc8833;
+        font-size: 12px;
+        background: rgba(255, 153, 0, 0.05);
+        border-left: 3px solid #ff9900;
+        padding: 10px 14px;
+        margin: 14px 0;
+        line-height: 1.5;
+      }
+      .council-card .council-evidence {
+        list-style: none;
+        padding: 0;
+        margin: 10px 0 0 0;
+        color: #cc7722;
+        font-size: 11px;
+        font-family: "Courier New", monospace;
+        line-height: 1.6;
+      }
+      .council-card .council-evidence li {
+        padding: 2px 0 2px 18px;
+        position: relative;
+      }
+      .council-card .council-evidence li::before {
+        content: "›";
+        position: absolute;
+        left: 0;
+        color: #ff9900;
+        font-weight: bold;
+      }
+      .deadlock-banner {
+        background: #220000;
+        border: 1px solid #cc0000;
+        outline: 1px solid #440000;
+        outline-offset: 2px;
+        color: #ff3333;
+        font-family: "Arial Black", sans-serif;
+        letter-spacing: 4px;
+        text-align: center;
+        padding: 12px;
+        margin: 10px 0;
+        text-transform: uppercase;
+      }
+      .override-line {
+        color: #ff6633;
+        font-size: 11px;
+        letter-spacing: 2px;
+        text-transform: uppercase;
+        font-family: "Courier New", monospace;
+      }
+
+      /* Signal colors for trading positions (semantic — keep) */
+      .pos-TRENDING, .pos-HALT, .risk-HALT, .risk-PAUSE_LONGS {
+        color: var(--signal-red);
+      }
+      .pos-MAINTAIN, .pos-WIDEN, .pos-TIGHTEN, .pos-RECENTRE {
+        color: var(--signal-amber);
+      }
+      .pos-RANGE, .pos-SIDEWAYS, .pos-CLEAR, .risk-CLEAR {
+        color: var(--signal-green);
+      }
+
+      /* Tables (recent orders, costs per-agent, shadow variants) */
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        background: var(--panel-bg);
+        border: 2px solid var(--magi-orange);
+        font-family: "Courier New", monospace;
+        font-size: 12px;
+      }
+      th {
+        background: var(--magi-orange);
+        color: #000;
+        text-align: left;
+        padding: 8px 10px;
+        font-family: "Arial Black", sans-serif;
+        letter-spacing: 2px;
+        text-transform: uppercase;
+        font-size: 11px;
+      }
+      td {
+        color: var(--magi-text);
+        padding: 6px 10px;
+        border-bottom: 1px solid #2a1500;
+      }
+      tr:hover td { background: #1a0d00; }
+
+      /* Manual actions (buttons) */
+      button, .button {
+        background: var(--panel-bg);
+        color: var(--magi-orange-bright);
+        border: 2px solid var(--magi-orange);
+        padding: 10px 18px;
+        font-family: "Arial Black", sans-serif;
+        font-size: 12px;
+        letter-spacing: 3px;
+        text-transform: uppercase;
+        cursor: pointer;
+        margin: 4px;
+      }
+      button:hover, .button:hover {
+        background: var(--magi-orange);
+        color: #000;
+      }
+      button.danger, .button.danger {
+        color: var(--magi-red-bright);
+        border-color: var(--magi-red);
+      }
+      button.danger:hover, .button.danger:hover {
+        background: var(--magi-red);
+        color: #fff;
+      }
+
+      /* Council Accuracy, Council Evolution, Outcome Attribution cards */
+      .accuracy-card, .evo-card, .attribution-card {
+        background: var(--panel-bg);
+        border: 2px solid var(--magi-orange);
+        padding: 14px 18px;
+      }
+      .accuracy-card .agent-name {
+        font-family: "Arial Black", sans-serif;
+        color: var(--magi-orange-bright);
+        letter-spacing: 3px;
+        margin-bottom: 8px;
+      }
+      .evolution-grid, .attribution-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+
+      /* Debate log collapsible */
+      details.debate-row {
+        background: var(--panel-bg);
+        border: 1px solid var(--magi-orange);
+        padding: 8px 12px;
+        margin: 4px 0;
+      }
+      details.debate-row summary {
+        color: var(--magi-orange-bright);
+        cursor: pointer;
+        font-family: "Courier New", monospace;
+        font-size: 12px;
+      }
+
+      /* Header status indicators */
+      .status-bar {
+        color: var(--magi-text-dim);
+        font-size: 11px;
+        letter-spacing: 1px;
+        margin-bottom: 16px;
+      }
+      .status-dot {
+        display: inline-block;
+        width: 8px; height: 8px;
+        background: var(--signal-green);
+        border-radius: 50%;
+        margin-right: 4px;
+        vertical-align: middle;
+      }
+      .status-dot.warn { background: var(--signal-amber); }
+      .status-dot.fail { background: var(--signal-red); }
+
+      /* SVG charts inherit colors */
+      svg text { fill: var(--magi-text); font-family: "Courier New", monospace; font-size: 10px; }
+      svg .axis-line { stroke: var(--magi-text-dim); }
+      svg .data-line { stroke: var(--magi-orange-bright); fill: none; stroke-width: 2; }
     </style>
 </head>
 <body>
@@ -217,7 +479,11 @@ HTML_TEMPLATE = """
         <div class="council-card">
             <div class="council-name">{{ agent }}</div>
             <div class="council-pos {{ pos }}">{{ pos }}</div>
-            <div class="conv-track"><div class="conv-fill" style="width:{{ (conv*100)|round(0)|int }}%;"></div></div>
+            <div class="conv-track">
+              <div class="conv-seg {{ 'active' if conv >= 0.34 else '' }}"></div>
+              <div class="conv-seg {{ 'active' if conv >= 0.67 else '' }}"></div>
+              <div class="conv-seg {{ 'active' if conv >= 0.90 else '' }}"></div>
+            </div>
             <div class="conv-pct">conviction {{ (conv*100)|round(0)|int }}%</div>
             {% if crux %}<div class="council-crux">"{{ crux }}"</div>{% endif %}
             {% if evidence %}
