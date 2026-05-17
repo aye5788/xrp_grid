@@ -103,11 +103,16 @@ def init_db():
 
     # Add Melchior geometry columns to magi_decisions (idempotent — wrap each
     # ALTER in try/except so re-runs are a no-op once the column exists).
+    # Also adds balthasar_concerns and casper_concerns for schema symmetry
+    # with melchior_concerns (the dual-write payload in orchestrator now
+    # writes None for these but the columns must exist).
     for _alter in (
         "ALTER TABLE magi_decisions ADD COLUMN melchior_centre_price REAL",
         "ALTER TABLE magi_decisions ADD COLUMN melchior_target_spacing_pct REAL",
         "ALTER TABLE magi_decisions ADD COLUMN melchior_buy_level_bias REAL",
         "ALTER TABLE magi_decisions ADD COLUMN melchior_sell_level_bias REAL",
+        "ALTER TABLE magi_decisions ADD COLUMN balthasar_concerns TEXT",
+        "ALTER TABLE magi_decisions ADD COLUMN casper_concerns TEXT",
     ):
         try:
             c.execute(_alter)
@@ -251,7 +256,9 @@ def init_db():
 
         outcome_1h_backfilled INTEGER DEFAULT 0,
         outcome_6h_backfilled INTEGER DEFAULT 0,
-        outcome_24h_backfilled INTEGER DEFAULT 0
+        outcome_24h_backfilled INTEGER DEFAULT 0,
+
+        hard_rule_overrides TEXT
     )''')
     c.execute('''CREATE INDEX IF NOT EXISTS idx_debate_records_cycle_id
         ON debate_records (cycle_id)''')
@@ -261,7 +268,7 @@ def init_db():
     # Future-proof ALTERs for debate_records (idempotent — match the
     # try/except pattern used above for magi_decisions).
     for _alter in (
-        # placeholder; e.g. "ALTER TABLE debate_records ADD COLUMN notes TEXT"
+        "ALTER TABLE debate_records ADD COLUMN hard_rule_overrides TEXT",
     ):
         try:
             c.execute(_alter)
@@ -612,6 +619,11 @@ def mark_magi_decision_applied(decision_id):
     conn.close()
 
 
+# Source of truth: Phase 5 writes to debate_records (canonical) AND
+# dual-writes to magi_decisions for legacy readers (dashboard hard-rule tag
+# parser, learning.py, extract_test_cases.py, scheduler startup-debounce).
+# Use debate_records for new code; reuse this helper only when you need the
+# legacy column shape (e.g. .notes, .applied) the dashboard parses.
 def get_recent_magi_decisions(limit=10):
     conn = get_conn()
     rows = conn.execute('''SELECT * FROM magi_decisions
@@ -1014,6 +1026,8 @@ def insert_debate_record(record_dict):
 
     for key, val in list(data.items()):
         if key.endswith('_evidence') and isinstance(val, (list, dict)):
+            data[key] = json.dumps(val)
+        elif key == 'hard_rule_overrides' and isinstance(val, (list, dict)):
             data[key] = json.dumps(val)
 
     fields = ', '.join(data.keys())

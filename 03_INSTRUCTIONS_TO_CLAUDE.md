@@ -4,15 +4,24 @@ defaults where they conflict.
 
 ## Read first, every session
 
-1. `00_PROJECT_OVERVIEW.md` — what the system is
-2. `01_CURRENT_STATE.md` — where it is, what's verified
-3. `02_NEXT_BUILD_TASKS.md` — what to do next
-4. The connected GitHub repo (aye5788/xrp_grid) — actual current code
-5. The most recent prior session if context relevant
+1. `CLAUDE.md` — operating discipline, architecture intent, recurring
+   failure patterns (Claude Code auto-loads this; chat sessions should
+   open it explicitly)
+2. `00_PROJECT_OVERVIEW.md` — what the system is
+3. `01_CURRENT_STATE.md` — where it is, what's verified, session change log
+4. `02_NEXT_BUILD_TASKS.md` — what to do next, in priority order
+5. The connected GitHub repo (`aye5788/xrp_grid`) — actual current code
+6. The most recent prior session if context relevant
 
 Do not start working until you've read these. If the operator opens with a
 task, still read these first — most "questions" are actually answered in
 the docs and you'll waste a turn re-deriving it.
+
+This file (`03`) covers tone, workflow, and forbidden moves. `CLAUDE.md`
+covers operating discipline and architecture intent. The two are
+complementary; do not duplicate. When they overlap, `CLAUDE.md` is the
+canonical source for architecture/intent and this file is the canonical
+source for tone/workflow.
 
 ## Hard rules — do not violate
 
@@ -108,6 +117,32 @@ Signs: caps lock, short messages, "WTF," "OMG," "JUST DO IT."
 - **Stale state is a recurring bug source.** Dashboard panels showing
   stale info, agents reading from non-updated sources, etc.
 
+### Operating discipline added 2026-05-17
+
+- **Surface similarity is not alignment.** When evaluating whether an
+  agent's reflection / vote / decision matches the persona, run the
+  current `world_state` through the persona's actual gating rules and
+  check whether the prescribed action matches what was produced. Do not
+  conclude alignment from wording overlap. (Past failure: Casper's
+  evidence sounded persona-aligned for 5+ cycles while actually
+  contradicting the persona under the active world_state.)
+- **Each model's biases are the architecture's strength.** Do not try to
+  engineer away GPT-4o's anchoring or Sonnet's risk-conservatism through
+  per-agent persona edits. The correction mechanism for stuck-agent
+  behaviour is `CONFLICT_MATRIX` → Round 1 routing genuine divergence to
+  debate. See `02_NEXT_BUILD_TASKS.md` task 1.
+- **Engine-first audit discipline.** Before proposing any change, pull
+  vital signs: `buy_count`, `sell_count`, `hours_since_last_fill`,
+  `hours_since_last_rebuild`, order skew, distance from current price
+  to nearest fill level, recent hard-rule overrides. If any is abnormal,
+  that is the work for the session — state that explicitly. The bot
+  can be "humming" (services active, rows being written) while not
+  earning. A status check ≠ an audit.
+- **The brain is downstream of the hands.** When behaviour looks broken,
+  suspect `grid/engine.py` and the `world_state` builder *before* the
+  prompts. Past failure: persona iteration while an engine bug was the
+  actual fill blocker.
+
 ## Forbidden moves
 - Suggesting self-hosted Letta (decommissioned; Cloud is the runtime)
 - Suggesting Mem0, Graphiti, agentic frameworks, or any persistence layer the operator didn't ask for
@@ -118,6 +153,13 @@ Signs: caps lock, short messages, "WTF," "OMG," "JUST DO IT."
 - Bringing up the old ETH futures system or the old stateless `apply_consensus()` path
 - Bringing up the Supervisor / override-authority concept (rejected)
 - Re-researching things in `01_CURRENT_STATE.md` "Verified facts" section
+- **Proposing persona-text edits as the primary lever for behaviour change.**
+  A/B testing in stationary conditions showed verbose persona sections
+  produce no measurable behavioural effect; hard rules carry behaviour.
+  Persona edits are the weakest lever and the slowest to validate.
+- **Investing more polish in one agent's persona, self_model, or config
+  than the others.** Symmetric work gets symmetric attention. The
+  operator notices and will check.
 
 ## Memory and context discipline
 - The repo at `aye5788/xrp_grid` is the source of truth for code.

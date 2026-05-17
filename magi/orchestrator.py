@@ -8,7 +8,7 @@ Replaces the stateless three-call deliberation with a Letta-backed debate:
   4. Detect conflict via CONFLICT_MATRIX
   5. Round 1 (only if conflict) — challenge the two conflicting agents
   6. resolve_consensus + enforce_hard_rules
-  7. Write to debate_records (new) AND magi_decisions (legacy, dashboard compat)
+  7. Write to debate_records (canonical source of truth)
   8. Return scheduler-compatible dict
 
 Return shape preserved for scheduler.run_magi_cycle:
@@ -21,7 +21,7 @@ Return shape preserved for scheduler.run_magi_cycle:
         'melchior_geometry', 'melchior_conviction', 'deadlock',
         'hard_rule_overrides', 'cycle_id',
     },
-    'decision_id': <legacy magi_decisions row id>,
+    'decision_id': None,   # legacy magi_decisions writes retired post-Phase 5
   }
 
 Note: regime-gate and magi_supervisor layers from the previous orchestrator
@@ -36,6 +36,7 @@ import logging
 import os
 import time
 from datetime import datetime
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -101,6 +102,45 @@ def _get_latest_market_knowledge():
     }
 
 
+def _hours_since_last_fill() -> float | None:
+    """Hours since the most recent grid_orders fill, or None if no fills exist."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT filled_at FROM grid_orders "
+        "WHERE status='filled' AND filled_at IS NOT NULL "
+        "ORDER BY filled_at DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    if not row or not row['filled_at']:
+        return None
+    try:
+        last = datetime.fromisoformat(row['filled_at'])
+    except ValueError:
+        return None
+    return round((datetime.utcnow() - last).total_seconds() / 3600, 2)
+
+
+def _hours_since_last_rebuild() -> float | None:
+    """Hours since the most recent grid rebuild (grid_state row whose notes
+    begin with 'Grid initialised'). Returns None if no rebuild row exists.
+    Same source-of-truth as the RECENTRE_COOLDOWN hard rule, exposed to
+    agents so they can avoid voting RECENTRE during the cooldown window."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT timestamp FROM grid_state "
+        "WHERE notes LIKE 'Grid initialised%' "
+        "ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    if not row or not row['timestamp']:
+        return None
+    try:
+        last = datetime.fromisoformat(row['timestamp'])
+    except ValueError:
+        return None
+    return round((datetime.utcnow() - last).total_seconds() / 3600, 2)
+
+
 def build_world_state() -> dict:
     """Snapshot of all market/portfolio context for the cycle."""
     from grid.engine import GridEngine
@@ -111,15 +151,17 @@ def build_world_state() -> dict:
         log.warning("Could not fetch current price for world_state: %s", e)
 
     return {
-        "timestamp":        datetime.utcnow().isoformat(),
-        "price":            price,
-        "indicators":       get_latest_indicators('1h') or {},
-        "grid_state":       get_current_grid_state() or {},
-        "inventory":        get_latest_inventory() or {},
-        "open_orders":      get_open_orders_summary(),
-        "trajectory":       get_trajectory_context(),
-        "market_knowledge": _get_latest_market_knowledge(),
-        "hard_rules":       HARD_RULES,
+        "timestamp":                datetime.utcnow().isoformat(),
+        "price":                    price,
+        "indicators":               get_latest_indicators('1h') or {},
+        "grid_state":               get_current_grid_state() or {},
+        "inventory":                get_latest_inventory() or {},
+        "open_orders":              get_open_orders_summary(),
+        "hours_since_last_fill":    _hours_since_last_fill(),
+        "hours_since_last_rebuild": _hours_since_last_rebuild(),
+        "trajectory":               get_trajectory_context(),
+        "market_knowledge":         _get_latest_market_knowledge(),
+        "hard_rules":               HARD_RULES,
     }
 
 
@@ -141,6 +183,65 @@ def enforce_hard_rules(consensus: dict, world_state: dict) -> dict:
     skew = float(inventory.get("inventory_skew") or 0.0)
     price = world_state.get("price")
     xrp_value_usd = xrp_held * float(price) if price else 0.0
+
+    # 0. RECENTRE cooldown — downgrade council-proposed RECENTRE to MAINTAIN
+    # if the grid was just rebuilt and is healthy. Prevents hourly churn when
+    # Melchior's STEP 0 GRID HEALTH GATE keeps firing on stale fills (which
+    # don't reset until an actual fill happens).
+    # The grid-degenerate hard rule below can still force RECENTRE if the book
+    # is actually one-sided — this only catches "healthy book, hours-since-fill
+    # high, no need to churn yet".
+    if cons.get("grid_action") == "RECENTRE":
+        open_orders = world_state.get("open_orders") or {}
+        try:
+            buy_n = int(open_orders.get("buy_count") or 0)
+            sell_n = int(open_orders.get("sell_count") or 0)
+        except (TypeError, ValueError):
+            buy_n = sell_n = 0
+        book_healthy = buy_n >= 3 and sell_n >= 2
+        recent_rebuild_hours = None
+        try:
+            conn = get_conn()
+            row = conn.execute(
+                "SELECT timestamp FROM grid_state "
+                "WHERE notes LIKE 'Grid initialised%' "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            conn.close()
+            if row and row['timestamp']:
+                last_build = datetime.fromisoformat(row['timestamp'])
+                recent_rebuild_hours = (
+                    (datetime.utcnow() - last_build).total_seconds() / 3600
+                )
+        except Exception as e:
+            log.warning("Cooldown check: could not read grid_state: %s", e)
+
+        if (book_healthy and recent_rebuild_hours is not None
+                and recent_rebuild_hours < 1.0):
+            cons["grid_action"] = "MAINTAIN"
+            overrides.append("[RECENTRE_COOLDOWN]")
+            notes.append(
+                f"[RECENTRE_COOLDOWN] grid rebuilt {recent_rebuild_hours*60:.0f}min "
+                f"ago (book={buy_n}b/{sell_n}s) — downgrading RECENTRE→MAINTAIN "
+                f"to give fresh grid time to attract fills"
+            )
+            # Also neutralize PAUSE actions: a fresh balanced grid should not
+            # be partially cancelled on stale risk reasoning. Without this,
+            # PAUSE_LONGS would kill the buys we just placed, the engine
+            # integrity guard would emergency-rebuild, and the cycle would
+            # churn its full ladder every hour.
+            if cons.get("risk_action") in ("PAUSE_LONGS", "PAUSE_SHORTS"):
+                old_risk = cons["risk_action"]
+                cons["risk_action"] = "CLEAR"
+                notes.append(
+                    f"[RECENTRE_COOLDOWN] risk_action {old_risk} → CLEAR to "
+                    f"preserve the fresh balanced book"
+                )
+            log.info(
+                "Hard rule: RECENTRE cooldown — grid is %.0f min old and healthy "
+                "(%d buys / %d sells); downgrading to MAINTAIN + CLEAR",
+                recent_rebuild_hours*60, buy_n, sell_n,
+            )
 
     # 1. Kill switch
     if os.path.exists(HARD_RULES["halt_file"]):
@@ -195,6 +296,154 @@ def enforce_hard_rules(consensus: dict, world_state: dict) -> dict:
             f"{HARD_RULES['min_xrp_buffer_usd']:.2f} → PAUSE_SHORTS"
         )
         log.info("Hard rule: XRP buffer below floor → PAUSE_SHORTS")
+
+    # 6. Grid degeneracy — prevent infinite deadlock from one-sided/inactive grid.
+    # Forces RECENTRE and clears any PAUSE that would block the rebuild's
+    # opposite-side ladder.
+    #
+    # Two conditions can fire:
+    #   - One-sided book (buy_count == 0 or sell_count == 0): always overrides.
+    #     A one-sided book cannot oscillate; rebuild immediately regardless of age.
+    #   - Stale book (hours_since_last_fill > 24): overrides ONLY if the grid
+    #     hasn't been rebuilt in the last 4 hours. Without this cooldown, the
+    #     rule would re-RECENTRE every cycle as long as no fill occurs, churning
+    #     the grid. The cooldown gives a fresh rebuild time to attract fills.
+    #
+    # Not applied if HALT is already set (kill-switch / loss limit takes priority).
+    if cons.get("grid_action") != "HALT" and cons.get("risk_action") != "HALT":
+        open_orders = world_state.get("open_orders") or {}
+        try:
+            buy_count = int(open_orders.get("buy_count") or 0)
+            sell_count = int(open_orders.get("sell_count") or 0)
+        except (TypeError, ValueError):
+            buy_count = sell_count = 0
+        hours_inactive_raw = world_state.get("hours_since_last_fill")
+        try:
+            hours_inactive = (
+                float(hours_inactive_raw) if hours_inactive_raw is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            hours_inactive = None
+
+        # Compute hours since most recent grid_state row (any insert).
+        # initialise_grid() writes "Grid initialised — N orders placed"; even
+        # pause-flag changes write rows, so this is a conservative liveness
+        # signal — we only treat it as "recently rebuilt" if the latest note
+        # actually mentions a build/recentre.
+        hours_since_rebuild = None
+        try:
+            conn = get_conn()
+            row = conn.execute(
+                "SELECT timestamp, notes FROM grid_state "
+                "WHERE notes LIKE 'Grid initialised%' "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            conn.close()
+            if row and row['timestamp']:
+                last_build = datetime.fromisoformat(row['timestamp'])
+                hours_since_rebuild = (
+                    (datetime.utcnow() - last_build).total_seconds() / 3600
+                )
+        except Exception as e:
+            log.warning("Could not compute hours_since_rebuild: %s", e)
+
+        degenerate_reasons = []
+        if buy_count == 0:
+            degenerate_reasons.append(f"buy_count=0")
+        if sell_count == 0:
+            degenerate_reasons.append(f"sell_count=0")
+        if hours_inactive is not None and hours_inactive > 24:
+            # Stale-fill check is gated by the rebuild cooldown
+            if hours_since_rebuild is None or hours_since_rebuild > 4:
+                degenerate_reasons.append(
+                    f"hours_since_last_fill={hours_inactive:.1f}>24 "
+                    f"(rebuild_age={hours_since_rebuild})"
+                )
+
+        if degenerate_reasons:
+            cons["grid_action"] = "RECENTRE"
+            overrides.append("[GRID_DEGENERATE]")
+            notes.append(
+                f"[GRID_DEGENERATE] {', '.join(degenerate_reasons)} → "
+                f"forcing RECENTRE at current price"
+            )
+            if cons.get("risk_action") in ("PAUSE_LONGS", "PAUSE_SHORTS"):
+                old_risk = cons["risk_action"]
+                cons["risk_action"] = "CLEAR"
+                notes.append(
+                    f"[GRID_DEGENERATE] risk_action {old_risk} → CLEAR so "
+                    f"the rebuild can place both ladders"
+                )
+            log.warning(
+                "Hard rule: grid degenerate (%s) — forcing RECENTRE + CLEAR",
+                ", ".join(degenerate_reasons),
+            )
+
+    # 7. PAUSE-vote validation — mirrors Balthasar's STEP 0 logic in Python
+    # because claude-sonnet-4-6 has demonstrated it will vote PAUSE_LONGS /
+    # PAUSE_SHORTS even when its persona explicitly forbids that vote at the
+    # current book state. The hard rule is what actually protects the grid.
+    #
+    # A PAUSE_LONGS is valid only when the book is genuinely long-heavy AND
+    # the inventory is also long-heavy. Anything else is a no-op at best and
+    # a thin-side cancellation at worst. Same for PAUSE_SHORTS, mirrored.
+    #
+    # This rule runs AFTER the buffer-floor rules (4, 5), so a CLEAR upgraded
+    # to PAUSE_LONGS by USD_BUFFER_FLOOR is preserved (USD running out is a
+    # legitimate reason to pause longs even with a balanced book).
+    #
+    # Skipped when HALT is in effect, when [USD_BUFFER_FLOOR] / [XRP_BUFFER_FLOOR]
+    # already set the PAUSE (those are legitimate), or when [GRID_DEGENERATE]
+    # / [RECENTRE_COOLDOWN] already cleared the risk action.
+    if (cons.get("grid_action") != "HALT"
+            and cons.get("risk_action") in ("PAUSE_LONGS", "PAUSE_SHORTS")
+            and "[USD_BUFFER_FLOOR]" not in overrides
+            and "[XRP_BUFFER_FLOOR]" not in overrides):
+        open_orders_v = world_state.get("open_orders") or {}
+        try:
+            buy_n_v = int(open_orders_v.get("buy_count") or 0)
+            sell_n_v = int(open_orders_v.get("sell_count") or 0)
+        except (TypeError, ValueError):
+            buy_n_v = sell_n_v = 0
+        total_v = buy_n_v + sell_n_v
+        order_skew = (
+            (buy_n_v - sell_n_v) / total_v if total_v > 0 else 0.0
+        )
+        invalid_reason = None
+        if cons["risk_action"] == "PAUSE_LONGS":
+            if buy_n_v < 2:
+                invalid_reason = (
+                    f"PAUSE_LONGS with buy_count={buy_n_v}<2 "
+                    f"would damage the thin side"
+                )
+            elif not (order_skew > 0.7 and skew > 0.3):
+                invalid_reason = (
+                    f"PAUSE_LONGS requires order_count_skew>+0.7 AND "
+                    f"allocation_skew>+0.3; got order_skew={order_skew:.2f}, "
+                    f"alloc_skew={skew:.2f}"
+                )
+        elif cons["risk_action"] == "PAUSE_SHORTS":
+            if sell_n_v < 2:
+                invalid_reason = (
+                    f"PAUSE_SHORTS with sell_count={sell_n_v}<2 "
+                    f"would damage the thin side"
+                )
+            elif not (order_skew < -0.7 and skew < -0.3):
+                invalid_reason = (
+                    f"PAUSE_SHORTS requires order_count_skew<-0.7 AND "
+                    f"allocation_skew<-0.3; got order_skew={order_skew:.2f}, "
+                    f"alloc_skew={skew:.2f}"
+                )
+        if invalid_reason:
+            old_risk_v = cons["risk_action"]
+            cons["risk_action"] = "CLEAR"
+            overrides.append("[PAUSE_INVALID]")
+            notes.append(f"[PAUSE_INVALID] {invalid_reason} → CLEAR")
+            log.info(
+                "Hard rule: PAUSE invalid (%s → CLEAR) — %s",
+                old_risk_v, invalid_reason,
+            )
 
     cons["hard_rule_overrides"] = overrides
     cons["reasoning"] = " ".join(s for s in notes if s).strip()
@@ -275,7 +524,7 @@ def _final_consensus(cons: dict, cycle_id: str, melchior_r0: dict) -> dict:
     }
 
 
-# --- Persistence: debate_records (new) + magi_decisions (legacy) ---
+# --- Persistence: debate_records ---
 
 def _build_debate_record(cycle_id: str, trigger: str, world_state: dict,
                           round_0: dict, conflict, round_1, cons: dict) -> dict:
@@ -320,40 +569,73 @@ def _build_debate_record(cycle_id: str, trigger: str, world_state: dict,
     record["final_grid_action"] = cons.get("grid_action")
     record["final_risk_action"] = cons.get("risk_action")
     record["deadlock"]          = 1 if cons.get("deadlock") else 0
+    # JSON-encoded list of bracketed hard-rule tags applied this cycle
+    # (e.g. ["[RECENTRE_COOLDOWN]", "[PAUSE_INVALID]"]). The dashboard reads
+    # this column directly instead of parsing magi_decisions.notes.
+    record["hard_rule_overrides"] = cons.get("hard_rule_overrides") or []
     # applied_*, engine_clamped, clamp_reason are filled in later by the engine;
     # outcome_* fields are backfilled by the observer.
     return record
 
 
-def _build_legacy_decision(trigger: str, round_0: dict, cons: dict) -> dict:
-    """Backward-compat row for the magi_decisions table (dashboard reads this)."""
-    casper_r0    = round_0.get("casper")    or {}
-    melchior_r0  = round_0.get("melchior")  or {}
-    balthasar_r0 = round_0.get("balthasar") or {}
-    return {
-        "trigger":              trigger,
-        "melchior_action":      melchior_r0.get("position"),
-        "melchior_conviction":  _conviction_label(melchior_r0.get("conviction")),
-        "melchior_reasoning":   _agent_reasoning_json(melchior_r0),
-        "melchior_concerns":    None,
-        "balthasar_action":     balthasar_r0.get("position"),
-        "balthasar_conviction": _conviction_label(balthasar_r0.get("conviction")),
-        "balthasar_reasoning":  _agent_reasoning_json(balthasar_r0),
-        # legacy schema column 'casper_action' actually stores the regime string
-        "casper_action":        casper_r0.get("position"),
-        "casper_conviction":    _conviction_label(casper_r0.get("conviction")),
-        "casper_reasoning":     _agent_reasoning_json(casper_r0),
+def _dual_write_magi_decision(trigger: str, round_0: dict, cons: dict) -> Optional[int]:
+    """
+    Mirror the cycle's final state into the legacy magi_decisions table so
+    existing consumers (dashboard.py panels, learning.py, extract_test_cases.py)
+    keep working with current data. debate_records is the canonical source;
+    this dual-write fills the magi_decisions row to match.
+
+    Returns the inserted row id (suitable for mark_magi_decision_applied),
+    or None if insertion failed.
+    """
+    def _agent_field_pack(agent_key: str) -> tuple:
+        r0 = round_0.get(agent_key) or {}
+        position = r0.get("position") or ""
+        conviction_label = _conviction_label(r0.get("conviction"))
+        # Pack key_evidence + crux into reasoning so dashboard / learning can
+        # surface it without joining tables.
+        reasoning_blob = _agent_reasoning_json(r0)
+        return position, conviction_label, reasoning_blob
+
+    m_pos, m_conv, m_reason = _agent_field_pack("melchior")
+    b_pos, b_conv, b_reason = _agent_field_pack("balthasar")
+    c_pos, c_conv, c_reason = _agent_field_pack("casper")
+
+    # balthasar_concerns and casper_concerns columns were added in the
+    # 2026-05-17 schema-symmetry migration; before that only
+    # melchior_concerns existed. Per-cycle prompt does not emit concerns
+    # fields per agent, so all three are None for now — the columns exist
+    # for future use and to keep the row shape symmetric.
+    payload = {
+        "trigger":               trigger,
+        "melchior_action":       m_pos,
+        "melchior_conviction":   m_conv,
+        "melchior_reasoning":    m_reason,
+        "melchior_concerns":     None,
+        "balthasar_action":      b_pos,
+        "balthasar_conviction":  b_conv,
+        "balthasar_reasoning":   b_reason,
+        "balthasar_concerns":    None,
+        "casper_action":         c_pos,
+        "casper_conviction":     c_conv,
+        "casper_reasoning":      c_reason,
+        "casper_concerns":       None,
         "consensus_grid_action": cons.get("grid_action"),
         "consensus_risk_action": cons.get("risk_action"),
         "consensus_regime":      cons.get("regime"),
         "applied":               0,
-        "notes":                 cons.get("reasoning", ""),
-        # Geometry columns nullable — new Melchior doesn't emit numeric geometry
+        # notes carries cons.reasoning so the dashboard's hard-rule-tag
+        # extractor (`re.findall(r"\[([A-Z_]+)\]", notes)`) still works.
+        "notes":                 cons.get("reasoning") or "",
+        # New agent path does not emit per-agent geometry; leave NULL so the
+        # engine fallback is what dashboards visualise.
         "melchior_centre_price":       None,
         "melchior_target_spacing_pct": None,
         "melchior_buy_level_bias":     None,
         "melchior_sell_level_bias":    None,
     }
+    insert_magi_decision(payload)
+    return get_latest_magi_decision_id()
 
 
 def _early_halt_return(trigger: str, cycle_id: str, failures: list) -> dict:
@@ -370,35 +652,12 @@ def _early_halt_return(trigger: str, cycle_id: str, failures: list) -> dict:
         "melchior_conviction": "low",
         "cycle_id":            cycle_id,
     }
-    legacy = {
-        "trigger":              trigger,
-        "melchior_action":      None,
-        "melchior_conviction":  None,
-        "melchior_reasoning":   None,
-        "melchior_concerns":    None,
-        "balthasar_action":     None,
-        "balthasar_conviction": None,
-        "balthasar_reasoning":  None,
-        "casper_action":        None,
-        "casper_conviction":    None,
-        "casper_reasoning":     None,
-        "consensus_grid_action": "HALT",
-        "consensus_risk_action": "HALT",
-        "consensus_regime":      "UNCERTAIN",
-        "applied":               0,
-        "notes":                 reason,
-        "melchior_centre_price":       None,
-        "melchior_target_spacing_pct": None,
-        "melchior_buy_level_bias":     None,
-        "melchior_sell_level_bias":    None,
-    }
-    insert_magi_decision(legacy)
     return {
         "melchior":    None,
         "balthasar":   None,
         "casper":      None,
         "consensus":   cons,
-        "decision_id": get_latest_magi_decision_id(),
+        "decision_id": None,
     }
 
 
@@ -437,8 +696,8 @@ def run_cycle(trigger: str = "manual", force: bool = False) -> dict:
         float(round_0['balthasar'].get('conviction') or 0.0),
     )
 
-    # 6. Conflict detection
-    conflict = detect_conflict(round_0)
+    # 6. Conflict detection — world_state is required for the grid-state rules
+    conflict = detect_conflict(round_0, world_state)
     round_1 = None
 
     # 8. Round 1 if conflict
@@ -480,7 +739,7 @@ def run_cycle(trigger: str = "manual", force: bool = False) -> dict:
     if cons.get('hard_rule_overrides'):
         log.info("Hard-rule overrides applied: %s", cons['hard_rule_overrides'])
 
-    # 12-13. Write structured debate record
+    # 12-13. Write structured debate record (canonical source of truth)
     try:
         debate_record = _build_debate_record(
             cycle_id, trigger, world_state, round_0, conflict, round_1, cons
@@ -489,14 +748,15 @@ def run_cycle(trigger: str = "manual", force: bool = False) -> dict:
     except Exception as e:
         log.error("Failed to insert debate_record: %s", e)
 
-    # 14. Backward-compat: write to legacy magi_decisions for the dashboard
+    # 14. Dual-write to legacy magi_decisions for backward-compat readers:
+    #     dashboard.py panels parse hard-rule tags from .notes, learning.py
+    #     and extract_test_cases.py read columns by name. Until those readers
+    #     migrate to debate_records, this dual-write keeps them current.
+    decision_id = None
     try:
-        legacy = _build_legacy_decision(trigger, round_0, cons)
-        insert_magi_decision(legacy)
-        decision_id = get_latest_magi_decision_id()
+        decision_id = _dual_write_magi_decision(trigger, round_0, cons)
     except Exception as e:
-        log.error("Failed to insert legacy magi_decisions row: %s", e)
-        decision_id = None
+        log.warning("Legacy magi_decisions dual-write failed: %s", e)
 
     # 15. Return scheduler-compatible dict
     return {

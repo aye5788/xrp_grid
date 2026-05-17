@@ -91,8 +91,22 @@ _RISK_CONSERVATISM_ORDER = {
 
 
 # Each rule: (regime, grid, risk, predicate_or_None, agents_in_conflict, reason)
-# Star "*" means wildcard match. predicate(round_0) -> bool may add a runtime
-# gate (e.g. conviction > 0.6).
+# Star "*" means wildcard match. predicate(round_0, world_state) -> bool may
+# add a runtime gate (e.g. conviction > 0.6, or grid-state checks). world_state
+# is passed positionally; predicates that don't need it can ignore the arg.
+def _buy_count(world_state):
+    return int(((world_state or {}).get("open_orders") or {}).get("buy_count") or 0)
+
+def _sell_count(world_state):
+    return int(((world_state or {}).get("open_orders") or {}).get("sell_count") or 0)
+
+def _hours_since_fill(world_state):
+    v = (world_state or {}).get("hours_since_last_fill")
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
 CONFLICT_MATRIX = [
     ("TRENDING", "TIGHTEN", "*", None, ["casper", "melchior"],
      "Tightening grid into a trending regime amplifies directional risk."),
@@ -104,10 +118,40 @@ CONFLICT_MATRIX = [
      "Widening the grid while pausing shorts sends contradictory signals on short exposure."),
 
     ("*", "*", "HALT",
-     lambda r0: float(r0.get("balthasar", {}).get("conviction", 0.0)) > 0.6,
+     lambda r0, ws: float(r0.get("balthasar", {}).get("conviction", 0.0)) > 0.6,
      ["melchior", "balthasar"],
      "Balthasar recommends HALT with conviction > 0.6; this conflicts with any "
      "continued-grid recommendation from Melchior."),
+
+    # Grid-state-aware conflicts. These catch cases where the council's R0
+    # consensus would leave a degenerate or stuck book. The hard-rule layer
+    # also enforces RECENTRE in those cases, but routing through Round 1
+    # gives the agents a chance to surface better geometry / risk reasoning
+    # before Python overrides them.
+    ("*", "MAINTAIN", "*",
+     lambda r0, ws: _buy_count(ws) == 0 or _sell_count(ws) == 0,
+     ["melchior", "balthasar"],
+     "Grid is one-sided (zero orders on one side) — MAINTAIN would leave it "
+     "degenerate. Council must justify or revise."),
+
+    ("*", "MAINTAIN", "*",
+     lambda r0, ws: (_hours_since_fill(ws) is not None
+                     and _hours_since_fill(ws) > 12),
+     ["casper", "melchior"],
+     "No fills for >12h — MAINTAIN preserves an inactive grid. Council must "
+     "justify or revise."),
+
+    ("*", "*", "PAUSE_LONGS",
+     lambda r0, ws: _buy_count(ws) == 0,
+     ["melchior", "balthasar"],
+     "PAUSE_LONGS while buy_count=0 cancels nothing and prevents rebuild on "
+     "the empty side. Council must justify or revise."),
+
+    ("*", "*", "PAUSE_SHORTS",
+     lambda r0, ws: _sell_count(ws) == 0,
+     ["melchior", "balthasar"],
+     "PAUSE_SHORTS while sell_count=0 cancels nothing and prevents rebuild on "
+     "the empty side. Council must justify or revise."),
 ]
 
 
@@ -207,15 +251,36 @@ def _validate_r0(parsed: dict, agent_id: str) -> tuple[bool, str]:
 def _r0_prompt(cycle_id: str) -> str:
     return (
         f"Cycle {cycle_id}. World state has been updated in your context "
-        f"window. Respond ONLY with a single JSON object on one line, no "
-        f"preamble, no markdown fences: "
+        f"window.\n\n"
+        f"BEFORE DECIDING: read your self_model block.\n\n"
+        f"If your self_model entry says you have been wrong about this kind "
+        f"of call in the past, your DEFAULT must be to revise away from "
+        f"that prior failure mode. To override the self_model warning and "
+        f"vote the same way again, you MUST cite a specific world_state "
+        f"field name and value that meaningfully differentiates today from "
+        f"the conditions the self_model describes — for example, 'roc_6h "
+        f"has flipped to +0.4 vs the prior negative regime', not 'momentum "
+        f"is different'. Naming the self_model conflict in key_evidence "
+        f"without resolving it (either by revising your vote or by citing "
+        f"a concrete differentiating datum) is not acceptable and will be "
+        f"treated as a non-response.\n\n"
+        f"If your self_model entry supports your call, cite it briefly in "
+        f"key_evidence prefixed with 'self_model:'. If self_model is empty "
+        f"or no entry applies, proceed normally — do not invent a "
+        f"reflection just to satisfy this rule.\n\n"
+        f"Respond ONLY with a single JSON object on one line, no preamble, "
+        f"no markdown fences: "
         f'{{"position": "<one of your valid actions>", '
         f'"conviction": <float 0.0-1.0>, '
         f'"key_evidence": [<3-5 short strings citing specific indicators/data '
-        f'from world_state>], '
+        f'from world_state; prefix any self_model citation with '
+        f"'self_model:'; if you are overriding a self_model warning, one "
+        f"evidence entry must name the specific world_state field and "
+        f"value that justifies the override>], "
         f'"crux": "<one sentence: the single thing that would change your '
-        f'mind>"}}. After responding, you may use core_memory tools to update '
-        f"your self_model block if you notice a pattern worth recording."
+        f'mind>"}}. After responding, you may use core_memory tools to '
+        f"append a new observation to your self_model block if this cycle "
+        f"taught you something worth recording."
     )
 
 
@@ -379,12 +444,15 @@ def run_round_0_parallel(cycle_id: str) -> dict:
     return results
 
 
-def detect_conflict(round_0: dict) -> Optional[dict]:
+def detect_conflict(round_0: dict, world_state: Optional[dict] = None) -> Optional[dict]:
     """
-    Walk CONFLICT_MATRIX against the round_0 positions. Returns None if no
-    rule matched, otherwise the single matched rule with the highest combined
-    conviction of the two named agents, as
+    Walk CONFLICT_MATRIX against the round_0 positions and world_state.
+    Returns None if no rule matched, otherwise the matched rule with the
+    highest combined conviction of the two named agents, as
     {'agents': [a, b], 'reason': str}.
+
+    world_state is optional for backward compatibility, but the grid-state
+    rules require it to evaluate. Pass it from orchestrator.run_cycle.
     """
     casper_pos    = round_0.get("casper",    {}).get("position")
     melchior_pos  = round_0.get("melchior",  {}).get("position")
@@ -403,7 +471,7 @@ def detect_conflict(round_0: dict) -> Optional[dict]:
             continue
         if predicate is not None:
             try:
-                if not predicate(round_0):
+                if not predicate(round_0, world_state):
                     continue
             except Exception as e:
                 log.warning("conflict predicate raised: %s", e)

@@ -56,6 +56,50 @@ AGENT_SPECS = [
 
 EMBEDDING = 'openai/text-embedding-3-small'
 
+# Per-agent LLM config knobs synced on every re-provision. Provider-shaped
+# (the model_settings.provider_type discriminates which fields apply).
+# Equalised across the three agents wherever the providers expose an
+# equivalent knob; provider-side asymmetries (e.g. GPT-4o has no native
+# extended-thinking budget — only reasoning_effort) are documented inline.
+# parallel_tool_calls is omitted: Letta server-side enforces True regardless
+# of what we send.
+AGENT_CONFIG = {
+    'casper': {
+        'provider_type': 'google_ai',
+        'temperature': 0.3,
+        'max_output_tokens': 8192,
+        'thinking_config': {'include_thoughts': True, 'thinking_budget': 2048},
+    },
+    'melchior': {
+        # GPT-4o has no native extended-thinking budget — reasoning_effort
+        # is the closest equivalent (Letta-managed inner-thoughts surface).
+        # Provider asymmetry, not bias.
+        'provider_type': 'openai',
+        'temperature': 0.3,
+        'max_output_tokens': 8192,
+        'reasoning': {'reasoning_effort': 'medium'},
+        'strict': False,
+    },
+    'balthasar': {
+        'provider_type': 'anthropic',
+        'temperature': 0.3,
+        'max_output_tokens': 8192,
+        'thinking': {'type': 'enabled', 'budget_tokens': 2048},
+        'effort': 'medium',
+        'strict': False,
+    },
+}
+
+
+def _model_settings_diff(live, desired):
+    """Return (changed, missing_or_diff_keys). live and desired are dicts;
+    we only flag keys that appear in `desired` and differ from `live`."""
+    diffs = []
+    for k, v in desired.items():
+        if live.get(k) != v:
+            diffs.append((k, live.get(k), v))
+    return diffs
+
 WORLD_STATE_DESC = (
     "Current market state for the cycle: indicators, inventory, open orders, "
     "recent fills, market knowledge, hard rules. Updated by the orchestrator "
@@ -187,6 +231,7 @@ def main():
     # 3) Provision each agent (skip if already in agent_registry).
     print()
     created_count = 0
+    updated_count = 0
     skipped_count = 0
     summary = []
 
@@ -194,8 +239,92 @@ def main():
         agent_id = spec['agent_id']
         existing_letta_id = db.get_letta_agent_id(agent_id)
         if existing_letta_id:
-            print(f"already provisioned: agent_id={agent_id} "
-                  f"letta_id={existing_letta_id} -- skipping")
+            # UPDATE path: sync persona block from prompt file → Letta.
+            # Re-running this script is the canonical way to push prompt edits
+            # to deployed agents.
+            prompt_path = spec['prompt_file']
+            if not prompt_path.exists():
+                print(f"  WARN: prompt file missing for {agent_id} "
+                      f"({prompt_path}) -- skipping (won't wipe live persona)")
+                skipped_count += 1
+                row = db.get_agent_registry_row(agent_id) or {}
+                summary.append({
+                    'agent_id': agent_id,
+                    'letta_id': existing_letta_id,
+                    'model': row.get('model', '?'),
+                    'attached_block_count': 'unchanged',
+                })
+                continue
+
+            new_persona = prompt_path.read_text()
+            try:
+                existing_blocks = list(
+                    client.agents.blocks.list(existing_letta_id)
+                )
+                persona_block = next(
+                    (b for b in existing_blocks if b.label == 'persona'),
+                    None,
+                )
+
+                if persona_block is None:
+                    # Defensive: shouldn't happen, but don't crash.
+                    new_block = client.blocks.create(
+                        label='persona', value=new_persona, limit=8000,
+                    )
+                    client.agents.blocks.attach(
+                        new_block.id, agent_id=existing_letta_id,
+                    )
+                    print(f"attached persona block: agent_id={agent_id} "
+                          f"letta_id={existing_letta_id} "
+                          f"block_id={new_block.id}")
+                    updated_count += 1
+                elif persona_block.value == new_persona:
+                    print(f"up to date: agent_id={agent_id} "
+                          f"letta_id={existing_letta_id} -- persona unchanged")
+                    skipped_count += 1
+                else:
+                    old_len = len(persona_block.value)
+                    new_len = len(new_persona)
+                    client.agents.blocks.update(
+                        block_label='persona',
+                        agent_id=existing_letta_id,
+                        value=new_persona,
+                    )
+                    print(f"updated persona: agent_id={agent_id} "
+                          f"letta_id={existing_letta_id} "
+                          f"(chars {old_len}→{new_len}, "
+                          f"Δ={new_len - old_len:+d})")
+                    updated_count += 1
+            except Exception as e:
+                print(f"  ERROR updating persona for {agent_id!r}: {e} "
+                      f"-- continuing with other agents")
+                skipped_count += 1
+
+            # Sync LLM config knobs (temperature / max_output_tokens /
+            # reasoning) — provider-shaped via model_settings. Only push
+            # when at least one key in AGENT_CONFIG[agent_id] differs from
+            # the live model_settings, so re-runs are idempotent.
+            desired = AGENT_CONFIG.get(agent_id)
+            if desired:
+                try:
+                    live = client.agents.retrieve(existing_letta_id).model_dump()
+                    live_ms = live.get('model_settings') or {}
+                    diffs = _model_settings_diff(live_ms, desired)
+                    if not diffs:
+                        print(f"config already in sync: agent_id={agent_id}")
+                    else:
+                        client.agents.update(
+                            existing_letta_id, model_settings=desired,
+                        )
+                        diff_str = "; ".join(
+                            f"{k}: {old!r}→{new!r}" for k, old, new in diffs
+                        )
+                        print(f"updated config: agent_id={agent_id} ({diff_str})")
+                        updated_count += 1
+                except Exception as e:
+                    print(f"  ERROR syncing config for {agent_id!r}: {e} "
+                          f"-- continuing")
+
             row = db.get_agent_registry_row(agent_id) or {}
             summary.append({
                 'agent_id': agent_id,
@@ -203,7 +332,6 @@ def main():
                 'model': row.get('model', '?'),
                 'attached_block_count': 'unchanged',
             })
-            skipped_count += 1
             continue
 
         prompt_path = spec['prompt_file']
@@ -265,9 +393,10 @@ def main():
             f"  {s['agent_id']:10s} -> {s['letta_id']}  "
             f"model={s['model']:36s}  blocks={s['attached_block_count']}"
         )
-    print(
-        f"\nProvisioned {created_count} agents, {skipped_count} already existed"
-    )
+    print()
+    print(f"created: {created_count}")
+    print(f"updated: {updated_count}   (persona block diff detected and pushed)")
+    print(f"skipped: {skipped_count}   (already up to date)")
 
 
 if __name__ == "__main__":

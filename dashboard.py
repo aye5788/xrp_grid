@@ -1377,16 +1377,26 @@ def _fetch_council_data():
                     latest_debate[f'{agent}_r0_evidence_list'] = []
             else:
                 latest_debate[f'{agent}_r0_evidence_list'] = ev or []
-        # Look up the matching legacy magi_decisions row to recover the
-        # bracketed override tags from the `notes` field (hard_rule_overrides
-        # is not persisted in debate_records).
-        conn0 = get_conn()
-        nrow = conn0.execute(
-            "SELECT notes FROM magi_decisions ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        conn0.close()
-        if nrow and nrow['notes']:
-            override_tags = sorted(set(_re.findall(r"\[([A-Z_]+)\]", nrow['notes'])))
+        # Hard-rule overrides are stored as a JSON-encoded list of bracketed
+        # tags on the debate_record itself. Older rows (pre-migration) have
+        # NULL — fall back to parsing magi_decisions.notes for those.
+        raw_overrides = latest_debate.get('hard_rule_overrides')
+        if raw_overrides:
+            try:
+                tags = _json.loads(raw_overrides) if isinstance(raw_overrides, str) else raw_overrides
+                override_tags = sorted({
+                    t.strip('[]') for t in tags if isinstance(t, str)
+                })
+            except (ValueError, TypeError):
+                override_tags = []
+        else:
+            conn0 = get_conn()
+            nrow = conn0.execute(
+                "SELECT notes FROM magi_decisions ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            conn0.close()
+            if nrow and nrow['notes']:
+                override_tags = sorted(set(_re.findall(r"\[([A-Z_]+)\]", nrow['notes'])))
 
     # Per-agent accuracy + capitulation cards
     council_accuracy = {}
@@ -1476,14 +1486,25 @@ def _fetch_council_data():
         'balthasar': [float(r['b'] or 0) for r in conv_rows],
     }
 
-    # Hard-rule overrides — parse from magi_decisions.notes
-    notes_rows = conn.execute(
-        "SELECT notes FROM magi_decisions WHERE timestamp >= ?", (cutoff,)
+    # Hard-rule overrides — read the JSON-encoded list directly from
+    # debate_records. Pre-migration rows (NULL) contribute 0; their counts
+    # remain in magi_decisions.notes and age out of the 30d window naturally.
+    override_rows = conn.execute(
+        "SELECT hard_rule_overrides FROM debate_records "
+        "WHERE timestamp >= ? AND hard_rule_overrides IS NOT NULL",
+        (cutoff,)
     ).fetchall()
     tag_counts = {}
-    for r in notes_rows:
-        for tag in _re.findall(r"\[([A-Z_]+)\]", r['notes'] or ''):
-            tag_counts[tag] = tag_counts.get(tag, 0) + 1
+    for r in override_rows:
+        raw = r['hard_rule_overrides']
+        try:
+            tags = _json.loads(raw) if isinstance(raw, str) else raw
+        except (ValueError, TypeError):
+            continue
+        for t in tags or []:
+            tag = t.strip('[]') if isinstance(t, str) else None
+            if tag:
+                tag_counts[tag] = tag_counts.get(tag, 0) + 1
     override_counts = sorted(tag_counts.items(), key=lambda kv: kv[1], reverse=True)
 
     # Outcome attribution

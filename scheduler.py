@@ -29,7 +29,7 @@ log = logging.getLogger('scheduler')
 
 # Schedule config (EST)
 OBSERVER_INTERVAL_MINUTES = 60
-MAGI_HOURS_EST = [9, 14]   # 9AM and 2PM EST
+MAGI_HOURS_EST = list(range(24))   # hourly, all 24 hours
 
 EST = ZoneInfo('America/New_York')
 
@@ -78,26 +78,45 @@ def run_observer_cycle():
                     log.info(f"Observer: {len(filled)} paper fills at {price:.4f}")
                     engine.update_inventory(price)
 
-                    # Place replacement orders at the opposite side.
-                    # A sell fill → replacement buy one spacing below fill price.
-                    # A buy fill → replacement sell one spacing above fill price.
+                    # Place replacement orders at the opposite side, anchored to
+                    # current market price (not the filled order's resting price).
+                    # Anchoring to fill price drifts the grid when market moves
+                    # between placement and fill.
                     grid_state = get_current_grid_state()
                     spacing_pct = grid_state['spacing_pct'] if grid_state else None
+                    market_price = engine.get_current_price()
 
-                    if spacing_pct:
+                    if spacing_pct and market_price is None:
+                        log.warning(
+                            "[GRID REPLENISH] No current market price — skipping "
+                            "replacement orders"
+                        )
+                    elif spacing_pct:
                         replacements = 0
                         for order in filled:
                             try:
                                 if order['side'] == 'sell':
                                     replacement_price = round(
-                                        order['price'] * (1 - spacing_pct), 5
+                                        market_price * (1 - spacing_pct), 5
                                     )
                                     replacement_side = 'buy'
                                 else:
                                     replacement_price = round(
-                                        order['price'] * (1 + spacing_pct), 5
+                                        market_price * (1 + spacing_pct), 5
                                     )
                                     replacement_side = 'sell'
+
+                                fill_ref = order.get('fill_price') or order['price']
+                                drift_pct = abs(market_price - fill_ref) / market_price
+                                if drift_pct > 2 * spacing_pct:
+                                    log.warning(
+                                        f"[GRID REPLENISH] Skipping replacement "
+                                        f"{replacement_side.upper()} for {order['side'].upper()} "
+                                        f"fill @ {fill_ref:.4f} — market {market_price:.4f} "
+                                        f"drifted {drift_pct*100:.2f}% > 2×spacing "
+                                        f"({2*spacing_pct*100:.2f}%). RECENTRE will handle."
+                                    )
+                                    continue
 
                                 result = engine.place_order(
                                     replacement_side,
@@ -130,14 +149,6 @@ def run_observer_cycle():
                         )
     except Exception as e:
         log.error(f"Shadow tick error: {e}")
-
-    # Record Supervisor outcomes for live-mode decisions 6h+ old.
-    # In shadow mode this is a no-op (SQL filter requires shadow_mode=0).
-    try:
-        from magi.magi_supervisor import record_outcomes
-        record_outcomes()
-    except Exception as e:
-        log.warning(f"Supervisor outcome recording failed: {e}")
 
     # Update grid config performance outcomes
     try:
@@ -294,19 +305,22 @@ def main():
     last_observer_time = datetime.now(timezone.utc)
 
     # Initialize from DB to avoid duplicate cycle on restart.
-    # If a cycle already ran in the current EST hour, don't re-fire.
+    # Phase 5 writes to debate_records; legacy magi_decisions is sparse and
+    # cannot be used as a debounce source.
     try:
-        from database import get_recent_magi_decisions
         import pytz
-        recent = get_recent_magi_decisions(limit=1)
-        if recent:
-            last_ts = recent[0].get('timestamp', '')
+        from database import get_conn
+        conn = get_conn()
+        row = conn.execute(
+            "SELECT timestamp FROM debate_records "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        if row and row['timestamp']:
             est = pytz.timezone('US/Eastern')
-            last_dt = datetime.fromisoformat(last_ts).replace(
+            last_dt = datetime.fromisoformat(row['timestamp']).replace(
                 tzinfo=timezone.utc).astimezone(est)
             now_est = datetime.now(timezone.utc).astimezone(est)
-            # If last decision was in the current calendar hour,
-            # mark that hour as done
             if (last_dt.date() == now_est.date() and
                     last_dt.hour == now_est.hour):
                 last_magi_hour = last_dt.hour
@@ -317,10 +331,13 @@ def main():
         else:
             last_magi_hour = -1
     except Exception as e:
-        log.warning(f"Could not read last MAGI time from DB: {e} — defaulting to -1")
+        log.warning(f"Could not read last MAGI time from debate_records: {e} — defaulting to -1")
         last_magi_hour = -1
 
-    log.info("Scheduler running — observer every 60min, MAGI at 9AM and 2PM EST")
+    log.info(
+        f"Scheduler running — observer every {OBSERVER_INTERVAL_MINUTES}min, "
+        f"MAGI hours (EST) = {MAGI_HOURS_EST}"
+    )
 
     while running:
         now_utc = datetime.now(timezone.utc)
@@ -373,19 +390,35 @@ def _internal_trigger_magi():
     trigger a MAGI cycle on the scheduler's engine instance."""
     try:
         run_magi_cycle(trigger='manual')
-        from database import get_recent_magi_decisions
-        decisions = get_recent_magi_decisions(1)
-        latest = decisions[0] if decisions else {}
+        # Read from debate_records (canonical Phase 5 source). magi_decisions
+        # dual-write happens after this insert too, but debate_records is the
+        # source of truth for new code paths like this status reporter.
+        from database import get_recent_debate_records
+        records = get_recent_debate_records(limit=1)
+        latest = records[0] if records else {}
+        # Map float conviction back to the legacy string label the dashboard
+        # historically saw, so the response shape is stable.
+        m_conv = latest.get('melchior_r0_conviction')
+        try:
+            m_conv_f = float(m_conv or 0.0)
+            if m_conv_f >= 0.75:
+                m_conv_label = 'high'
+            elif m_conv_f >= 0.5:
+                m_conv_label = 'medium'
+            else:
+                m_conv_label = 'low'
+        except (TypeError, ValueError):
+            m_conv_label = 'low'
         return _jsonify({
             'ok': True,
             'consensus': {
-                'grid_action': latest.get('consensus_grid_action'),
-                'risk_action': latest.get('consensus_risk_action'),
-                'regime': latest.get('casper_action'),
+                'grid_action': latest.get('final_grid_action'),
+                'risk_action': latest.get('final_risk_action'),
+                'regime': latest.get('casper_r0_position'),
                 'spacing_adjustment_pct': None,
                 'recentre_target': None,
-                'melchior_conviction': latest.get('melchior_conviction'),
-                'reason': latest.get('consensus_reason', ''),
+                'melchior_conviction': m_conv_label,
+                'reason': '',
             },
             'timestamp': latest.get('timestamp'),
         })

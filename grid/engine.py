@@ -839,6 +839,10 @@ class GridEngine:
         # Apply risk constraints
         if risk_action == 'PAUSE_LONGS':
             now_iso = datetime.utcnow().isoformat()
+            pre_buys = sum(
+                1 for o in self.paper_orders.values()
+                if o.get('status') == 'open' and o.get('side') == 'buy'
+            )
             cancelled = 0
             for order_id, order in list(self.paper_orders.items()):
                 if order.get('status') == 'open' and order.get('side') == 'buy':
@@ -854,7 +858,12 @@ class GridEngine:
                                   if o.get('status') == 'cancelled']
                 for k in keys_to_remove:
                     del self.paper_orders[k]
-            log.info(f"MAGI PAUSE_LONGS — cancelled {cancelled} open buy orders")
+            if cancelled == 0 and pre_buys == 0:
+                log.warning(
+                    "MAGI PAUSE_LONGS no-op — book already had 0 buy orders"
+                )
+            else:
+                log.info(f"MAGI PAUSE_LONGS — cancelled {cancelled} open buy orders")
             if not self.paper:
                 try:
                     live_cancelled = self.exchange.cancel_orders_by_side('buy')
@@ -869,6 +878,10 @@ class GridEngine:
 
         elif risk_action == 'PAUSE_SHORTS':
             now_iso = datetime.utcnow().isoformat()
+            pre_sells = sum(
+                1 for o in self.paper_orders.values()
+                if o.get('status') == 'open' and o.get('side') == 'sell'
+            )
             cancelled = 0
             for order_id, order in list(self.paper_orders.items()):
                 if order.get('status') == 'open' and order.get('side') == 'sell':
@@ -884,7 +897,12 @@ class GridEngine:
                                   if o.get('status') == 'cancelled']
                 for k in keys_to_remove:
                     del self.paper_orders[k]
-            log.info(f"MAGI PAUSE_SHORTS — cancelled {cancelled} open sell orders")
+            if cancelled == 0 and pre_sells == 0:
+                log.warning(
+                    "MAGI PAUSE_SHORTS no-op — book already had 0 sell orders"
+                )
+            else:
+                log.info(f"MAGI PAUSE_SHORTS — cancelled {cancelled} open sell orders")
             if not self.paper:
                 try:
                     live_cancelled = self.exchange.cancel_orders_by_side('sell')
@@ -903,6 +921,37 @@ class GridEngine:
                 pause_longs=0, pause_shorts=0,
                 notes="Risk CLEAR — pause flags reset"
             )
+
+        # GRID INTEGRITY GUARD — defense-in-depth.
+        # If the council + hard-rule layer somehow still produced a degenerate
+        # book (zero buys or zero sells), emergency-rebuild at current price.
+        # The orchestrator's [GRID_DEGENERATE] hard rule should handle this
+        # earlier, but state can also become degenerate after PAUSE_LONGS /
+        # PAUSE_SHORTS cancellations on a thin starting book.
+        # Not invoked when HALT was applied (HALT cancels everything intentionally).
+        if grid_action != 'HALT' and risk_action != 'HALT':
+            post_buys = sum(
+                1 for o in self.paper_orders.values()
+                if o.get('status') == 'open' and o.get('side') == 'buy'
+            )
+            post_sells = sum(
+                1 for o in self.paper_orders.values()
+                if o.get('status') == 'open' and o.get('side') == 'sell'
+            )
+            if post_buys == 0 or post_sells == 0:
+                rebuild_price = self.get_current_price()
+                log.warning(
+                    "GRID INTEGRITY: post-action book is degenerate "
+                    "(buys=%d sells=%d) — emergency-rebuilding at %s",
+                    post_buys, post_sells, rebuild_price,
+                )
+                if rebuild_price:
+                    self.initialise_grid(centre=rebuild_price)
+                else:
+                    log.error(
+                        "GRID INTEGRITY: cannot emergency-rebuild — "
+                        "no current price available"
+                    )
 
     def update_inventory(self, price: float):
         """Sync inventory state to database."""
