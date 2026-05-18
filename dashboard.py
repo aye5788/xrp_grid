@@ -408,6 +408,104 @@ HTML_TEMPLATE = """
     </div>
     {% endif %}
 
+    {% if open_alerts %}
+    {% set alert_critical = open_alerts | selectattr('severity', 'equalto', 'critical') | list %}
+    <div style="background:{{ '#ff000022' if alert_critical else '#ffaa0022' }};
+                border:1px solid {{ '#ff4444' if alert_critical else '#ffaa00' }};
+                padding:12px; border-radius:4px; margin-bottom:20px;
+                color:{{ '#ff4444' if alert_critical else '#ffaa00' }};">
+        <strong>ALERTS ({{ open_alerts|length }} open):</strong>
+        {% for a in open_alerts %}
+        <div style="margin-top:6px; font-family:'Courier New',monospace; font-size:12px;">
+            <span style="font-weight:bold;">[{{ a.severity|upper }}]</span>
+            {{ a.timestamp }} —
+            <span style="color:#ffcc66;">{{ a.category }}</span>
+            {% if a.agent_id %}<span style="color:#66ccff;">({{ a.agent_id }})</span>{% endif %}
+            {% if a.provider_name %}
+              <span style="color:#cccccc;">[{{ a.provider_name }}/{{ a.provider_category or '?' }}]</span>
+            {% endif %}
+            — {{ a.message }}
+            {% if a.step_id %}<span style="color:#666; font-size:10px;"> step={{ a.step_id[:18] }}…</span>{% endif %}
+            {% if magi_token %}
+            <a href="#" onclick="resolveAlert({{ a.id }}); return false;"
+               style="color:#888; margin-left:8px; text-decoration:underline;">[resolve]</a>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    <script>
+      async function resolveAlert(id) {
+        const r = await fetch('/api/resolve_alert?id=' + id + '&token={{ magi_token }}',
+                              {method: 'POST'});
+        if (r.ok) location.reload();
+      }
+    </script>
+    {% endif %}
+
+    {% if letta_census %}
+    <h2>LETTA AGENTS</h2>
+    {% set census_bg = {'green': '#00ff8811', 'amber': '#ffaa0022', 'red': '#ff000022'}[letta_census.color] %}
+    {% set census_bd = {'green': '#00ff8866', 'amber': '#ffaa0088', 'red': '#ff444488'}[letta_census.color] %}
+    {% set census_fg = {'green': '#00ff88', 'amber': '#ffaa00', 'red': '#ff4444'}[letta_census.color] %}
+    <div class="card" style="background:{{ census_bg }}; border:1px solid {{ census_bd }};">
+      <div class="label">Active agents on Letta API key</div>
+      <div class="value" style="color:{{ census_fg }};">
+        {{ letta_census.total }} total
+      </div>
+      <div class="sub">
+        {{ letta_census.eval_count }} eval / {{ letta_census.prod_count }} production
+        {% if letta_census.color == 'red' %}
+          <br><span style="color:#ff4444; font-weight:bold;">RUN cleanup_eval_agents.py IMMEDIATELY</span>
+        {% endif %}
+        {% if letta_census.error %}
+          <br><span style="color:#888;">{{ letta_census.error }}</span>
+        {% endif %}
+      </div>
+    </div>
+    {% endif %}
+
+    {% if eval_history and eval_history.has_any_runs %}
+    <h2>EVAL HISTORY</h2>
+    <div class="grid">
+      {% for ag in eval_history.agents %}
+        {% if ag.latest_accuracy is not none %}
+        {% set bg = {'green': '#00ff8811', 'amber': '#ffaa0022', 'red': '#ff000022', 'gray': '#88888811'}[ag.panel_color] %}
+        {% set bd = {'green': '#00ff8866', 'amber': '#ffaa0088', 'red': '#ff444488', 'gray': '#888888'}[ag.panel_color] %}
+        {% set fg = {'green': '#00ff88', 'amber': '#ffaa00', 'red': '#ff4444', 'gray': '#aaaaaa'}[ag.panel_color] %}
+        <div class="card" style="background:{{ bg }}; border:1px solid {{ bd }};">
+          <div class="label">{{ ag.agent_id|upper }} EVAL</div>
+          <div class="value" style="color:{{ fg }};">
+            {{ '%.0f' % (ag.latest_accuracy * 100) }}%
+            <span style="font-size:12px; color:#aaaaaa;">
+              gate {{ '%.0f' % (ag.gate_threshold * 100) }}%
+            </span>
+          </div>
+          <div class="sub">
+            {{ 'PASS' if ag.latest_passed else 'FAIL' }}
+            {% if ag.consec_fails >= 2 %} · {{ ag.consec_fails }}× fail{% endif %}
+            <a href="/evals/{{ ag.agent_id }}" style="color:#66ccff; margin-left:8px;">[detail]</a>
+          </div>
+          {% if ag.sparkline %}
+          <div style="margin-top:6px;">{{ ag.sparkline|safe }}</div>
+          {% endif %}
+          <div class="sub" style="font-size:10px; color:#888; margin-top:4px;">
+            {% for r in ag.last_n %}
+              <span style="color:{{ '#00ff88' if r.passed else '#ff4444' }};">●</span>
+            {% endfor %}
+            ({{ ag.last_n|length }} runs)
+          </div>
+        </div>
+        {% else %}
+        <div class="card" style="background:#88888811; border:1px solid #888888;">
+          <div class="label">{{ ag.agent_id|upper }} EVAL</div>
+          <div class="value" style="color:#888;">—</div>
+          <div class="sub">no runs yet</div>
+        </div>
+        {% endif %}
+      {% endfor %}
+    </div>
+    {% endif %}
+
     <h2>Market</h2>
     <div class="grid">
         <div class="card">
@@ -614,7 +712,9 @@ HTML_TEMPLATE = """
     {% if shadow_variants %}
     <table>
         <tr>
-            <th>Variant</th>
+            <th>Levels</th>
+            <th>Spacing</th>
+            <th>Expected PnL/trip</th>
             <th>Fills (24h)</th>
             <th>Rolling P&amp;L%</th>
             <th>Status</th>
@@ -622,7 +722,11 @@ HTML_TEMPLATE = """
         {% for sv in shadow_variants %}
         <tr>
             <td style="{{ 'color:#00ff88; font-weight:bold;' if sv.level_count == active_levels else '' }}">
-                {{ sv.level_count }}-level{{ ' ★' if sv.level_count == active_levels else '' }}
+                {{ sv.level_count }}{{ ' ★' if sv.level_count == active_levels else '' }}
+            </td>
+            <td>{{ '%.2f'|format((sv.spacing_pct or 0) * 100) }}%</td>
+            <td style="{{ 'color:#00ff88;' if (sv.expected_pnl_pct or 0) > 0 else 'color:#ff4444;' }}">
+                {{ '%.4f'|format((sv.expected_pnl_pct or 0) * 100) }}%
             </td>
             <td>{{ sv.fill_count }}</td>
             <td style="{{ 'color:#00ff88;' if (sv.rolling_pnl_pct or 0) >= 0 else 'color:#ff4444;' }}">
@@ -1687,7 +1791,7 @@ def index():
 
     # P&L snapshot
     snap = get_pnl_snapshot(price)
-    best_shadow_level, best_shadow_pnl = get_best_shadow_from_db()
+    best_shadow_level, best_shadow_spacing, best_shadow_pnl = get_best_shadow_from_db()
     live_pnl_pct = round(snap['total'] / MAX_INVENTORY_USD * 100, 4) if MAX_INVENTORY_USD > 0 else 0.0
     best_shadow_pnl = best_shadow_pnl or 0.0
     live_vs_shadow = round(live_pnl_pct - best_shadow_pnl, 4)
@@ -1785,9 +1889,181 @@ def index():
         recent_orders=recent_orders,
         order_pnl_map=snap['order_pnl_map'],
         magi_token=os.environ.get('MAGI_TRIGGER_TOKEN', ''),
+        open_alerts=_get_open_alerts_safe(),
+        eval_history=_fetch_eval_history(),
+        letta_census=_fetch_letta_agent_census(),
         # Phase 5: agent council panels (single splat from helper)
         **_fetch_council_data(),
     )
+
+
+_LETTA_CENSUS_CACHE = {'ts': 0.0, 'data': None}
+
+
+def _fetch_letta_agent_census():
+    """Count Letta agents per dashboard render. Cached 60s to avoid
+    hammering the SDK. Returns dict with total/eval/prod counts and a
+    color band, or None on error (template hides the widget).
+
+    FIX D, 2026-05-18 audit — visibility layer that should have surfaced
+    the 102-agent leak as it accumulated.
+    """
+    import time as _time
+    now = _time.time()
+    cached = _LETTA_CENSUS_CACHE.get('data')
+    if cached is not None and (now - _LETTA_CENSUS_CACHE['ts']) < 60:
+        return cached
+
+    try:
+        import os, re, sqlite3
+        from dotenv import load_dotenv
+        load_dotenv('/root/xrp_grid/.env')
+        from letta_client import Letta as _Letta
+
+        eval_re = re.compile(
+            r"^eval-(casper|melchior|balthasar)-[a-zA-Z0-9_-]+?-\d+-\d+$"
+        )
+        c = _Letta(api_key=os.environ['LETTA_API_KEY'])
+
+        conn = sqlite3.connect('/root/xrp_grid/observer.db')
+        prod_ids = set(r[0] for r in conn.execute(
+            "SELECT letta_agent_id FROM agent_registry "
+            "WHERE letta_agent_id IS NOT NULL"))
+        conn.close()
+
+        all_agents = []
+        after = None
+        while True:
+            page = list(c.agents.list(
+                limit=100, **({"after": after} if after else {})
+            ))
+            if not page:
+                break
+            all_agents.extend(page)
+            if len(page) < 100:
+                break
+            after = page[-1].id
+
+        prod_count = sum(1 for a in all_agents if a.id in prod_ids)
+        eval_count = sum(1 for a in all_agents if eval_re.match(a.name or ""))
+        total = len(all_agents)
+
+        if eval_count > 50:
+            color = 'red'
+        elif eval_count > 20:
+            color = 'amber'
+        else:
+            color = 'green'
+
+        data = {
+            'total': total,
+            'prod_count': prod_count,
+            'eval_count': eval_count,
+            'color': color,
+            'error': None,
+        }
+    except Exception as e:
+        data = {
+            'total': '?', 'prod_count': '?', 'eval_count': '?',
+            'color': 'amber', 'error': f"census fetch failed: {type(e).__name__}",
+        }
+
+    _LETTA_CENSUS_CACHE['ts'] = now
+    _LETTA_CENSUS_CACHE['data'] = data
+    return data
+
+
+def _fetch_eval_history():
+    """Per-agent eval history for the EVAL HISTORY dashboard panel.
+
+    Returns dict shape:
+      {
+        'has_any_runs': bool,
+        'agents': [
+          {'agent_id': 'casper',
+           'latest_accuracy': 0.85, 'latest_passed': True,
+           'gate_threshold': 0.70,
+           'last_n': [{'ts': ..., 'accuracy': ..., 'passed': bool}, ...],
+           'panel_color': 'green' | 'amber' | 'red',
+           'consec_fails': int,
+           'sparkline': '<svg>...</svg>',
+          },
+          ...
+        ]
+      }
+    Empty/missing data → has_any_runs=False; template collapses the panel.
+    """
+    out = {'has_any_runs': False, 'agents': []}
+    try:
+        from database import get_recent_eval_runs
+    except ImportError:
+        return out
+    any_runs = False
+    for agent_id in ('casper', 'melchior', 'balthasar'):
+        try:
+            rows = get_recent_eval_runs(agent_id, limit=5)
+        except Exception as e:
+            app.logger.warning("get_recent_eval_runs(%s) failed: %r", agent_id, e)
+            rows = []
+        if not rows:
+            out['agents'].append({
+                'agent_id': agent_id, 'latest_accuracy': None,
+                'latest_passed': None, 'gate_threshold': None,
+                'last_n': [], 'panel_color': 'gray',
+                'consec_fails': 0, 'sparkline': '',
+            })
+            continue
+        any_runs = True
+        latest = rows[0]
+        consec_fails = 0
+        for r in rows:
+            if not r['gate_passed']:
+                consec_fails += 1
+            else:
+                break
+        if latest['gate_passed']:
+            color = 'green'
+        elif consec_fails >= 2:
+            color = 'red'
+        else:
+            color = 'amber'
+        last_n = [
+            {
+                'ts': r['timestamp'][:16].replace('T', ' '),
+                'accuracy': float(r['accuracy']),
+                'passed': bool(r['gate_passed']),
+            }
+            for r in rows
+        ]
+        # Sparkline of accuracy oldest→newest
+        spark_vals = [r['accuracy'] for r in reversed(rows)]
+        spark = _svg_sparkline(
+            spark_vals, w=110, h=22,
+            color={'green': '#00ff88', 'amber': '#ffaa00',
+                   'red': '#ff4444'}.get(color, '#888'),
+        ) if len(spark_vals) >= 2 else ''
+        out['agents'].append({
+            'agent_id': agent_id,
+            'latest_accuracy': float(latest['accuracy']),
+            'latest_passed': bool(latest['gate_passed']),
+            'gate_threshold': float(latest['gate_threshold']),
+            'last_n': last_n,
+            'panel_color': color,
+            'consec_fails': consec_fails,
+            'sparkline': spark,
+        })
+    out['has_any_runs'] = any_runs
+    return out
+
+
+def _get_open_alerts_safe():
+    """Wrap get_open_alerts so a DB hiccup never blocks dashboard render."""
+    try:
+        from database import get_open_alerts
+        return get_open_alerts()
+    except Exception as e:
+        app.logger.warning("get_open_alerts failed: %r", e)
+        return []
 
 
 @app.route('/api/status')
@@ -1819,7 +2095,7 @@ def api_status():
 def api_pnl():
     price = engine.get_current_price() or 0.0
     snap = get_pnl_snapshot(price)
-    best_lc, best_shadow_pnl = get_best_shadow_from_db()
+    best_lc, _best_sp, best_shadow_pnl = get_best_shadow_from_db()
     live_pnl_pct = round(snap['total'] / MAX_INVENTORY_USD * 100, 4) if MAX_INVENTORY_USD > 0 else 0.0
     live_minus_shadow = round(live_pnl_pct - (best_shadow_pnl or 0.0), 4)
     return jsonify({
@@ -1883,6 +2159,27 @@ def trigger_magi():
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
+@app.route('/api/resolve_alert', methods=['POST'])
+def resolve_alert():
+    if MAGI_TRIGGER_TOKEN:
+        provided = request.headers.get('X-Magi-Token', '') or \
+                   request.args.get('token', '')
+        if provided != MAGI_TRIGGER_TOKEN:
+            return jsonify({'ok': False, 'error': 'Unauthorized'}), 403
+    try:
+        alert_id = int(request.args.get('id', '0'))
+    except (TypeError, ValueError):
+        return jsonify({'ok': False, 'error': 'invalid id'}), 400
+    if alert_id <= 0:
+        return jsonify({'ok': False, 'error': 'missing id'}), 400
+    try:
+        from database import mark_alert_resolved
+        updated = mark_alert_resolved(alert_id)
+        return jsonify({'ok': True, 'updated': updated})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
 @app.route('/api/toggle_kill', methods=['POST'])
 def toggle_kill():
     try:
@@ -1895,6 +2192,132 @@ def toggle_kill():
         return jsonify({'kill_switch': active})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/evals/<agent_id>')
+def eval_detail(agent_id):
+    """Per-agent eval-history detail page. Renders the most-recent run's
+    per-sample results so the operator can see which scenarios failed and
+    what the agent voted."""
+    if agent_id not in ('casper', 'melchior', 'balthasar'):
+        return ('Unknown agent', 404)
+    from database import get_recent_eval_runs
+    rows = get_recent_eval_runs(agent_id, limit=10)
+    if not rows:
+        return render_template_string(
+            "<html><body style='background:#0a0a0a;color:#ccc;"
+            "font-family:monospace;padding:24px;'>"
+            "<h2>{{ a|upper }} — no eval runs yet</h2>"
+            "<p>Run <code>/root/xrp_grid/evals/run_all.sh</code> to "
+            "populate.</p><a href='/' style='color:#66ccff;'>← dashboard</a>"
+            "</body></html>", a=agent_id)
+    latest = rows[0]
+    results_path = latest['raw_results_path'] or ''
+    samples = []
+    try:
+        import json as _json
+        rp = os.path.join(results_path, 'results.jsonl')
+        if os.path.exists(rp):
+            with open(rp) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    obj = _json.loads(line)
+                    if obj.get('type') != 'result':
+                        continue
+                    r = obj.get('result') or {}
+                    s = r.get('sample') or {}
+                    grade = (r.get('grade') or {}).get('score')
+                    if grade is None:
+                        gs = r.get('grades') or []
+                        if gs:
+                            grade = gs[0].get('score')
+                    md = s.get('metadata') or {}
+                    samples.append({
+                        'id': s.get('id'),
+                        'ground_truth': s.get('ground_truth'),
+                        'submission': r.get('submission'),
+                        'passed': (grade or 0.0) >= 1.0,
+                        'tags': s.get('tags') or [],
+                        'rule_cited': md.get('persona_rule_cited'),
+                        'source': md.get('source'),
+                        'error': r.get('error'),
+                    })
+    except Exception as e:
+        app.logger.warning("eval_detail read failed: %r", e)
+    return render_template_string(EVAL_DETAIL_TEMPLATE,
+                                  agent_id=agent_id, latest=latest,
+                                  rows=rows, samples=samples)
+
+
+EVAL_DETAIL_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+<title>{{ agent_id|upper }} eval detail</title>
+<style>
+  body { background:#0a0a0a; color:#ccc; font-family:'Courier New',monospace;
+         padding:24px; }
+  h2 { color:#00ff88; }
+  table { border-collapse:collapse; width:100%; margin-top:12px; }
+  th, td { border:1px solid #333; padding:6px 10px; text-align:left;
+           vertical-align:top; font-size:12px; }
+  th { background:#222; color:#88cc88; }
+  tr.pass td { background:#00ff8811; }
+  tr.fail td { background:#ff000022; }
+  .vote { font-weight:bold; }
+  a { color:#66ccff; }
+</style>
+</head>
+<body>
+<a href="/">← dashboard</a>
+<h2>{{ agent_id|upper }} — most recent eval run</h2>
+<p>
+  ts: <b>{{ latest.timestamp }}</b> ·
+  suite: <code>{{ latest.suite_name }}</code> ·
+  accuracy: <b style="color:{{ '#00ff88' if latest.gate_passed else '#ff4444' }};">
+    {{ '%.3f' % latest.accuracy }}</b>
+  ({{ latest.passed_samples }}/{{ latest.total_samples }}) ·
+  gate: <b>{{ 'PASS' if latest.gate_passed else 'FAIL' }}</b> @ {{ '%.2f' % latest.gate_threshold }} ·
+  cost: ${{ '%.4f' % (latest.cost_usd_estimate or 0) }} ·
+  commit: {{ latest.git_commit_sha or '?' }}
+</p>
+
+<h3>Samples ({{ samples|length }})</h3>
+<table>
+  <tr>
+    <th>id</th><th>tag</th><th>ground truth</th><th>vote</th>
+    <th>passed</th><th>rule cited</th>
+  </tr>
+  {% for s in samples %}
+  <tr class="{{ 'pass' if s.passed else 'fail' }}">
+    <td>{{ s.id }}</td>
+    <td>{{ s.tags|join(',') }}</td>
+    <td class="vote">{{ s.ground_truth }}</td>
+    <td class="vote">{{ s.submission or s.error or '(empty)' }}</td>
+    <td>{{ 'PASS' if s.passed else 'FAIL' }}</td>
+    <td style="max-width:480px;">{{ s.rule_cited or '' }}</td>
+  </tr>
+  {% endfor %}
+</table>
+
+<h3>Run history ({{ rows|length }})</h3>
+<table>
+  <tr><th>ts</th><th>accuracy</th><th>pass/total</th><th>gate</th><th>cost</th></tr>
+  {% for r in rows %}
+  <tr class="{{ 'pass' if r.gate_passed else 'fail' }}">
+    <td>{{ r.timestamp }}</td>
+    <td>{{ '%.3f' % r.accuracy }}</td>
+    <td>{{ r.passed_samples }}/{{ r.total_samples }}</td>
+    <td>{{ 'PASS' if r.gate_passed else 'FAIL' }}</td>
+    <td>${{ '%.4f' % (r.cost_usd_estimate or 0) }}</td>
+  </tr>
+  {% endfor %}
+</table>
+</body>
+</html>
+"""
 
 
 @app.route('/api/active_grid_levels')

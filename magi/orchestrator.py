@@ -141,24 +141,124 @@ def _hours_since_last_rebuild() -> float | None:
     return round((datetime.utcnow() - last).total_seconds() / 3600, 2)
 
 
+def _cooldown_status(open_orders: dict | None) -> dict:
+    """RECENTRE cooldown state for world_state. Mirrors the
+    [RECENTRE_COOLDOWN] gate in enforce_hard_rules: active when
+    (last 'Grid initialised' row < 60 min ago) AND book healthy
+    (buys>=3 AND sells>=2). Exposed so agents can read the same
+    gate the rule layer enforces."""
+    try:
+        buy_n = int((open_orders or {}).get("buy_count") or 0)
+        sell_n = int((open_orders or {}).get("sell_count") or 0)
+    except (TypeError, ValueError):
+        buy_n = sell_n = 0
+    book_healthy = buy_n >= 3 and sell_n >= 2
+
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT timestamp FROM grid_state "
+        "WHERE notes LIKE 'Grid initialised%' "
+        "ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    if not row or not row['timestamp']:
+        return {
+            "recentre_cooldown_active": False,
+            "recentre_cooldown_minutes_remaining": None,
+            "last_recentre_at_utc": None,
+        }
+    try:
+        last_build = datetime.fromisoformat(row['timestamp'])
+    except ValueError:
+        return {
+            "recentre_cooldown_active": False,
+            "recentre_cooldown_minutes_remaining": None,
+            "last_recentre_at_utc": row['timestamp'],
+        }
+    minutes_since = (datetime.utcnow() - last_build).total_seconds() / 60.0
+    cooldown_active = book_healthy and minutes_since < 60
+    minutes_remaining = max(0, int(60 - minutes_since)) if cooldown_active else 0
+    return {
+        "recentre_cooldown_active": cooldown_active,
+        "recentre_cooldown_minutes_remaining": minutes_remaining,
+        "last_recentre_at_utc": last_build.isoformat(),
+    }
+
+
+def _shadow_variants_for_world_state() -> list:
+    """Return the 24-variant shadow table for Melchior's economic comparison.
+    Each entry: {level_count, spacing_pct, expected_pnl_pct_per_round_trip,
+    fill_count_24h, rolling_pnl_pct, last_fill_at}. Sourced from
+    shadow_grid_state (populated by GridEngine.shadow_sim.persist_all)."""
+    conn = get_conn()
+    rows = conn.execute(
+        '''SELECT level_count, spacing_pct, fill_count, rolling_pnl_pct,
+                  expected_pnl_pct, state_blob
+           FROM shadow_grid_state
+           ORDER BY level_count, spacing_pct'''
+    ).fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        last_fill_at = None
+        blob_str = r['state_blob']
+        if blob_str:
+            try:
+                blob = json.loads(blob_str)
+                fills = blob.get('fills') or []
+                if fills:
+                    last_fill_at = fills[-1].get('timestamp')
+            except (ValueError, TypeError):
+                pass
+        out.append({
+            'level_count': r['level_count'],
+            'spacing_pct': r['spacing_pct'],
+            'expected_pnl_pct_per_round_trip': r['expected_pnl_pct'] or 0.0,
+            'fill_count_24h': r['fill_count'] or 0,
+            'rolling_pnl_pct': r['rolling_pnl_pct'] or 0.0,
+            'last_fill_at': last_fill_at,
+        })
+    return out
+
+
+def _current_variant_position(grid_state: dict | None) -> dict:
+    """Return {level_count, spacing_pct} for the live grid, drawn from the
+    same row build_world_state already fetched. None values if grid_state is
+    missing."""
+    gs = grid_state or {}
+    return {
+        'level_count': gs.get('levels'),
+        'spacing_pct': gs.get('spacing_pct'),
+    }
+
+
 def build_world_state() -> dict:
     """Snapshot of all market/portfolio context for the cycle."""
     from grid.engine import GridEngine
+    from config import MAKER_FEE
     price = None
     try:
         price = GridEngine(paper=True).get_current_price()
     except Exception as e:
         log.warning("Could not fetch current price for world_state: %s", e)
 
+    open_orders = get_open_orders_summary()
+    grid_state = get_current_grid_state() or {}
     return {
         "timestamp":                datetime.utcnow().isoformat(),
         "price":                    price,
         "indicators":               get_latest_indicators('1h') or {},
-        "grid_state":               get_current_grid_state() or {},
+        "grid_state":               grid_state,
         "inventory":                get_latest_inventory() or {},
-        "open_orders":              get_open_orders_summary(),
+        "open_orders":              open_orders,
         "hours_since_last_fill":    _hours_since_last_fill(),
         "hours_since_last_rebuild": _hours_since_last_rebuild(),
+        "cooldown_status":          _cooldown_status(open_orders),
+        "shadow_variants":          _shadow_variants_for_world_state(),
+        "current_variant_position": _current_variant_position(grid_state),
+        # Hardcoded tier-0 today; future work: source from Kraken TradeVolume
+        # (see 02_NEXT_BUILD_TASKS.md).
+        "current_fee_tier_pct":     MAKER_FEE,
         "trajectory":               get_trajectory_context(),
         "market_knowledge":         _get_latest_market_knowledge(),
         "hard_rules":               HARD_RULES,

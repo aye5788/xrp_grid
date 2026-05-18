@@ -45,10 +45,111 @@ load_dotenv(_REPO_ROOT / '.env')
 
 from letta_client import Letta
 
-from database import get_agent_registry_row, get_letta_agent_id
+from database import get_agent_registry_row, get_letta_agent_id, insert_alert
 
 
 log = logging.getLogger(__name__)
+
+
+# Letta Step.stop_reason → (category, severity) for alerts. Anything not in
+# this map is either a normal completion ('end_turn', 'tool_call', etc.) or
+# something we don't yet have a category for; the live hook ignores those.
+_STOP_REASON_ALERTS = {
+    'insufficient_credits':    ('credit_exhausted', 'critical'),
+    'llm_api_error':           ('provider_error',   'warn'),
+    'invalid_llm_response':    ('provider_error',   'warn'),
+    'error':                   ('unknown_failure',  'warn'),
+}
+
+
+def _check_steps_for_alerts(agent_id: str, response, phase: str = "R0") -> None:
+    """Walk the assistant messages in `response`, retrieve each step from
+    Letta, and emit a magi_alerts row when stop_reason indicates a
+    credit/auth/provider failure. Idempotent via step_id dedup in
+    database.insert_alert.
+
+    No-op when no step_id is present (e.g. response was a safe-default
+    early return) or when stop_reason is a normal completion.
+    """
+    step_ids = []
+    for msg in getattr(response, 'messages', []) or []:
+        sid = getattr(msg, 'step_id', None)
+        if sid and sid not in step_ids:
+            step_ids.append(sid)
+    if not step_ids:
+        return
+    for sid in step_ids:
+        try:
+            step = client.steps.retrieve(sid)
+        except Exception as e:
+            log.warning("[%s] could not retrieve step %s: %r",
+                        agent_id, sid, e)
+            continue
+        stop = getattr(step, 'stop_reason', None)
+        status = getattr(step, 'status', None)
+        # Auth failures often surface as error_data containing 401/403
+        # while stop_reason may be 'llm_api_error'. Detect that first.
+        err_data_str = str(getattr(step, 'error_data', '') or '').lower()
+        if '401' in err_data_str or 'unauthorized' in err_data_str \
+                or 'invalid api key' in err_data_str \
+                or 'authentication_error' in err_data_str:
+            category, severity = 'auth_failed', 'critical'
+        elif '429' in err_data_str or 'rate limit' in err_data_str:
+            category, severity = 'rate_limited', 'warn'
+        elif stop in _STOP_REASON_ALERTS:
+            category, severity = _STOP_REASON_ALERTS[stop]
+        elif status == 'failed':
+            category, severity = 'unknown_failure', 'warn'
+        else:
+            continue  # normal completion, no alert
+        msg_summary = (
+            f"[{phase}] stop_reason={stop!s} status={status!s} "
+            f"provider={getattr(step,'provider_name','?')}"
+            f"/{getattr(step,'provider_category','?')} "
+            f"error_data={err_data_str[:200]}"
+        )
+        try:
+            insert_alert(
+                severity=severity, category=category, message=msg_summary,
+                agent_id=agent_id,
+                provider_category=getattr(step, 'provider_category', None),
+                provider_name=getattr(step, 'provider_name', None),
+                step_id=sid,
+            )
+            log.warning("[%s] alert recorded: %s (step %s)",
+                        agent_id, category, sid)
+        except Exception as alert_err:
+            log.error("insert_alert failed: %r", alert_err)
+
+
+def _alert_exception(agent_id: str, exc: BaseException,
+                      phase: str = "R0") -> None:
+    """Record an alert for an exception raised by the SDK call itself
+    (network failure, pre-step error, etc.). Used as a fallback when no
+    Step is created because the call failed before producing one.
+
+    Classifies via the SDK's typed status_code where available; otherwise
+    'provider_error' / warn.
+    """
+    status = getattr(exc, 'status_code', None)
+    text = (str(exc) or '').lower()
+    if status == 401 or 'unauthorized' in text or 'authentication' in text:
+        category, severity = 'auth_failed', 'critical'
+    elif status == 402 or 'insufficient_credits' in text \
+            or 'payment required' in text:
+        category, severity = 'credit_exhausted', 'critical'
+    elif status == 429 or 'rate limit' in text:
+        category, severity = 'rate_limited', 'warn'
+    else:
+        category, severity = 'provider_error', 'warn'
+    try:
+        insert_alert(
+            severity=severity, category=category,
+            message=f"[{phase}] {type(exc).__name__}: {exc}"[:500],
+            agent_id=agent_id,
+        )
+    except Exception as alert_err:
+        log.error("insert_alert failed: %r", alert_err)
 
 
 # --- Letta client (module-level) ---
@@ -175,13 +276,18 @@ def _get_shared_block_id(label: str) -> str:
     return matches[0].id
 
 
-def _extract_last_assistant_text(response) -> Optional[str]:
+def _assistant_texts(response) -> list:
+    """Return every assistant_message text in response.messages, in order.
+
+    Sonnet (and occasionally other models) emit a structured JSON
+    assistant_message, then run core_memory.append, then emit a SECOND
+    chat-style assistant_message summarising the vote. Returning only the
+    last message silently loses the structured vote and trips
+    SAFE_DEFAULTS. Callers should scan this list and accept the first
+    text that parses to the expected schema (R0: has 'position', R1: has
+    'hold'). Defensively handles content as either str or list of parts.
     """
-    Return the text content of the LAST assistant_message in response.messages,
-    or None if there isn't one. Defensively handles content as either str or
-    a list of content parts.
-    """
-    last_text: Optional[str] = None
+    texts: list = []
     for msg in getattr(response, "messages", []) or []:
         mtype = getattr(msg, "message_type", None)
         role = getattr(msg, "role", None)
@@ -189,7 +295,7 @@ def _extract_last_assistant_text(response) -> Optional[str]:
             continue
         content = getattr(msg, "content", None)
         if isinstance(content, str):
-            last_text = content
+            texts.append(content)
         elif isinstance(content, list) and content:
             parts = []
             for part in content:
@@ -199,8 +305,17 @@ def _extract_last_assistant_text(response) -> Optional[str]:
                 if t:
                     parts.append(t)
             if parts:
-                last_text = "\n".join(parts)
-    return last_text
+                texts.append("\n".join(parts))
+    return texts
+
+
+def _extract_last_assistant_text(response) -> Optional[str]:
+    """Backward-compat shim — returns the LAST assistant message text or
+    None. New code should use `_assistant_texts(response)` + per-message
+    schema validation. See `_assistant_texts` docstring for why the
+    trailing-message bias is dangerous for R0/R1 extraction."""
+    texts = _assistant_texts(response)
+    return texts[-1] if texts else None
 
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
@@ -361,24 +476,39 @@ def send_round_0(agent_id: str, cycle_id: str) -> dict:
         except Exception as e:
             last_error = f"transport error: {e!r}"
             log.warning("[%s] R0 attempt %d transport failed: %s", agent_id, attempt, e)
+            _alert_exception(agent_id, e, phase=f"R0 attempt {attempt}")
             continue
 
-        text = _extract_last_assistant_text(response)
-        if not text:
+        # Live Steps-API check: even on a non-raising call, the step's
+        # stop_reason may indicate insufficient_credits / llm_api_error etc.
+        _check_steps_for_alerts(agent_id, response, phase=f"R0 attempt {attempt}")
+
+        # Scan ALL assistant messages and accept the first one that parses
+        # to a valid R0 schema. Trailing chat-style messages emitted after
+        # core_memory.append must not clobber the structured vote.
+        texts = _assistant_texts(response)
+        if not texts:
             last_error = "no assistant_message in response"
             log.warning("[%s] R0 attempt %d had no assistant text", agent_id, attempt)
             continue
 
-        candidate = _parse_json_strict(text)
-        if candidate is None:
-            last_error = f"unparseable response: {text[:200]!r}"
-            log.warning("[%s] R0 attempt %d unparseable: %s", agent_id, attempt, text[:200])
-            continue
+        candidate = None
+        last_parse_error = ""
+        for text in texts:
+            obj = _parse_json_strict(text)
+            if not isinstance(obj, dict):
+                last_parse_error = f"unparseable: {text[:200]!r}"
+                continue
+            ok, err = _validate_r0(obj, agent_id)
+            if not ok:
+                last_parse_error = f"validation: {err} in {text[:200]!r}"
+                continue
+            candidate = obj
+            break
 
-        ok, err = _validate_r0(candidate, agent_id)
-        if not ok:
-            last_error = f"validation: {err}"
-            log.warning("[%s] R0 attempt %d invalid: %s", agent_id, attempt, err)
+        if candidate is None:
+            last_error = last_parse_error or "no parseable R0 JSON in any assistant message"
+            log.warning("[%s] R0 attempt %d: %s", agent_id, attempt, last_error)
             continue
 
         parsed = candidate
@@ -512,17 +642,32 @@ def send_round_1_challenge(agent_id: str, peer_agents: list, cycle_id: str) -> d
         )
     except Exception as e:
         log.exception("[%s] R1 transport failed: %s", agent_id, e)
+        _alert_exception(agent_id, e, phase="R1")
         return {"held": True, "text": "", "revised_position": None,
                 "revision_evidence": None, "error": f"transport: {e!r}"}
 
-    text = _extract_last_assistant_text(response) or ""
-    parsed = _parse_json_strict(text)
+    # Live Steps-API check on the R1 response too.
+    _check_steps_for_alerts(agent_id, response, phase="R1")
 
-    if not isinstance(parsed, dict) or "hold" not in parsed:
+    # Scan all assistant messages; accept the first that parses to the
+    # R1 schema (must have 'hold'). Same rationale as R0: trailing
+    # chat-style messages emitted after core_memory.append must not
+    # clobber the structured response.
+    texts = _assistant_texts(response)
+    parsed = None
+    last_text = ""
+    for t in texts:
+        last_text = t
+        obj = _parse_json_strict(t)
+        if isinstance(obj, dict) and "hold" in obj:
+            parsed = obj
+            break
+
+    if parsed is None:
         log.warning("[%s] R1 response unparseable / missing 'hold': %s",
-                    agent_id, text[:200])
+                    agent_id, last_text[:200])
         # Treat unparseable as a hold (no revision) — preserves caller intent
-        return {"held": True, "text": text,
+        return {"held": True, "text": last_text,
                 "revised_position": None, "revision_evidence": None,
                 "error": "unparseable"}
 

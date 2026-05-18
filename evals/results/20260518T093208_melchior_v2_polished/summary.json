@@ -1,0 +1,40 @@
+{
+  "type": "summary",
+  "metrics": {
+    "total": 9,
+    "total_attempted": 9,
+    "avg_score_attempted": 0.6666666666666666,
+    "avg_score_total": 0.6666666666666666,
+    "per_model": null,
+    "by_metric": {
+      "vote_match": {
+        "avg_score_attempted": 0.6666666666666666,
+        "avg_score_total": 0.6666666666666666,
+        "pass_rate": 66.66666666666666
+      }
+    },
+    "metrics": {
+      "vote_match": 66.66666666666666
+    },
+    "usage_metrics": {
+      "total_prompt_tokens": 68683,
+      "total_completion_tokens": 1041,
+      "total_cost": 0.15651750000000003,
+      "total_cached_input_tokens": 20480,
+      "total_cache_write_tokens": 0,
+      "total_reasoning_tokens": 0
+    },
+    "timing_metrics": {
+      "mean_total_seconds": 4.3195475798307195,
+      "mean_target_seconds": 4.3162089605919185,
+      "mean_extraction_seconds": 9.354472988181644e-05,
+      "p50_total_seconds": 3.970086457207799,
+      "p95_total_seconds": 5.908362058922648,
+      "per_grader_mean_seconds": {
+        "vote_match": 0.00016223028716113832
+      }
+    },
+    "error_summary": null
+  },
+  "gates_passed": true
+}

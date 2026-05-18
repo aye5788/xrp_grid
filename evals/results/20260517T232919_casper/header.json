@@ -1,0 +1,36 @@
+{
+  "type": "header",
+  "suite": "casper_persona_regression",
+  "config": {
+    "target": {
+      "kind": "letta_agent",
+      "base_url": "https://api.letta.com",
+      "api_key": null,
+      "timeout": 180.0,
+      "project_id": null,
+      "max_retries": 0,
+      "model_configs": null,
+      "model_handles": null,
+      "agent_script": "factory.py:create_eval_agent",
+      "agent_id": null,
+      "agent_file": null
+    },
+    "gate": {
+      "kind": "simple",
+      "metric_key": "vote_match",
+      "aggregation": "accuracy",
+      "op": "gte",
+      "value": 0.7,
+      "pass_threshold": null
+    },
+    "graders": {
+      "vote_match": {
+        "kind": "tool",
+        "display_name": null,
+        "extractor": "factory.py:r0_position",
+        "extractor_config": null,
+        "function": "exact_match"
+      }
+    }
+  }
+}

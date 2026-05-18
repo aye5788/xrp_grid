@@ -17,6 +17,11 @@ SYMBOL = "XRP-USD"
 EXCHANGE = "kraken"   # "coinbase" or "kraken"
 GRID_LEVELS_DEFAULT = 10
 GRID_LEVEL_VARIANTS = [6, 8, 10, 12, 14, 16]
+# Shadow spacing variants — combined with GRID_LEVEL_VARIANTS yields
+# 4 × 6 = 24 shadow configurations. Each evaluates both realized
+# (rolling_pnl_pct) and expected (closed-form per-round-trip)
+# economics so Melchior can compare configurations directly.
+SPACING_VARIANTS = [0.010, 0.015, 0.020, 0.025]
 GRID_SWITCH_THRESHOLD_PCT = 0.10   # min P&L% margin to trigger a level switch
 GRID_SWITCH_MIN_FILLS = 20         # both live and candidate need at least this many fills
 GRID_SWITCH_MIN_HOURS = 24         # rolling window for P&L comparison
@@ -71,6 +76,12 @@ LIVE_CONFIRMATION_FILE = "/root/xrp_grid/CONFIRM_LIVE"
 LIVE_CONFIRMATION_TOKEN = "I_UNDERSTAND_THIS_IS_REAL_MONEY\n"
 LIVE_CONFIRMATION_ENV_VAR = "MAGI_LIVE_CONFIRM"
 LIVE_CONFIRMATION_ENV_VALUE = "YES"
+
+# --- Alerts ---
+# Background sweep period for scanning Letta steps for credit/auth/error
+# stop_reasons that the live hook in council.py might have missed
+# (summarization steps, retries, etc.). Set to 0 to disable.
+LETTA_STEPS_SWEEP_INTERVAL_MIN = 30
 
 # --- Cost tracking ---
 LLM_MONTHLY_BUDGET_USD = 5.00

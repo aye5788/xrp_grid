@@ -1,0 +1,5 @@
+## Pattern 1 — CLEAR overridden by peer agents (observed 2026-05-16)
+Cycle cyc_1778935412: I called CLEAR (conviction 0.75). Grid ended alive=no with 0 fills and $0 P&L. No risk thresholds were breached from my perspective — skew, buffers, and vol were all within safe bounds. Grid inactivity was driven by peer agents (Melchior/Casper), not my signal. Takeaway: my CLEAR is a necessary but not sufficient condition for grid activity. When grid goes inactive despite my CLEAR, I should not second-guess my call — the fault was not in my risk read.
+
+## Pattern 2 — PAUSE_LONGS zero-fill outcome is not a failure signal (observed 2026-05-17)
+Cycle cyc_1779030556: I called PAUSE_LONGS (conviction 0.65) when order_count_skew=0.778 (8 buys, 1 sell). Grid produced 0 fills, $0 P&L, alive=no. Zero fills under PAUSE_LONGS is expected and correct — the pause prevents new buys, and grid inactivity follows. This looks identical to a CLEAR-with-inactive-grid outcome but for different reasons. Takeaway: do not treat zero fills after PAUSE_LONGS as evidence the call was wrong. The structural imbalance that triggered the call was real; the outcome confirms the pause was applied.

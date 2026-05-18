@@ -36,10 +36,11 @@ All six provisioning prompts executed; verification passes.
 4. **Engine guards** in `grid/engine.py` — post-action integrity guard
    rebuilds if a risk action leaves the book one-sided. PAUSE_LONGS /
    PAUSE_SHORTS emit WARN "no-op" when `cancelled==0 AND pre-count==0`.
-5. **Scheduler** — `MAGI_HOURS_EST = list(range(24))` (hourly cycles, was
-   `[9, 14]`). Startup debounce reads `debate_records` (was reading sparse
-   `magi_decisions` and firing duplicates on restart). `/internal/trigger_magi`
-   reads `debate_records`.
+5. **Scheduler** — `MAGI_HOURS_EST = [0, 4, 8, 12, 16, 20]` (every 4 hours,
+   6 cycles/day; reduced from hourly on 2026-05-18 to bring monthly cost
+   inside the $20 Letta plan — ~$13/mo @ 6 cycles/day). Startup debounce
+   reads `debate_records` (was reading sparse `magi_decisions` and firing
+   duplicates on restart). `/internal/trigger_magi` reads `debate_records`.
 6. **`debate_records` schema** — added `hard_rule_overrides` (JSON-encoded
    list of bracketed tags), `balthasar_concerns`, `casper_concerns` (schema
    symmetry with `melchior_concerns`). Dashboard's latest-override-tag panel
@@ -161,17 +162,31 @@ Hard caps in `config.py`: `MAX_GRID_SPACING_PCT = 0.025`, `MIN_GRID_SPACING_PCT 
 
 Restart pattern: `systemctl restart magi.service magi-dashboard.service`
 
-## Live state (verified end-of-session 2026-05-17 ~18:35 UTC)
+## Live state (verified end-of-session 2026-05-18 ~10:00 UTC)
 
-- Latest debate_record: id=46, `cyc_1779042856`
-- Open orders: 6 buys / 3 sells (balanced book)
-- Grid centre $1.41×, spacing at MAX 2.5%, 10 levels
-- `vol_regime=LOW`, `atr_percentile=14.33`, market in low-vol drift
-- **Last fill: 2026-05-15T17:08 — ~49.7h ago. Fill drought continues.**
-- Casper now correctly votes TRENDING bearish (post self_model curation)
-- Melchior still votes RECENTRE every cycle; `[RECENTRE_COOLDOWN]` catches it
-- Balthasar correctly votes CLEAR on the balanced book
-- Letta Cloud credit remaining: ~$14.32
+- MAGI cadence: **every 4 hours (6 cycles/day)**, EST hours [0, 4, 8, 12,
+  16, 20]. Projected Letta monthly cost ~$13/mo at this rate, inside the
+  $20/mo plan ceiling. Down from hourly (~$3.20/day, ~$96/mo) which was
+  the proximate cause of the credit blowout earlier this session.
+- Letta Cloud credit balance: **$-241 (negative)** as of session end.
+  Production magi.service is alive but all council calls are 402-rejected
+  until credits are restored or BYOK migration lands. Cycle work falls to
+  safe-defaults silently.
+- Grid centre $1.38×, spacing at MAX 2.5%, 10 levels (per latest grid_state).
+- Open orders: 6 buys / 3 sells (skew unchanged).
+- vol_regime: LOW, low-vol drift continues.
+- **Last real fill: 2026-05-15T17:08 — ~68h ago. Fill drought continues.**
+- Production Letta agents (persona/self_model) on Melchior: v1 (decision-
+  tree) per the rollback earlier this session. v2 Grid Economist persona
+  and Branch A/B work present on disk but not pushed live (eval gate
+  failures across multiple iterations).
+- Shadow infrastructure migrated to 24-variant (lc, sp) keying with
+  expected_pnl_pct closed-form math persisted per variant. World_state now
+  carries `shadow_variants` (24 entries), `current_variant_position`,
+  `current_fee_tier_pct`, and `cooldown_status`.
+- Letta agent count: 13 (3 production + 10 eval, last keep-3 cohorts).
+  Cleanup leak fixed (FIX A/B/C/D/E this session); dashboard widget shows
+  live count with amber/red banding.
 
 ## Outstanding issues
 

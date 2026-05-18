@@ -6,6 +6,29 @@ from typing import Dict, List, Optional, Tuple
 log = logging.getLogger('grid.shadow_simulator')
 
 
+def compute_expected_pnl_pct(grid_high: float, grid_low: float,
+                              n_levels: int, mid_price: float,
+                              maker_fee: float) -> float:
+    """Closed-form expected PnL % per round-trip after maker fees.
+
+    Reflects the static economics of a grid configuration regardless of
+    fill rate. Positive → grid has theoretical edge per round-trip.
+    Negative → fees exceed per-step gross. Mirrors GoodCrypto's
+    "profit per level after fee" calculation.
+
+    Note on independence from price: with grid_high / grid_low computed
+    as mid_price * (1 ± half*spacing), mid_price cancels out and the
+    result depends only on (n_levels, spacing_pct, maker_fee). This
+    function still accepts the four positional inputs so callers don't
+    have to reverse-engineer the spacing.
+    """
+    if n_levels <= 1 or mid_price <= 0:
+        return 0.0
+    price_step = (grid_high - grid_low) / (n_levels - 1)
+    gross_pct_per_step = price_step / mid_price
+    return gross_pct_per_step - (2 * maker_fee)
+
+
 class ShadowGrid:
     """In-memory shadow simulation of one grid level variant."""
 
@@ -196,35 +219,51 @@ class ShadowGrid:
 
 
 class ShadowSimulator:
-    """Fan-out shadow simulation across multiple grid level variants."""
+    """Fan-out shadow simulation across (level_count, spacing_pct) variants.
 
-    def __init__(self, level_variants: list):
+    Each variant is keyed by a (lc, sp) tuple. Variants share the centre with
+    the live grid (centre cancels in the expected-PnL math), but each maintains
+    its own spacing and level count for both realized fill tracking and the
+    closed-form expected-PnL-per-round-trip calculation.
+    """
+
+    def __init__(self, level_variants: list, spacing_variants: list):
         self.level_variants = level_variants
-        self.variants: Dict[int, ShadowGrid] = {}
+        self.spacing_variants = spacing_variants
+        self.variants: Dict[Tuple[int, float], ShadowGrid] = {}
         self._init_variants()
 
     def _init_variants(self):
         from config import MAKER_FEE, MAX_INVENTORY_USD
         for lc in self.level_variants:
-            self.variants[lc] = ShadowGrid(
-                level_count=lc,
-                maker_fee=MAKER_FEE,
-                max_inventory_usd=MAX_INVENTORY_USD
-            )
+            for sp in self.spacing_variants:
+                sg = ShadowGrid(
+                    level_count=lc,
+                    maker_fee=MAKER_FEE,
+                    max_inventory_usd=MAX_INVENTORY_USD,
+                )
+                sg.spacing_pct = sp
+                self.variants[(lc, sp)] = sg
 
-    def rebuild(self, centre: float, spacing_pct: float):
-        """Rebuild all variant grids around centre."""
-        for sg in self.variants.values():
-            sg.rebuild(centre, spacing_pct)
-        log.info(f"ShadowSimulator rebuilt {len(self.variants)} variants @ centre={centre}")
+    def rebuild(self, centre: float, spacing_pct: float = None):
+        """Rebuild all variants around centre. Each variant uses its own
+        configured spacing; the spacing_pct arg is accepted but ignored
+        (kept for back-compat with callers that pass the live grid spacing)."""
+        for (lc, sp), sg in self.variants.items():
+            sg.rebuild(centre, sp)
+        log.info(
+            f"ShadowSimulator rebuilt {len(self.variants)} variants "
+            f"@ centre={centre}"
+        )
 
-    def update_centre(self, centre: float, spacing_pct: float):
-        """Fan centre update to all variants without resetting orders."""
-        for sg in self.variants.values():
-            sg.update_centre(centre, spacing_pct)
+    def update_centre(self, centre: float, spacing_pct: float = None):
+        """Fan centre update to all variants. Each variant preserves its own
+        spacing. spacing_pct arg ignored for back-compat."""
+        for (lc, sp), sg in self.variants.items():
+            sg.update_centre(centre, sp)
         log.info(
             f"ShadowSimulator centre updated {len(self.variants)} variants "
-            f"@ centre={centre} spacing={spacing_pct} (orders preserved)"
+            f"@ centre={centre} (orders preserved, per-variant spacings)"
         )
 
     def process_tick(self, price: float):
@@ -233,61 +272,91 @@ class ShadowSimulator:
             sg.process_tick(price)
 
     def get_evaluation(self) -> dict:
-        """Return per-variant stats dict."""
-        from config import GRID_SWITCH_THRESHOLD_PCT, GRID_SWITCH_MIN_FILLS
-        stats = {}
-        for lc, sg in self.variants.items():
-            stats[lc] = {
+        """Return per-variant stats list, keyed by (level_count, spacing_pct).
+        Each entry includes the closed-form expected_pnl_pct alongside
+        realized rolling stats."""
+        from config import GRID_SWITCH_THRESHOLD_PCT, GRID_SWITCH_MIN_FILLS, MAKER_FEE
+        stats = []
+        for (lc, sp), sg in self.variants.items():
+            half = lc // 2
+            centre = sg.centre or 0.0
+            if centre > 0 and half > 0:
+                grid_high = centre * (1 + half * sp)
+                grid_low  = centre * (1 - half * sp)
+                expected_pnl_pct = compute_expected_pnl_pct(
+                    grid_high, grid_low, lc, centre, MAKER_FEE
+                )
+            else:
+                # No centre yet (pre-rebuild) — fall back to centre-independent form.
+                expected_pnl_pct = (2 * half * sp / (lc - 1) - 2 * MAKER_FEE) if lc > 1 else 0.0
+            stats.append({
                 'level_count': lc,
+                'spacing_pct': sp,
                 'fills': sg.get_fill_count(),
                 'rolling_pnl_pct': sg.get_rolling_pnl_pct(),
-                'resting_orders': len(sg.resting_orders)
-            }
+                'expected_pnl_pct': expected_pnl_pct,
+                'resting_orders': len(sg.resting_orders),
+            })
         return {
             'variants': stats,
             'threshold_pct': GRID_SWITCH_THRESHOLD_PCT,
-            'min_fills': GRID_SWITCH_MIN_FILLS
+            'min_fills': GRID_SWITCH_MIN_FILLS,
         }
 
-    def get_best_shadow_pnl_pct(self, min_hours: int = None) -> Tuple[Optional[int], Optional[float]]:
-        """
-        Return (level_count, rolling_pnl_pct) for the variant with the highest
-        rolling P&L% among those with >= min_hours of fill history.
-        Returns (None, None) if no variant qualifies.
-        """
+    def get_best_shadow_pnl_pct(self, min_hours: int = None) -> Tuple[Optional[int], Optional[float], Optional[float]]:
+        """Return (level_count, spacing_pct, rolling_pnl_pct) for the variant
+        with the highest realized rolling P&L% among those with >= min_hours
+        of fill history. Returns (None, None, None) if no variant qualifies."""
         from config import GRID_SWITCH_MIN_HOURS
         if min_hours is None:
             min_hours = GRID_SWITCH_MIN_HOURS
 
-        best_lc: Optional[int] = None
+        best_key: Optional[Tuple[int, float]] = None
         best_pnl: Optional[float] = None
 
-        for lc, sg in self.variants.items():
+        for key, sg in self.variants.items():
             if sg.get_oldest_fill_age_hours() < min_hours:
                 continue
             pnl = sg.get_rolling_pnl_pct()
             if best_pnl is None or pnl > best_pnl:
                 best_pnl = pnl
-                best_lc = lc
+                best_key = key
 
-        return best_lc, best_pnl
+        if best_key is None:
+            return None, None, None
+        return best_key[0], best_key[1], best_pnl
 
     def persist_all(self):
         """Persist all variant states to DB."""
         from database import upsert_shadow_grid_state
-        for lc, sg in self.variants.items():
+        from config import MAKER_FEE
+        for (lc, sp), sg in self.variants.items():
+            half = lc // 2
+            centre = sg.centre or 0.0
+            if centre > 0 and half > 0:
+                grid_high = centre * (1 + half * sp)
+                grid_low  = centre * (1 - half * sp)
+                expected_pnl_pct = compute_expected_pnl_pct(
+                    grid_high, grid_low, lc, centre, MAKER_FEE
+                )
+            else:
+                expected_pnl_pct = (2 * half * sp / (lc - 1) - 2 * MAKER_FEE) if lc > 1 else 0.0
             upsert_shadow_grid_state(
-                lc, sg.serialize(),
+                lc, sp, sg.serialize(),
                 sg.get_fill_count(),
-                sg.get_rolling_pnl_pct()
+                sg.get_rolling_pnl_pct(),
+                expected_pnl_pct,
             )
 
     def load_from_db(self):
         """Load all variant states from DB, skip if missing."""
         from database import get_shadow_grid_state
         for lc in self.level_variants:
-            data = get_shadow_grid_state(lc)
-            if data:
-                self.variants[lc] = ShadowGrid.deserialize(data)
-                log.info(f"Loaded shadow state lc={lc} "
-                         f"fills={len(self.variants[lc].fills)}")
+            for sp in self.spacing_variants:
+                data = get_shadow_grid_state(lc, sp)
+                if data:
+                    sg = ShadowGrid.deserialize(data)
+                    sg.spacing_pct = sp  # ensure key/state consistency
+                    self.variants[(lc, sp)] = sg
+                    log.info(f"Loaded shadow state lc={lc} sp={sp} "
+                             f"fills={len(sg.fills)}")

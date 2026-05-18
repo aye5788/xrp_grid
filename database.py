@@ -1,6 +1,6 @@
 import sqlite3
 import json
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from config import DB_PATH
 
 
@@ -144,11 +144,14 @@ def init_db():
 
     c.execute('''CREATE TABLE IF NOT EXISTS shadow_grid_state (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        level_count INTEGER NOT NULL UNIQUE,
+        level_count INTEGER NOT NULL,
+        spacing_pct REAL NOT NULL,
         state_blob TEXT,
         fill_count INTEGER DEFAULT 0,
         rolling_pnl_pct REAL DEFAULT 0,
-        updated_at TEXT
+        expected_pnl_pct REAL DEFAULT 0,
+        updated_at TEXT,
+        UNIQUE(level_count, spacing_pct)
     )''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS market_knowledge (
@@ -274,6 +277,62 @@ def init_db():
             c.execute(_alter)
         except sqlite3.OperationalError:
             pass
+
+    # --- Alerts surfaced to the dashboard ---
+    # Categories: credit_exhausted / auth_failed / rate_limited
+    #           / provider_error / unknown_failure / test
+    # Severity: info / warn / critical
+    # provider_category: 'base' (Letta-managed) or 'byok'
+    # provider_name: anthropic / openai / google_ai / BATHY / GEEP / GEMMNY / ...
+    # step_id: Letta Step.id for traceback / sweep dedup
+    c.execute('''CREATE TABLE IF NOT EXISTS magi_alerts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        category TEXT NOT NULL,
+        agent_id TEXT,
+        provider_category TEXT,
+        provider_name TEXT,
+        step_id TEXT,
+        message TEXT NOT NULL,
+        resolved INTEGER DEFAULT 0,
+        resolved_at TEXT
+    )''')
+    c.execute('''CREATE INDEX IF NOT EXISTS idx_magi_alerts_open
+        ON magi_alerts (resolved, timestamp)''')
+    # Idempotent ALTERs for pre-existing tables (this session's earlier draft
+    # had a leaner schema; bring it forward).
+    for _alter in (
+        "ALTER TABLE magi_alerts ADD COLUMN provider_category TEXT",
+        "ALTER TABLE magi_alerts ADD COLUMN provider_name TEXT",
+        "ALTER TABLE magi_alerts ADD COLUMN step_id TEXT",
+    ):
+        try:
+            c.execute(_alter)
+        except sqlite3.OperationalError:
+            pass
+    # step_id index after the ALTER so it succeeds on pre-existing tables.
+    c.execute('''CREATE INDEX IF NOT EXISTS idx_magi_alerts_step_id
+        ON magi_alerts (step_id)''')
+
+    # --- Letta Evals: per-run results (one row per agent per suite execution) ---
+    c.execute('''CREATE TABLE IF NOT EXISTS magi_eval_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        suite_name TEXT NOT NULL,
+        total_samples INTEGER NOT NULL,
+        passed_samples INTEGER NOT NULL,
+        accuracy REAL NOT NULL,
+        gate_passed INTEGER NOT NULL,
+        gate_threshold REAL NOT NULL,
+        cost_usd_estimate REAL,
+        raw_results_path TEXT,
+        git_commit_sha TEXT,
+        notes TEXT
+    )''')
+    c.execute('''CREATE INDEX IF NOT EXISTS idx_eval_runs_agent_ts
+        ON magi_eval_runs (agent_id, timestamp)''')
 
     # --- Phase 5: Letta agent registry (logical agent ↔ Letta UUID) ---
     c.execute('''CREATE TABLE IF NOT EXISTS agent_registry (
@@ -655,26 +714,33 @@ def get_latest_inventory():
 
 # --- Shadow grid helpers ---
 
-def upsert_shadow_grid_state(level_count, state_dict, fill_count=0, rolling_pnl_pct=0.0):
+def upsert_shadow_grid_state(level_count, spacing_pct, state_dict,
+                              fill_count=0, rolling_pnl_pct=0.0,
+                              expected_pnl_pct=0.0):
     conn = get_conn()
     conn.execute('''INSERT INTO shadow_grid_state
-        (level_count, state_blob, fill_count, rolling_pnl_pct, updated_at)
-        VALUES (?,?,?,?,?)
-        ON CONFLICT(level_count) DO UPDATE SET
+        (level_count, spacing_pct, state_blob, fill_count,
+         rolling_pnl_pct, expected_pnl_pct, updated_at)
+        VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT(level_count, spacing_pct) DO UPDATE SET
             state_blob=excluded.state_blob,
             fill_count=excluded.fill_count,
             rolling_pnl_pct=excluded.rolling_pnl_pct,
+            expected_pnl_pct=excluded.expected_pnl_pct,
             updated_at=excluded.updated_at''',
-        (level_count, json.dumps(state_dict), fill_count, rolling_pnl_pct,
+        (level_count, spacing_pct, json.dumps(state_dict),
+         fill_count, rolling_pnl_pct, expected_pnl_pct,
          datetime.utcnow().isoformat()))
     conn.commit()
     conn.close()
 
 
-def get_shadow_grid_state(level_count):
+def get_shadow_grid_state(level_count, spacing_pct):
     conn = get_conn()
-    row = conn.execute('SELECT state_blob FROM shadow_grid_state WHERE level_count=?',
-        (level_count,)).fetchone()
+    row = conn.execute(
+        'SELECT state_blob FROM shadow_grid_state '
+        'WHERE level_count=? AND spacing_pct=?',
+        (level_count, spacing_pct)).fetchone()
     conn.close()
     if row and row['state_blob']:
         return json.loads(row['state_blob'])
@@ -698,20 +764,26 @@ def get_active_shadow_level_count() -> int | None:
 
 def get_all_shadow_states():
     conn = get_conn()
-    rows = conn.execute('''SELECT level_count, fill_count, rolling_pnl_pct, updated_at
-        FROM shadow_grid_state ORDER BY level_count''').fetchall()
+    rows = conn.execute(
+        '''SELECT level_count, spacing_pct, fill_count, rolling_pnl_pct,
+                  expected_pnl_pct, updated_at
+           FROM shadow_grid_state
+           ORDER BY level_count, spacing_pct'''
+    ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
 def get_best_shadow_from_db():
-    """Return (level_count, rolling_pnl_pct) for best shadow variant with fills > 0."""
+    """Return (level_count, spacing_pct, rolling_pnl_pct) for the best shadow
+    variant with fills > 0. Returns (None, None, None) if no variant has
+    fills."""
     rows = get_all_shadow_states()
     candidates = [r for r in rows if (r['fill_count'] or 0) > 0]
     if not candidates:
-        return None, None
+        return None, None, None
     best = max(candidates, key=lambda r: r['rolling_pnl_pct'] or 0)
-    return best['level_count'], best['rolling_pnl_pct']
+    return best['level_count'], best['spacing_pct'], best['rolling_pnl_pct']
 
 
 # --- Token usage helpers ---
@@ -1112,6 +1184,152 @@ def get_recent_debate_records(limit=20):
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# --- magi_alerts ---
+
+_ALERT_DEDUP_WINDOW_MINUTES = 60
+
+
+def insert_eval_run(agent_id, suite_name, total_samples, passed_samples,
+                    accuracy, gate_passed, gate_threshold,
+                    cost_usd_estimate=None, raw_results_path=None,
+                    git_commit_sha=None, notes=None):
+    """Insert a single magi_eval_runs row. Returns the inserted row id."""
+    conn = get_conn()
+    cur = conn.execute(
+        '''INSERT INTO magi_eval_runs
+            (timestamp, agent_id, suite_name, total_samples, passed_samples,
+             accuracy, gate_passed, gate_threshold, cost_usd_estimate,
+             raw_results_path, git_commit_sha, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+        (
+            datetime.utcnow().isoformat(),
+            agent_id, suite_name,
+            int(total_samples), int(passed_samples),
+            float(accuracy),
+            1 if gate_passed else 0,
+            float(gate_threshold),
+            None if cost_usd_estimate is None else float(cost_usd_estimate),
+            raw_results_path, git_commit_sha, notes,
+        )
+    )
+    rid = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return rid
+
+
+def get_recent_eval_runs(agent_id, limit=5):
+    """Return up to `limit` most recent magi_eval_runs rows for one agent,
+    newest first. Each row is a sqlite3.Row (dict-like)."""
+    conn = get_conn()
+    rows = conn.execute(
+        '''SELECT id, timestamp, agent_id, suite_name, total_samples,
+                  passed_samples, accuracy, gate_passed, gate_threshold,
+                  cost_usd_estimate, raw_results_path, git_commit_sha, notes
+           FROM magi_eval_runs
+           WHERE agent_id=?
+           ORDER BY timestamp DESC LIMIT ?''',
+        (agent_id, limit),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def insert_alert(severity, category, message, agent_id=None,
+                 provider_category=None, provider_name=None, step_id=None):
+    """
+    Insert a row into magi_alerts.
+
+    Dedup rules (both must miss for the row to be inserted):
+      1. No unresolved row exists with the same
+         (category, agent_id, provider_category) within the last 60 minutes.
+      2. No row exists (resolved or not) with the same step_id.
+         (step_id is a Letta-assigned unique identifier; if we've already
+         alerted on a step, the background sweep should not re-alert.)
+
+    Returns the inserted row id, or None if deduped.
+    """
+    conn = get_conn()
+    if step_id:
+        existing_step = conn.execute(
+            "SELECT id FROM magi_alerts WHERE step_id=? LIMIT 1",
+            (step_id,)
+        ).fetchone()
+        if existing_step:
+            conn.close()
+            return None
+    cutoff = (
+        datetime.utcnow() - timedelta(minutes=_ALERT_DEDUP_WINDOW_MINUTES)
+    ).isoformat()
+    existing = conn.execute(
+        "SELECT id FROM magi_alerts "
+        "WHERE category=? "
+        "AND IFNULL(agent_id,'')=IFNULL(?,'') "
+        "AND IFNULL(provider_category,'')=IFNULL(?,'') "
+        "AND resolved=0 AND timestamp >= ? LIMIT 1",
+        (category, agent_id, provider_category, cutoff)
+    ).fetchone()
+    if existing:
+        conn.close()
+        return None
+    cur = conn.execute(
+        "INSERT INTO magi_alerts (timestamp, severity, category, agent_id, "
+        "provider_category, provider_name, step_id, message) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (datetime.utcnow().isoformat(), severity, category, agent_id,
+         provider_category, provider_name, step_id,
+         (message or '')[:500])
+    )
+    conn.commit()
+    row_id = cur.lastrowid
+    conn.close()
+    return row_id
+
+
+def get_open_alerts():
+    """Return open (unresolved) alerts ordered critical → warn → info,
+    then newest first within each severity."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, timestamp, severity, category, agent_id, "
+        "provider_category, provider_name, step_id, message "
+        "FROM magi_alerts WHERE resolved=0 "
+        "ORDER BY CASE severity "
+        "  WHEN 'critical' THEN 0 "
+        "  WHEN 'warn' THEN 1 "
+        "  WHEN 'info' THEN 2 "
+        "  ELSE 3 END, "
+        "timestamp DESC"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_latest_alert_timestamp():
+    """Return the timestamp of the most recent alert row (any status),
+    or None. Used by the background sweep to scope its lookback window."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT MAX(timestamp) AS ts FROM magi_alerts"
+    ).fetchone()
+    conn.close()
+    return row['ts'] if row and row['ts'] else None
+
+
+def mark_alert_resolved(alert_id):
+    """Mark an alert resolved. Returns True if a row was updated."""
+    conn = get_conn()
+    cur = conn.execute(
+        "UPDATE magi_alerts SET resolved=1, resolved_at=? "
+        "WHERE id=? AND resolved=0",
+        (datetime.utcnow().isoformat(), int(alert_id))
+    )
+    conn.commit()
+    updated = cur.rowcount > 0
+    conn.close()
+    return updated
 
 
 def get_agent_accuracy(agent_id, days=7):

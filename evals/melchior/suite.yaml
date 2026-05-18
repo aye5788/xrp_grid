@@ -1,0 +1,33 @@
+name: melchior_persona_regression
+description: >
+  Option A persona regression for Melchior. Verifies each scenario's vote
+  matches the persona decision-tree-prescribed answer. Fresh throwaway
+  agent per sample in the magi-evals Letta project; production agent is
+  not touched. See evals/common/build_datasets.py for ground-truth rule
+  citations per sample.
+
+dataset: dataset.jsonl
+
+target:
+  kind: letta_agent
+  agent_script: factory.py:create_eval_agent
+  base_url: https://api.letta.com
+  # api_key + project intentionally omitted — letta-evals 0.15.0 does NOT
+  # expand ${VAR} substitution in suite YAML, so the literal string would
+  # be passed and cause 401. The AsyncLetta client reads LETTA_API_KEY
+  # from env directly; the factory in common/factory_base.py reads
+  # LETTA_EVALS_PROJECT_ID and passes `project=<slug>` per-agent.
+  timeout: 180.0
+
+graders:
+  vote_match:
+    kind: tool
+    function: exact_match
+    extractor: factory.py:r0_position
+
+gate:
+  kind: simple
+  metric_key: vote_match
+  aggregation: accuracy
+  op: gte
+  value: 0.70

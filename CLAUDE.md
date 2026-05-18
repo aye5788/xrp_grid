@@ -127,6 +127,14 @@ re-derive these.
   idempotent. Equal across agents wherever providers expose
   equivalent knobs; provider-side asymmetries (GPT-4o has no native
   extended-thinking budget) are documented inline.
+- Letta Evals suites live under `/root/xrp_grid/evals/{casper,melchior,
+  balthasar}/`. Persona regression (Option A) is built and is the gate
+  to run before pushing persona edits via `provision_agents.py`.
+  Runner: `evals/run_all.sh`. Results table: `magi_eval_runs`.
+  Dashboard panel: EVAL HISTORY between ALERTS and Market. Eval venv is
+  Python 3.11 at `evals/.venv/` (uv-managed, separate from MAGI's main
+  Python 3.10 venv). Requires `LETTA_EVALS_PROJECT_ID` set in `.env`
+  pointing at a Letta Cloud project distinct from production.
 
 ## 5. Operating discipline
 
@@ -170,6 +178,12 @@ Discipline that prevents wasted work.
   alternative is a fragile multi-step edit. When shipping code for
   the operator to push, provide the final file, not a snippet plus
   navigation instructions.
+- **Run evals before pushing persona edits.** Before re-running
+  `magi/provision_agents.py` after any persona change, run
+  `/root/xrp_grid/evals/run_all.sh` and confirm all three gates pass.
+  The eval snapshots live self_models at run start, then spins up
+  throwaway agents in the `magi-evals` Letta project — production
+  Casper/Melchior/Balthasar are not touched.
 
 ## 6. Forbidden moves
 

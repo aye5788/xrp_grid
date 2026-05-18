@@ -75,9 +75,9 @@ class GridEngine:
 
     def load_state(self):
         """Load shadow simulator and level_count from DB. Call after init_db()."""
-        from config import GRID_LEVEL_VARIANTS
+        from config import GRID_LEVEL_VARIANTS, SPACING_VARIANTS
         from grid.shadow_simulator import ShadowSimulator
-        self.shadow_sim = ShadowSimulator(GRID_LEVEL_VARIANTS)
+        self.shadow_sim = ShadowSimulator(GRID_LEVEL_VARIANTS, SPACING_VARIANTS)
         self.shadow_sim.load_from_db()
         # Restore _last_shadow_level_count from DB so restarts don't
         # trigger unnecessary shadow full-rebuilds.
@@ -192,7 +192,14 @@ class GridEngine:
                 log.warning(f"Shadow persist failed: {e}")
 
     def evaluate_and_maybe_switch_levels(self) -> Optional[int]:
-        """Evaluate shadow variants; switch level_count and rebuild if warranted."""
+        """Evaluate shadow variants; switch level_count and rebuild if warranted.
+
+        With the 24-variant (lc, sp) shadow grid, this function preserves the
+        original "switch level_count only" semantics by filtering variants to
+        the current live spacing and picking the best level_count among them.
+        Cross-spacing switching is deferred — see 02_NEXT_BUILD_TASKS.md for
+        the Melchior RECONFIGURE → orchestrator-mapping follow-on.
+        """
         if not self.shadow_sim:
             return None
         from config import (GRID_SWITCH_THRESHOLD_PCT, GRID_SWITCH_MIN_FILLS,
@@ -202,7 +209,24 @@ class GridEngine:
         if not variants:
             return None
 
-        current_stats = variants.get(self.level_count, {})
+        # Determine current live spacing — filter variants to that band.
+        grid_state = get_current_grid_state() or {}
+        live_spacing = grid_state.get('spacing_pct')
+        if live_spacing is None:
+            log.info("Shadow eval: no live spacing in grid_state — no switch")
+            return None
+        # Match live spacing to nearest variant spacing for safety.
+        same_spacing = [v for v in variants
+                        if abs(v['spacing_pct'] - live_spacing) < 1e-9]
+        if not same_spacing:
+            log.info(f"Shadow eval: no shadow variant matches live spacing "
+                     f"{live_spacing} — no switch")
+            return None
+
+        current_stats = next(
+            (v for v in same_spacing if v['level_count'] == self.level_count),
+            {}
+        )
         current_pnl = current_stats.get('rolling_pnl_pct', 0.0)
         current_fills = current_stats.get('fills', 0)
 
@@ -213,9 +237,10 @@ class GridEngine:
                      f"< min={GRID_SWITCH_MIN_FILLS}) — no switch")
             return None
 
-        best_lc = max(variants.keys(), key=lambda k: variants[k]['rolling_pnl_pct'])
-        best_pnl = variants[best_lc]['rolling_pnl_pct']
-        best_fills = variants[best_lc]['fills']
+        best = max(same_spacing, key=lambda v: v['rolling_pnl_pct'])
+        best_lc = best['level_count']
+        best_pnl = best['rolling_pnl_pct']
+        best_fills = best['fills']
 
         if best_lc == self.level_count:
             log.info(f"Shadow eval: current lc={self.level_count} is best "
@@ -230,8 +255,8 @@ class GridEngine:
             return None
 
         # Gate 3: time window — both variants need GRID_SWITCH_MIN_HOURS of history
-        current_sg = self.shadow_sim.variants.get(self.level_count)
-        best_sg = self.shadow_sim.variants.get(best_lc)
+        current_sg = self.shadow_sim.variants.get((self.level_count, live_spacing))
+        best_sg = self.shadow_sim.variants.get((best_lc, live_spacing))
         current_age = current_sg.get_oldest_fill_age_hours() if current_sg else 0.0
         best_age = best_sg.get_oldest_fill_age_hours() if best_sg else 0.0
 
@@ -254,7 +279,6 @@ class GridEngine:
                     f"margin={margin:.4f}% pnl_best={best_pnl:.4f}% "
                     f"pnl_curr={current_pnl:.4f}%")
         self.level_count = best_lc
-        grid_state = get_current_grid_state()
         centre = grid_state['centre_price'] if grid_state else None
         spacing = grid_state['spacing_pct'] if grid_state else GRID_SPACING_PCT
 

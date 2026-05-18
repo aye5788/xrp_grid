@@ -2,7 +2,7 @@ import time
 import logging
 import signal
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
 from database import init_db
@@ -29,7 +29,7 @@ log = logging.getLogger('scheduler')
 
 # Schedule config (EST)
 OBSERVER_INTERVAL_MINUTES = 60
-MAGI_HOURS_EST = list(range(24))   # hourly, all 24 hours
+MAGI_HOURS_EST = [0, 4, 8, 12, 16, 20]   # every 4 hours (6 cycles/day) — ~$13/mo to fit $20 Letta plan
 
 EST = ZoneInfo('America/New_York')
 
@@ -199,6 +199,120 @@ def run_magi_cycle(trigger='scheduled'):
         log.error(f"MAGI cycle error: {e}")
 
 
+def sweep_letta_steps_for_failures():
+    """Scan recent Letta steps for credit/auth/error stop_reasons that the
+    live council.py hook might have missed (summarization, retries, anything
+    not flowing through the message-create return path).
+
+    Scope: MAGI agents only (casper/melchior/balthasar via agent_registry).
+    Window: from MAX(magi_alerts.timestamp) - 1h, or last 6h on first call.
+    Dedup: insert_alert skips on existing step_id.
+
+    The Letta SDK's c.steps.list() is server-side broken on the `order`
+    parameter (returns 400), so this sweep walks recent runs per agent and
+    pulls their steps via /v1/runs/{run_id}/steps which works correctly.
+    """
+    import os
+    import requests
+    from datetime import timedelta
+    from database import (
+        get_agent_registry_row, get_latest_alert_timestamp, insert_alert,
+    )
+
+    api_key = os.environ.get('LETTA_API_KEY')
+    if not api_key:
+        return
+    headers = {'Authorization': f'Bearer {api_key}'}
+
+    last_ts = get_latest_alert_timestamp()
+    if last_ts:
+        try:
+            lookback_start = datetime.fromisoformat(last_ts) - timedelta(hours=1)
+        except ValueError:
+            lookback_start = datetime.utcnow() - timedelta(hours=6)
+    else:
+        lookback_start = datetime.utcnow() - timedelta(hours=6)
+
+    stop_reason_map = {
+        'insufficient_credits':  ('credit_exhausted', 'critical'),
+        'llm_api_error':         ('provider_error',   'warn'),
+        'invalid_llm_response':  ('provider_error',   'warn'),
+        'error':                 ('unknown_failure',  'warn'),
+    }
+
+    swept = 0
+    alerted = 0
+    for agent_id in ('casper', 'melchior', 'balthasar'):
+        row = get_agent_registry_row(agent_id)
+        if not row:
+            continue
+        letta_id = row.get('letta_agent_id')
+        if not letta_id:
+            continue
+        try:
+            r = requests.get(
+                'https://api.letta.com/v1/runs',
+                headers=headers,
+                params={'agent_id': letta_id, 'limit': 50},
+                timeout=15,
+            )
+            r.raise_for_status()
+            runs = r.json()
+        except Exception as e:
+            log.warning("sweep: runs list failed for %s: %r", agent_id, e)
+            continue
+        for run in runs:
+            try:
+                created = datetime.fromisoformat(
+                    (run.get('created_at') or '').replace('Z', '')
+                )
+            except ValueError:
+                continue
+            if created < lookback_start:
+                continue
+            try:
+                rs = requests.get(
+                    f"https://api.letta.com/v1/runs/{run['id']}/steps",
+                    headers=headers, timeout=15,
+                )
+                rs.raise_for_status()
+                steps = rs.json()
+            except Exception as e:
+                log.warning("sweep: steps list failed for run %s: %r",
+                            run.get('id'), e)
+                continue
+            for step in steps:
+                swept += 1
+                stop = step.get('stop_reason')
+                status = step.get('status')
+                err_data_str = str(step.get('error_data') or '').lower()
+                if '401' in err_data_str or 'unauthorized' in err_data_str \
+                        or 'authentication_error' in err_data_str:
+                    cat, sev = 'auth_failed', 'critical'
+                elif '429' in err_data_str or 'rate limit' in err_data_str:
+                    cat, sev = 'rate_limited', 'warn'
+                elif stop in stop_reason_map:
+                    cat, sev = stop_reason_map[stop]
+                elif status == 'failed':
+                    cat, sev = 'unknown_failure', 'warn'
+                else:
+                    continue
+                inserted = insert_alert(
+                    severity=sev, category=cat,
+                    message=(f"[sweep] stop_reason={stop} status={status} "
+                             f"provider={step.get('provider_name','?')}"
+                             f"/{step.get('provider_category','?')} "
+                             f"error_data={err_data_str[:200]}"),
+                    agent_id=agent_id,
+                    provider_category=step.get('provider_category'),
+                    provider_name=step.get('provider_name'),
+                    step_id=step.get('id'),
+                )
+                if inserted:
+                    alerted += 1
+    log.info("sweep: walked %d steps, %d new alerts", swept, alerted)
+
+
 def should_run_magi(now_est: datetime, last_magi_hour: int) -> bool:
     """Check if it's time for a MAGI cycle."""
     current_hour = now_est.hour
@@ -334,14 +448,29 @@ def main():
         log.warning(f"Could not read last MAGI time from debate_records: {e} — defaulting to -1")
         last_magi_hour = -1
 
+    from config import LETTA_STEPS_SWEEP_INTERVAL_MIN
+    last_sweep_time = datetime.now(timezone.utc) - \
+        timedelta(minutes=LETTA_STEPS_SWEEP_INTERVAL_MIN)  # fire on first tick
+
     log.info(
         f"Scheduler running — observer every {OBSERVER_INTERVAL_MINUTES}min, "
-        f"MAGI hours (EST) = {MAGI_HOURS_EST}"
+        f"MAGI hours (EST) = {MAGI_HOURS_EST}, "
+        f"alert sweep every {LETTA_STEPS_SWEEP_INTERVAL_MIN}min"
     )
 
     while running:
         now_utc = datetime.now(timezone.utc)
         now_est = now_utc.astimezone(EST)
+
+        # Background alert sweep — every LETTA_STEPS_SWEEP_INTERVAL_MIN minutes
+        if LETTA_STEPS_SWEEP_INTERVAL_MIN > 0:
+            mins_since_sweep = (now_utc - last_sweep_time).total_seconds() / 60
+            if mins_since_sweep >= LETTA_STEPS_SWEEP_INTERVAL_MIN:
+                try:
+                    sweep_letta_steps_for_failures()
+                except Exception as e:
+                    log.error(f"sweep_letta_steps_for_failures raised: {e!r}")
+                last_sweep_time = now_utc
 
         # Observer: run every 60 minutes
         minutes_since_observer = (now_utc - last_observer_time).total_seconds() / 60
