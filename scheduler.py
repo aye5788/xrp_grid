@@ -1,5 +1,6 @@
 import time
 import logging
+import os
 import signal
 import sys
 from datetime import datetime, timezone, timedelta
@@ -28,13 +29,31 @@ _root.addHandler(_sh)
 log = logging.getLogger('scheduler')
 
 # Schedule config (EST)
-OBSERVER_INTERVAL_MINUTES = 60
+# 2026-05-19 — observer dropped 60→10 min to tighten fill-detection cadence
+# (Option 3 of the no-fills diagnostic). Public Kraken endpoints (Ticker +
+# OHLC) are well inside rate limits at 6×/h; the rate-limited counter is
+# trading-side only, untouched.
+OBSERVER_INTERVAL_MINUTES = 10
 MAGI_HOURS_EST = [0, 4, 8, 12, 16, 20]   # every 4 hours (6 cycles/day) — ~$13/mo to fit $20 Letta plan
+
+# --- Gate wake wire ---------------------------------------------------
+# A gate trigger in WAKE_CLASS_TRIGGERS that fires since the last cycle wakes
+# MAGI OFF-schedule (vs. only annotating the next 4h slot). Throttled to >=
+# WAKE_MIN_INTERVAL_MIN since any MAGI cycle so the Letta spend stays bounded:
+# in calm markets ~$0 extra, in a real event one prompt. Edge-triggered gate
+# functions + consumed_in_cycle marking prevent a standing condition from
+# re-waking. Wake-class is deliberately the urgent subset (book one-sided,
+# grid breach, regime flip); low-urgency triggers (T15 skew drift early-warn,
+# T6/T7 scorer) still wait for the next scheduled or woken cycle.
+WAKE_CLASS_TRIGGERS = ("T14", "T2", "T11")
+WAKE_MIN_INTERVAL_MIN = 60
+_last_magi_cycle_at = None   # set by run_magi_cycle; drives the wake throttle
 
 EST = ZoneInfo('America/New_York')
 
 # Global engine instance
-engine = GridEngine(paper=True)
+_LIVE = os.environ.get("MAGI_LIVE_CONFIRM") == "YES"
+engine = GridEngine(paper=not _LIVE)
 running = True
 
 # Track last stats recompute date
@@ -49,6 +68,40 @@ signal.signal(signal.SIGTERM, signal_handler)
 signal.signal(signal.SIGINT, signal_handler)
 
 
+def _first_boot_geometry():
+    """Pick (spacing_pct, levels) for the very first grid from the
+    analytical scorer's rank-1 acceptable variant. Returns (None, None)
+    if no acceptable variant exists in current candle history — caller
+    is expected to stand down rather than guess.
+
+    Run only when no paper orders are restored from DB at startup.
+    Replaces the prior `engine.initialise_grid()` no-arg call that
+    silently fell back to the now-deleted GRID_SPACING_PCT constant.
+    """
+    from database import get_candles
+    from config import GRID_LEVEL_FEE_PER_SIDE
+    from magi.spacing_evaluator import score_variants, DEFAULT_VARIANTS
+    try:
+        candles = list(reversed(get_candles('1h', limit=720)))
+    except Exception as e:
+        log.error(f"_first_boot_geometry: candle fetch failed: {e}")
+        return None, None
+    try:
+        scored = score_variants(
+            current_price=0.0,  # not used by the scorer
+            candles_1h=candles,
+            fee_rate_per_side=GRID_LEVEL_FEE_PER_SIDE,  # maker: resting arms fill maker
+            candidate_variants=DEFAULT_VARIANTS,
+        )
+    except Exception as e:
+        log.error(f"_first_boot_geometry: scoring failed: {e}")
+        return None, None
+    rank1 = next((v for v in scored if v.get('acceptable')), None)
+    if not rank1:
+        return None, None
+    return float(rank1['spacing_pct']), int(rank1['levels'])
+
+
 def run_observer_cycle():
     """Run data collection cycle, shadow tick, and paper fill simulation."""
     log.info("--- OBSERVER CYCLE ---")
@@ -61,6 +114,31 @@ def run_observer_cycle():
         price = engine.get_current_price()
         if price:
             engine.process_shadow_tick(price)
+            if not engine.paper:
+                # Live-mode fill detection — reconcile resting orders against
+                # Kraken ClosedOrders. Mutually exclusive with the paper
+                # simulate_fills block below.
+                try:
+                    live_filled = engine.reconcile_live_fills_from_kraken()
+                    if live_filled:
+                        log.info(
+                            f"Observer: {len(live_filled)} live fills "
+                            f"reconciled at {price:.4f}"
+                        )
+                except Exception as e:
+                    log.error(f"Live fill reconcile error: {e}")
+                # Book-state gate triggers — evaluate right after reconcile so
+                # a fill that drains a side (T14 one-sided) or drifts skew past
+                # threshold (T15) wakes MAGI promptly. The wake wire in the
+                # main loop picks up the unconsumed fired event.
+                try:
+                    from magi.gate import evaluate_book_state_triggers
+                    from config import DB_PATH
+                    bfired = evaluate_book_state_triggers(DB_PATH)
+                    if bfired:
+                        log.info(f"Observer: book-state gate triggers fired {bfired}")
+                except Exception as e:
+                    log.error(f"Book-state gate trigger eval error: {e}")
             if engine.paper:
                 from database import get_current_grid_state, get_latest_candle_hl
                 candle_high, candle_low = get_latest_candle_hl('1h')
@@ -158,9 +236,70 @@ def run_observer_cycle():
         log.warning(f"Grid config outcome update failed: {e}")
 
 
+def _update_rotation_counter_and_maybe_rotate(cycle_success: bool) -> None:
+    """Persist the rotation_cycle_counter increment and (on success only)
+    invoke magi.memory_lifecycle.maybe_rotate. Called from run_magi_cycle
+    after a cycle was actually attempted (i.e. guardrails passed).
+
+    Increment fires on success AND on fail so the cadence runs on calendar
+    cycles, not only successful ones. Rotation itself only fires on
+    success — distilling a bad cycle's thread is worse than skipping the
+    rotation, since the thread state may already be inconsistent.
+    """
+    try:
+        from database import get_system_state, set_system_state
+        counter = int(get_system_state('rotation_cycle_counter',
+                                       default='0'))
+        counter += 1
+        set_system_state('rotation_cycle_counter', counter)
+        log.info(
+            "rotation_cycle_counter = %d (cycle %s)",
+            counter, 'succeeded' if cycle_success else 'failed',
+        )
+        if cycle_success:
+            try:
+                from magi.memory_lifecycle import maybe_rotate
+                maybe_rotate(counter)
+            except Exception as e:
+                log.error(f"maybe_rotate({counter}) raised: {e!r}")
+    except Exception as e:
+        log.error(f"rotation counter persistence failed: {e!r}")
+
+
 def run_magi_cycle(trigger='scheduled'):
-    """Run full MAGI supervision cycle and apply to grid."""
+    """Run full MAGI supervision cycle and apply to grid.
+
+    Counter / rotation lifecycle (after any attempted cycle, i.e. one
+    that passed the guardrail check):
+      - increment rotation_cycle_counter in system_state and persist
+      - on a successful cycle ONLY, call maybe_rotate(counter)
+      - on a failed cycle: increment but do not rotate (don't distil a
+        bad cycle's thread)
+    Guardrail-blocked cycles do not increment — no council ran, no
+    thread accumulated.
+
+    Config-drift validator runs at start AND end of every cycle:
+      - start hook catches drift introduced between provisioning runs
+        (e.g. the 2026-05-20 BYOK runbook bug that reset Balthasar's
+        temperature to 1.0 for ~17h)
+      - end hook catches drift introduced mid-cycle by any mechanism
+      Failure mode: emit critical alert, continue. Never blocks trading.
+    """
     log.info(f"--- MAGI CYCLE (trigger={trigger}) ---")
+
+    # Record cycle time for the gate-wake throttle. Set for EVERY cycle
+    # (scheduled, startup, manual, gate wake) so an off-schedule wake can't
+    # fire within WAKE_MIN_INTERVAL_MIN of any prior cycle.
+    global _last_magi_cycle_at
+    _last_magi_cycle_at = datetime.now(timezone.utc)
+
+    # Pre-cycle config drift check — non-fatal.
+    try:
+        from magi.config_validator import alert_on_config_drift
+        alert_on_config_drift()
+    except Exception as e:
+        log.warning("config_validator pre-cycle check failed: %s", e)
+
     ok, failures = check_all_guardrails()
     if not ok:
         log.error(f"Guardrails blocked cycle: {failures}")
@@ -170,6 +309,8 @@ def run_magi_cycle(trigger='scheduled'):
         except Exception as e:
             log.error(f"Cancel-all failed: {e}")
         return
+
+    cycle_success = False
     try:
         result = run_cycle(trigger=trigger)
         if result:
@@ -193,10 +334,23 @@ def run_magi_cycle(trigger='scheduled'):
             if price:
                 engine.update_inventory(price)
             log.info(f"MAGI cycle complete — grid={consensus['grid_action']} risk={consensus['risk_action']}")
+            cycle_success = True
         else:
             log.warning("MAGI cycle returned no result")
     except Exception as e:
         log.error(f"MAGI cycle error: {e}")
+
+    # Counter + rotation hook — runs whether the cycle succeeded or failed.
+    # Wrapped internally so nothing in here can crash the scheduler loop.
+    _update_rotation_counter_and_maybe_rotate(cycle_success)
+
+    # Post-cycle config drift check — non-fatal. Catches mid-cycle drift
+    # introduced by any mechanism (e.g. an out-of-band agents.update).
+    try:
+        from magi.config_validator import alert_on_config_drift
+        alert_on_config_drift()
+    except Exception as e:
+        log.warning("config_validator post-cycle check failed: %s", e)
 
 
 def sweep_letta_steps_for_failures():
@@ -321,6 +475,32 @@ def should_run_magi(now_est: datetime, last_magi_hour: int) -> bool:
     return False
 
 
+def _pending_wake_class_trigger():
+    """Return the trigger_id of an unconsumed, fired, wake-class gate event
+    (or None). This is the off-schedule wake signal: it is the same
+    unconsumed-fired-event set the orchestrator consumes when a cycle runs,
+    so once MAGI is woken the event is marked consumed and won't re-wake.
+    Read-only; any failure returns None (never blocks the loop)."""
+    try:
+        from database import get_conn
+        conn = get_conn()
+        try:
+            placeholders = ",".join("?" for _ in WAKE_CLASS_TRIGGERS)
+            row = conn.execute(
+                f"SELECT trigger_id FROM magi_gate_events "
+                f"WHERE consumed_in_cycle IS NULL AND fired=1 "
+                f"AND trigger_id IN ({placeholders}) "
+                f"ORDER BY id DESC LIMIT 1",
+                tuple(WAKE_CLASS_TRIGGERS),
+            ).fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
+    except Exception as e:
+        log.warning("wake-class trigger check failed: %r", e)
+        return None
+
+
 def main():
     global running
 
@@ -340,6 +520,43 @@ def main():
     )
     _ipc_thread.start()
     log.info("Internal IPC server started on localhost:5001")
+
+    # Start the always-on gate monitoring service. Wires Kraken WS v2
+    # to magi/gate.py predicate evaluation. Falls back to REST polling
+    # if WS is unavailable. See magi/gate_monitor.py for design notes.
+    # Failure to start is non-fatal — gate evaluation reverts to the
+    # observer poll path (which was the pre-WS gate path, still wired
+    # in observer.poll_cycle as a safety check).
+    try:
+        from magi.gate_monitor import start_in_background as _start_gate_monitor
+        _gate_monitor = _start_gate_monitor()
+        log.info("GateMonitor launched (Kraken WS v2 streaming)")
+    except Exception as e:
+        log.error("GateMonitor failed to start (non-fatal): %s — "
+                  "gate will fall back to observer poll cadence", e)
+        _gate_monitor = None
+
+    # Memory rotation: surface the current counter so operators can see
+    # where we are in the cadence. Persisted in system_state, incremented
+    # once per attempted MAGI cycle in run_magi_cycle(). Read-only here.
+    try:
+        from database import get_system_state
+        from config import ROTATION_CADENCE
+        rc = int(get_system_state('rotation_cycle_counter', default='0'))
+        if rc <= 0:
+            cycles_to_next = ROTATION_CADENCE
+        else:
+            cycles_to_next = (
+                (ROTATION_CADENCE - (rc % ROTATION_CADENCE))
+                % ROTATION_CADENCE
+            ) or ROTATION_CADENCE
+        log.info(
+            "Memory rotation: counter=%d, cadence=%d — next rotation in "
+            "%d successful cycle(s)",
+            rc, ROTATION_CADENCE, cycles_to_next,
+        )
+    except Exception as e:
+        log.warning(f"Could not read rotation_cycle_counter at startup: {e}")
 
     # Fund detection — only enforced when configured exchange is the trading exchange
     from config import EXCHANGE, MAX_INVENTORY_USD
@@ -385,8 +602,22 @@ def main():
                 f"skipping grid rebuild to preserve pause state"
             )
         else:
-            log.info("No paper orders restored — initialising fresh grid on startup")
-            engine.initialise_grid()
+            sp, lv = _first_boot_geometry()
+            if sp is None:
+                log.warning(
+                    "First boot: no acceptable scorer variant from "
+                    "current candle history — standing down. Grid will "
+                    "remain empty until the next MAGI cycle produces "
+                    "usable geometry (or the scorer flips to an "
+                    "acceptable rank-1 on its own)."
+                )
+            else:
+                log.info(
+                    "First boot: scorer rank-1 → spacing=%.4f levels=%d",
+                    sp, lv,
+                )
+                engine.level_count = lv
+                engine.initialise_grid(spacing_pct=sp)
     else:
         log.info(f"Resumed {len(engine.paper_orders)} paper orders from DB — skipping fresh grid init")
 
@@ -492,14 +723,37 @@ def main():
                 except Exception as e:
                     log.error(f"Market knowledge recompute failed: {e}")
 
-        # MAGI: run at 9AM and 2PM EST
+        # MAGI: fire when the wall-clock hour matches a slot in MAGI_HOURS_EST
+        # and we haven't already fired this hour. Dedupe is the `current_hour
+        # != last_magi_hour` check inside should_run_magi(); rollover from one
+        # entry to the next (including 20 → 0 across midnight) is handled by
+        # that comparison alone. The previous midnight reset
+        # (`if hour==0: last_magi_hour=-1`) ran on every 60-second loop
+        # iteration while the wall-clock was in EST hour 0, causing the cycle
+        # to re-fire minute-by-minute through that whole hour — bug observed
+        # at 2026-05-18 04:00 UTC (=00:00 EDT) producing 47 cycles in 60 min.
         if should_run_magi(now_est, last_magi_hour):
             run_magi_cycle(trigger='scheduled')
             last_magi_hour = now_est.hour
-
-        # Reset last_magi_hour at midnight
-        if now_est.hour == 0:
-            last_magi_hour = -1
+        else:
+            # Off-schedule gate wake: a wake-class trigger fired since the
+            # last cycle. Throttled to >= WAKE_MIN_INTERVAL_MIN since ANY
+            # MAGI cycle so a depleting book gets the council involved within
+            # the hour instead of waiting up to 4h — without open-ended spend.
+            throttle_ok = (
+                _last_magi_cycle_at is None
+                or (now_utc - _last_magi_cycle_at).total_seconds() / 60.0
+                >= WAKE_MIN_INTERVAL_MIN
+            )
+            if throttle_ok:
+                pending = _pending_wake_class_trigger()
+                if pending:
+                    log.info(
+                        "Gate wake: %s fired since last cycle — running "
+                        "off-schedule MAGI cycle (throttle %dmin satisfied)",
+                        pending, WAKE_MIN_INTERVAL_MIN,
+                    )
+                    run_magi_cycle(trigger=f'gate_wake:{pending}')
 
         # Sleep 60 seconds between checks
         time.sleep(60)

@@ -224,6 +224,83 @@ class KrakenExchange(BaseExchange):
             log.error(f"Order placement failed: {e}")
             return {"order_id": client_order_id, "status": "failed"}
 
+    def add_market_order(self, side: str, volume: float,
+                         client_order_id: Optional[str] = None,
+                         validate: bool = False) -> dict:
+        """Place a market order on Kraken. Returns {'order_id', 'descr'}.
+        Does NOT confirm fill — caller must poll query_order(txid).
+
+        validate=True performs a dry-run that validates inputs against the
+        exchange without actually placing an order. Used as a smoke test
+        against live keys before flipping the paper flag. In validate mode
+        the response carries 'descr' but no 'txid'; we return order_id=None
+        and validated=True so callers can branch cleanly.
+        """
+        self._check_and_add(1, "AddOrder market")
+        payload = {
+            "pair": KRAKEN_PAIR,
+            "type": "buy" if side.lower() == "buy" else "sell",
+            "ordertype": "market",
+            "volume": f"{volume:.8f}",
+        }
+        if validate:
+            payload["validate"] = "true"
+        if client_order_id:
+            userref = int(
+                hashlib.md5(client_order_id.encode()).hexdigest()[:8], 16
+            ) & 0x7FFFFFFF
+            payload["userref"] = userref
+        result = self._private_post("AddOrder", payload)
+        if validate or not result.get("txid"):
+            log.info(
+                f"[KRAKEN MARKET VALIDATE] {side.upper()} {volume} XRP — "
+                f"descr={result.get('descr', {})}"
+            )
+            return {
+                "order_id": None,
+                "descr": result.get("descr", {}),
+                "validated": True,
+            }
+        txid = result["txid"][0]
+        self._open_order_placed_at[txid] = time.time()
+        log.info(
+            f"[KRAKEN MARKET] {side.upper()} {volume} XRP placed — txid={txid}"
+        )
+        return {"order_id": txid, "descr": result.get("descr", {})}
+
+    def query_order(self, txid: str, include_trades: bool = False) -> dict:
+        """Fetch order info via /private/QueryOrders. Returns the order
+        object (status, vol, vol_exec, cost, fee, price, descr, ...) or {}
+        if the txid is unknown. Rate counter cost: 0 — QueryOrders is a
+        read endpoint, not in the trading-counter bucket.
+        """
+        payload = {"txid": txid}
+        if include_trades:
+            payload["trades"] = "true"
+        result = self._private_post("QueryOrders", payload)
+        return result.get(txid, {}) or {}
+
+    def get_closed_orders(self, start: Optional[float] = None) -> dict:
+        """Fetch recently-closed orders via /private/ClosedOrders. Returns the
+        'closed' map keyed by txid; each value carries status, vol, vol_exec,
+        price (VWAP fill), cost, fee, descr, etc. Optional `start` is a unix
+        timestamp lower bound on close time. Read endpoint — not counted in
+        the trading-rate bucket.
+
+        NOTE: Kraken's `start`/`end` filter on OPEN time unless `closetime` is
+        set. We pass `closetime="close"` so `start` is honoured as a close-time
+        lower bound (what the caller, reconcile_live_fills_from_kraken, needs).
+        Without it, any order that rested longer than the window before filling
+        is silently dropped from the result — its open time has aged out even
+        though it closed inside the window. Grid arms routinely rest for hours.
+        """
+        payload = {}
+        if start is not None:
+            payload["start"] = int(start)
+            payload["closetime"] = "close"
+        result = self._private_post("ClosedOrders", payload)
+        return result.get("closed", {}) or {}
+
     def cancel_all_open_orders(self) -> int:
         """Cancel all open XRP/USD orders. Returns count cancelled."""
         try:

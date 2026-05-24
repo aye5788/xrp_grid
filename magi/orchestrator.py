@@ -41,6 +41,7 @@ from typing import Optional
 from dotenv import load_dotenv
 
 from database import (
+    get_candles,
     get_conn,
     get_current_grid_state,
     get_latest_indicators,
@@ -51,15 +52,14 @@ from database import (
     insert_debate_record,
     insert_magi_decision,
 )
+from magi.spacing_evaluator import DEFAULT_VARIANTS, score_variants
 from guardrails import check_all_guardrails
 from magi.council import (
-    detect_conflict,
     emit_human_alert,
     resolve_consensus,
     run_round_0_parallel,
     run_round_1,
     update_world_state,
-    validate_revision,
 )
 
 load_dotenv()
@@ -118,6 +118,113 @@ def _hours_since_last_fill() -> float | None:
     except ValueError:
         return None
     return round((datetime.utcnow() - last).total_seconds() / 3600, 2)
+
+
+def _last_fill_summary() -> dict | None:
+    """Summary of the most recent filled order. Used by agents to reason
+    about whether a recent fill represents an open position they should
+    let the grid close, vs. a stale state that warrants RECENTRE."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT order_id, side, price, size, fill_price, fee, filled_at "
+        "FROM grid_orders WHERE status='filled' AND filled_at IS NOT NULL "
+        "ORDER BY filled_at DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    if not row or not row['filled_at']:
+        return None
+    try:
+        last_dt = datetime.fromisoformat(row['filled_at'])
+    except ValueError:
+        return None
+    hours_ago = (datetime.utcnow() - last_dt).total_seconds() / 3600
+    fill_price = float(row['fill_price'] or row['price'] or 0)
+    size = float(row['size'] or 0)
+    return {
+        'order_id': row['order_id'],
+        'side': row['side'],
+        'price': round(fill_price, 5),
+        'size_xrp': round(size, 4),
+        'size_usd': round(size * fill_price, 2),
+        'hours_ago': round(hours_ago, 2),
+        'fee_usd': round(float(row['fee'] or 0), 4),
+    }
+
+
+def _position_state_summary(last_fill: dict | None,
+                             grid_state: dict | None,
+                             price: float | None) -> dict | None:
+    """Where the round-trip closes + projected P&L if it does.
+
+    For a recent BUY fill, the matching close is a SELL at fill_price *
+    (1 + spacing); for a SELL fill, a BUY at fill_price * (1 - spacing).
+    Reports distance to that level and net P&L after maker fees.
+
+    Returns None if the inputs aren't enough to compute meaningfully.
+    """
+    if not (last_fill and grid_state and price):
+        return None
+    spacing = grid_state.get('spacing_pct')
+    if spacing is None or float(spacing) <= 0:
+        return None
+    try:
+        from config import MAKER_FEE
+    except Exception:
+        return None
+    sp = float(spacing)
+    fill_price = float(last_fill.get('price') or 0)
+    size_xrp = float(last_fill.get('size_xrp') or 0)
+    if fill_price <= 0 or size_xrp <= 0:
+        return None
+
+    if last_fill['side'] == 'buy':
+        close_price = round(fill_price * (1 + sp), 5)
+        gross = (close_price - fill_price) * size_xrp
+    else:  # sell
+        close_price = round(fill_price * (1 - sp), 5)
+        gross = (fill_price - close_price) * size_xrp
+
+    rt_fees = 2.0 * MAKER_FEE * size_xrp * close_price
+    net = gross - rt_fees
+    distance_pct = abs(float(price) - close_price) / float(price) * 100
+    return {
+        'nearest_close_arm_price': close_price,
+        'round_trip_distance_pct': round(distance_pct, 3),
+        'round_trip_gross_pnl_usd': round(gross, 4),
+        'round_trip_net_pnl_usd': round(net, 4),
+    }
+
+
+def _skew_delta_since_rebuild() -> float | None:
+    """Change in inventory_skew between the moment of the last grid rebuild
+    and now. Positive = bot has acquired XRP since the rebuild (recent buys);
+    negative = bot has shed XRP (recent sells). Tells the agents whether
+    skew represents an open position from a recent fill or a pre-existing
+    inventory state."""
+    conn = get_conn()
+    rb = conn.execute(
+        "SELECT timestamp FROM grid_state "
+        "WHERE notes LIKE 'Grid initialised%' "
+        "ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if not rb or not rb['timestamp']:
+        conn.close()
+        return None
+    inv_then = conn.execute(
+        "SELECT inventory_skew FROM inventory WHERE timestamp <= ? "
+        "ORDER BY timestamp DESC LIMIT 1",
+        (rb['timestamp'],)
+    ).fetchone()
+    inv_now = conn.execute(
+        "SELECT inventory_skew FROM inventory ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    if not (inv_then and inv_now):
+        return None
+    try:
+        return round(float(inv_now['inventory_skew']) - float(inv_then['inventory_skew']), 4)
+    except (TypeError, ValueError):
+        return None
 
 
 def _hours_since_last_rebuild() -> float | None:
@@ -232,10 +339,104 @@ def _current_variant_position(grid_state: dict | None) -> dict:
     }
 
 
+def _score_current_config(candles: list, current_levels, current_spacing,
+                            fee_rate_per_side: float):
+    """Score the live grid's (levels, spacing) under the same analytical model
+    so Melchior can compare rank-1 vs incumbent on equal footing. Returns
+    the variant dict (with rank=1 by definition of a single-variant input),
+    or None when the live spacing is missing / out of scorer bounds / no
+    24h history. Never raises — failures degrade to None."""
+    try:
+        if current_levels is None or current_spacing is None:
+            return None
+        scored = score_variants(
+            current_price=0.0,  # not used by the scorer (price cancels)
+            candles_1h=candles,
+            fee_rate_per_side=fee_rate_per_side,
+            candidate_variants=[(int(current_levels), float(current_spacing))],
+        )
+        return scored[0] if scored else None
+    except Exception as e:
+        log.warning("Could not score current grid config: %s", e)
+        return None
+
+
+def _unconsumed_gate_events() -> tuple[list, Optional[int]]:
+    """Return (events, max_id) where events is the list of unconsumed
+    magi_gate_events rows with fired=1 since the last MAGI cycle, and
+    max_id is the highest id at this read-point (used to mark consumed
+    after debate_records insert, so triggers fired BETWEEN build and
+    insert are still surfaced on the NEXT cycle rather than lost)."""
+    try:
+        conn = get_conn()
+        rows = conn.execute(
+            "SELECT id, timestamp, trigger_id, details "
+            "FROM magi_gate_events "
+            "WHERE consumed_in_cycle IS NULL AND fired=1 "
+            "ORDER BY id ASC"
+        ).fetchall()
+        max_row = conn.execute(
+            "SELECT MAX(id) AS mid FROM magi_gate_events "
+            "WHERE consumed_in_cycle IS NULL"
+        ).fetchone()
+        conn.close()
+    except Exception as e:
+        log.warning("Could not read unconsumed gate events: %s", e)
+        return [], None
+
+    events: list = []
+    for r in rows:
+        try:
+            details = json.loads(r["details"]) if r["details"] else {}
+        except (ValueError, TypeError):
+            details = {}
+        events.append({
+            "trigger_id": r["trigger_id"],
+            "timestamp": r["timestamp"],
+            "details": details,
+        })
+    max_id = max_row["mid"] if max_row and max_row["mid"] is not None else None
+    return events, max_id
+
+
+def _mark_gate_events_consumed(cycle_id: str, ws_timestamp: str) -> None:
+    """Mark all unconsumed gate event rows with timestamp at or before
+    ws_timestamp (world_state's iso timestamp) as consumed by this
+    cycle_id. Events fired AFTER world_state was built remain
+    unconsumed and surface in the next cycle's window.
+
+    magi_gate_events.timestamp is unix epoch; ws.timestamp is iso UTC.
+    Convert ws_timestamp to a unix epoch upper bound here."""
+    try:
+        from datetime import datetime, timezone
+        ts = ws_timestamp
+        if ts.endswith("Z"):
+            ts = ts[:-1] + "+00:00"
+        dt = datetime.fromisoformat(ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        upper_epoch = dt.timestamp()
+    except Exception as e:
+        log.warning("Could not parse ws_timestamp=%s: %s", ws_timestamp, e)
+        return
+    try:
+        conn = get_conn()
+        conn.execute(
+            "UPDATE magi_gate_events SET consumed_in_cycle=? "
+            "WHERE consumed_in_cycle IS NULL AND timestamp <= ?",
+            (cycle_id, upper_epoch),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log.warning("Could not mark gate events consumed for %s: %s",
+                    cycle_id, e)
+
+
 def build_world_state() -> dict:
     """Snapshot of all market/portfolio context for the cycle."""
     from grid.engine import GridEngine
-    from config import MAKER_FEE
+    from config import MAKER_FEE, GRID_LEVEL_FEE_PER_SIDE
     price = None
     try:
         price = GridEngine(paper=True).get_current_price()
@@ -244,53 +445,388 @@ def build_world_state() -> dict:
 
     open_orders = get_open_orders_summary()
     grid_state = get_current_grid_state() or {}
-    return {
+
+    # Analytical variant scoring for Melchior — 720h of 1h candles, scored
+    # against DEFAULT_VARIANTS (36 entries: 6 level-counts × 6 spacings).
+    # Replaces fill-based shadow-sim spacing selection. Casper / Balthasar
+    # don't act on these fields; harmless for them to see them in the shared
+    # block. Failures here must not break the cycle — fall back to empty list
+    # so Melchior degrades to MAINTAIN with target_spacing_pct=None.
+    scored_top_10: list = []
+    current_config_score = None
+    try:
+        candles_1h = get_candles('1h', limit=720)
+        # get_candles returns DESC; the scorer doesn't care about order but
+        # passing chronological is friendlier to anyone debugging the input.
+        candles_1h = list(reversed(candles_1h))
+        all_scored = score_variants(
+            current_price=float(price or 0.0),
+            candles_1h=candles_1h,
+            fee_rate_per_side=GRID_LEVEL_FEE_PER_SIDE,  # maker: resting arms fill maker
+            candidate_variants=DEFAULT_VARIANTS,
+        )
+        scored_top_10 = all_scored[:10]
+        current_config_score = _score_current_config(
+            candles_1h,
+            grid_state.get('levels'),
+            grid_state.get('spacing_pct'),
+            GRID_LEVEL_FEE_PER_SIDE,
+        )
+    except Exception as e:
+        log.warning("Variant scoring failed — Melchior will see empty list: %s", e)
+
+    # Position-state context (independent of scoring path).
+    last_fill_block = _last_fill_summary()
+    position_state_block = _position_state_summary(
+        last_fill_block, grid_state, price
+    )
+
+    # Portfolio metrics — single-sourced via magi/portfolio.py so agents and
+    # the rule layer see identical values. Replaces the prior inline compute
+    # in enforce_hard_rules (and resolves Balthasar's persona references to
+    # world_state.portfolio.*, which previously pointed at a non-existent
+    # namespace).
+    from magi.portfolio import compute_portfolio_metrics
+    inv = get_latest_inventory() or {}
+    portfolio_block = compute_portfolio_metrics(
+        inv.get("xrp_held"), inv.get("usd_held"), price,
+    )
+
+    ws = {
         "timestamp":                datetime.utcnow().isoformat(),
         "price":                    price,
         "indicators":               get_latest_indicators('1h') or {},
         "grid_state":               grid_state,
-        "inventory":                get_latest_inventory() or {},
+        "inventory":                inv,
         "open_orders":              open_orders,
         "hours_since_last_fill":    _hours_since_last_fill(),
         "hours_since_last_rebuild": _hours_since_last_rebuild(),
         "cooldown_status":          _cooldown_status(open_orders),
         "shadow_variants":          _shadow_variants_for_world_state(),
         "current_variant_position": _current_variant_position(grid_state),
+        # Analytical scoring surface for Melchior — replaces the prior
+        # shadow-fill-based spacing search.
+        "scored_variants_top_10":   scored_top_10,
+        "current_spacing_pct":      grid_state.get('spacing_pct'),
+        "current_levels":           grid_state.get('levels'),
+        "current_config_expected_daily_pnl_pct": (
+            current_config_score.get('expected_daily_pnl_pct')
+            if current_config_score else None
+        ),
         # Hardcoded tier-0 today; future work: source from Kraken TradeVolume
         # (see 02_NEXT_BUILD_TASKS.md).
         "current_fee_tier_pct":     MAKER_FEE,
+        # Position-state context — surfaced so agents can reason about
+        # whether they have an open position from a recent fill (and
+        # therefore should HOLD, letting the grid close the round-trip)
+        # vs. a stale state warranting RECENTRE. The [RECENT_POSITION_HOLD]
+        # hard rule in enforce_hard_rules uses the same source data as
+        # a deterministic backstop.
+        "last_fill":                last_fill_block,
+        "position_state":           position_state_block,
+        "skew_delta_since_rebuild": _skew_delta_since_rebuild(),
         "trajectory":               get_trajectory_context(),
         "market_knowledge":         _get_latest_market_knowledge(),
         "hard_rules":               HARD_RULES,
+        # Derived portfolio metrics (xrp_value_usd, total_universe_usd,
+        # xrp_pct_of_universe, allocation_skew). Single source of truth —
+        # both the rule layer and Balthasar's persona read from here.
+        "portfolio":                portfolio_block,
     }
+
+    # Gate trip-wire events since the last cycle. List of dicts:
+    # {trigger_id, timestamp (unix), details}. Empty when the window was
+    # routine. After insert_debate_record succeeds in run_cycle, rows
+    # with timestamp <= ws.timestamp are marked consumed_in_cycle =
+    # cycle_id so they don't re-surface next cycle.
+    try:
+        gate_events, _ = _unconsumed_gate_events()
+    except Exception as e:
+        log.warning("gate event read failed (non-fatal): %s", e)
+        gate_events = []
+    ws["triggers_since_last_cycle"] = gate_events
+
+    # Runtime schema validation — fires critical alert on drift but never
+    # blocks the cycle. Trading continues; the operator is paged via the
+    # existing ntfy hook on critical-severity magi_alerts rows.
+    try:
+        from magi.world_state_schema import alert_on_runtime_drift
+        alert_on_runtime_drift(ws)
+    except Exception as e:
+        log.warning("schema runtime validator raised (non-fatal): %s", e)
+
+    return ws
 
 
 # --- Hard-rule enforcement ---
 
-def enforce_hard_rules(consensus: dict, world_state: dict) -> dict:
+def _check_council_degradation() -> dict:
+    """
+    Inspect the last 2 historical debate_records rows (already-written cycles
+    only — enforce_hard_rules runs BEFORE the current cycle's row is inserted)
+    and return per-agent degradation state.
+
+    Degradation fingerprint matches magi/council.py:SAFE_DEFAULTS and the
+    dashboard AGENT HEALTH tile: an R0 vote with conviction == 0.0 AND
+    crux LIKE '(no response)%' is a parse-failure / model-degradation marker.
+
+    Returns:
+        {
+            'evaluable':         bool,         # False when <2 rows exist
+            'degraded_agents':   list[str],    # subset of ('casper','melchior','balthasar')
+            'degraded_count':    int,          # 0..3
+            'cycle_ids_checked': list[str],
+        }
+    """
+    out = {
+        'evaluable':         False,
+        'degraded_agents':   [],
+        'degraded_count':    0,
+        'cycle_ids_checked': [],
+    }
+    try:
+        conn = get_conn()
+        rows = conn.execute(
+            "SELECT cycle_id, "
+            "       casper_r0_conviction,   casper_r0_crux, "
+            "       melchior_r0_conviction, melchior_r0_crux, "
+            "       balthasar_r0_conviction, balthasar_r0_crux "
+            "FROM debate_records ORDER BY id DESC LIMIT 2"
+        ).fetchall()
+        conn.close()
+    except Exception as e:
+        log.warning("Council-degradation check: DB read failed: %s", e)
+        return out
+    if len(rows) < 2:
+        return out
+
+    out['evaluable'] = True
+    out['cycle_ids_checked'] = [r['cycle_id'] for r in rows]
+    for agent in ('casper', 'melchior', 'balthasar'):
+        both_degraded = True
+        for r in rows:
+            conv = r[f"{agent}_r0_conviction"]
+            crux = r[f"{agent}_r0_crux"] or ''
+            conv_zero = (conv is None) or (abs(float(conv)) < 1e-9)
+            if not (conv_zero and crux.startswith('(no response)')):
+                both_degraded = False
+                break
+        if both_degraded:
+            out['degraded_agents'].append(agent)
+    out['degraded_count'] = len(out['degraded_agents'])
+    return out
+
+
+def _degradation_tier(count: int) -> int:
+    """0 = healthy, 1 = single-agent degraded, 2 = council collapsed (≥2)."""
+    if count <= 0:
+        return 0
+    if count == 1:
+        return 1
+    return 2
+
+
+def _maybe_fire_degradation_alert(curr_count: int,
+                                   degraded_agents: list,
+                                   cycle_ids_checked: list) -> None:
+    """Edge-triggered alert: only fire when current tier strictly exceeds
+    previous tier. Recovery (tier going down or staying flat) is silent.
+    Uses system_state['last_degraded_tier'] for cross-restart persistence."""
+    try:
+        from database import get_system_state, set_system_state, insert_alert
+        prev_tier = int(get_system_state('last_degraded_tier', '0'))
+    except Exception as e:
+        log.warning("Degradation tier read failed: %s — skipping alert", e)
+        return
+    curr_tier = _degradation_tier(curr_count)
+
+    if curr_tier > prev_tier:
+        try:
+            cycles_ref = ','.join(cycle_ids_checked) if cycle_ids_checked else '(none)'
+            if curr_tier == 1:
+                agent = degraded_agents[0] if degraded_agents else None
+                insert_alert(
+                    severity='critical',
+                    category='council_degraded',
+                    agent_id=agent,
+                    message=(
+                        f"Council degraded: agent={agent} returned "
+                        f"SAFE_DEFAULTS (conviction=0, crux=(no response)) "
+                        f"on the last 2 cycles ({cycles_ref}). "
+                        f"Freezing grid at MAINTAIN/CLEAR until recovery."
+                    ),
+                )
+            else:  # curr_tier == 2
+                insert_alert(
+                    severity='critical',
+                    category='council_collapsed',
+                    agent_id=None,
+                    message=(
+                        f"Council collapsed: {curr_count} of 3 agents "
+                        f"degraded ({','.join(degraded_agents)}) for last 2 "
+                        f"cycles ({cycles_ref}). HALTing engine."
+                    ),
+                )
+        except Exception as e:
+            log.warning("Could not insert degradation alert: %s", e)
+
+    # Always persist the current tier so the next cycle's edge check is correct
+    try:
+        set_system_state('last_degraded_tier', str(curr_tier))
+    except Exception as e:
+        log.warning("Could not persist last_degraded_tier=%s: %s",
+                    curr_tier, e)
+
+
+def enforce_hard_rules(consensus: dict, world_state: dict,
+                        round_0: dict | None = None) -> dict:
     """
     Apply non-negotiable safety overrides on top of LLM consensus.
     Returns the (mutated copy of) consensus dict with a 'hard_rule_overrides'
     list of tags appended for transparency.
+
+    When `round_0` is supplied, rule #8 (GEOMETRY_INJECTED_FROM_SCORER) may
+    mutate `round_0['melchior']['geometry']` in place so the downstream
+    `_final_consensus` helper picks the injected values up unchanged.
+    The caller is expected to pass the same round_0 dict to _final_consensus.
     """
     cons = dict(consensus)
     overrides = list(cons.get("hard_rule_overrides") or [])
     notes = [cons.get("reasoning", "")]
+
+    # Capture Melchior's ORIGINAL intent BEFORE any rule mutates
+    # cons["grid_action"]. The council-veto step (added below 0c) uses
+    # this so its tag fires even when the rule layer's 0a/0b/0c also
+    # downgrade — defense-in-depth tag visibility.
+    _original_grid_action = cons.get("grid_action")
 
     inventory = world_state.get("inventory") or {}
     xrp_held = float(inventory.get("xrp_held") or 0.0)
     usd_held = float(inventory.get("usd_held") or 0.0)
     skew = float(inventory.get("inventory_skew") or 0.0)
     price = world_state.get("price")
-    xrp_value_usd = xrp_held * float(price) if price else 0.0
+    # Read portfolio metrics from the single-sourced world_state.portfolio block
+    # rather than recomputing xrp_value_usd inline. Same numbers the agents see.
+    portfolio = world_state.get("portfolio") or {}
+    xrp_value_usd = float(portfolio.get("xrp_value_usd") or 0.0)
 
-    # 0. RECENTRE cooldown — downgrade council-proposed RECENTRE to MAINTAIN
-    # if the grid was just rebuilt and is healthy. Prevents hourly churn when
-    # Melchior's STEP 0 GRID HEALTH GATE keeps firing on stale fills (which
-    # don't reset until an actual fill happens).
-    # The grid-degenerate hard rule below can still force RECENTRE if the book
-    # is actually one-sided — this only catches "healthy book, hours-since-fill
-    # high, no need to churn yet".
+    # -1. COUNCIL DEGRADATION — runs first because freeze-on-degraded must
+    # short-circuit the rest of the council-trusting rules (RECENTRE/cooldown
+    # gates, geometry injection, etc.). Safety conditions (kill switch, daily
+    # loss limit, allocation skew ceiling) further down can still upgrade to
+    # HALT — those don't rely on council judgment. Rule 6 (GRID_DEGENERATE)
+    # explicitly skips if degraded freeze is in effect so we don't bypass
+    # the freeze with a forced RECENTRE that has no usable geometry.
+    degradation_state = _check_council_degradation()
+    if degradation_state['evaluable'] and degradation_state['degraded_count'] > 0:
+        deg_count = degradation_state['degraded_count']
+        deg_agents = degradation_state['degraded_agents']
+        if deg_count == 1:
+            agent = deg_agents[0]
+            cons["grid_action"] = "MAINTAIN"
+            cons["risk_action"] = "CLEAR"
+            overrides.append(f"[AGENT_DEGRADED:{agent}]")
+            notes.append(
+                f"[AGENT_DEGRADED:{agent}] last 2 cycles returned "
+                f"SAFE_DEFAULTS for {agent}; freezing grid at MAINTAIN/CLEAR "
+                f"until council recovers (existing orders continue to fill)"
+            )
+            log.warning(
+                "Hard rule: AGENT_DEGRADED:%s — forcing MAINTAIN + CLEAR "
+                "(cycles checked: %s)",
+                agent, ','.join(degradation_state['cycle_ids_checked']),
+            )
+        else:  # 2 or 3
+            cons["grid_action"] = "HALT"
+            cons["risk_action"] = "HALT"
+            overrides.append("[COUNCIL_COLLAPSED]")
+            notes.append(
+                f"[COUNCIL_COLLAPSED] {deg_count} of 3 agents "
+                f"({','.join(deg_agents)}) returned SAFE_DEFAULTS for the "
+                f"last 2 cycles; HALTing engine until council recovers"
+            )
+            log.warning(
+                "Hard rule: COUNCIL_COLLAPSED — %d/3 agents degraded (%s); "
+                "forcing HALT",
+                deg_count, ','.join(deg_agents),
+            )
+        # Edge-triggered alert (only fires when tier increases)
+        _maybe_fire_degradation_alert(
+            deg_count, deg_agents, degradation_state['cycle_ids_checked']
+        )
+    elif degradation_state['evaluable']:
+        # Healthy this cycle — make sure the persisted tier comes back down so
+        # the next degradation transition correctly edge-triggers an alert.
+        _maybe_fire_degradation_alert(0, [], degradation_state['cycle_ids_checked'])
+
+    # 0. RECENTRE block — two complementary gates that can each downgrade a
+    # council-proposed RECENTRE to MAINTAIN:
+    #
+    #   0a. [GRID_HEALTHY_NO_RECENTRE] — time-independent. Block RECENTRE when
+    #       the book is bilateral AND price drift from centre is less than one
+    #       full spacing step. Stops the every-4h MAGI cycle from tearing down
+    #       a perfectly valid grid that simply hasn't filled yet because the
+    #       hourly range is below the spacing band.
+    #
+    #   0b. [RECENTRE_COOLDOWN] — time-based. Block RECENTRE when the grid was
+    #       rebuilt < 60 min ago and the book is healthy. Catches Melchior's
+    #       repeated RECENTRE votes on stale-fill evidence.
+    #
+    # The grid-degenerate hard rule (#6) can still FORCE RECENTRE if the book
+    # is actually one-sided. These gates only catch "healthy book, no need to
+    # churn yet". PAUSE risk actions are neutralized in both branches because
+    # a healthy / fresh balanced book shouldn't be partially cancelled on
+    # stale risk reasoning.
+    if cons.get("grid_action") == "RECENTRE":
+        open_orders = world_state.get("open_orders") or {}
+        try:
+            buy_n = int(open_orders.get("buy_count") or 0)
+            sell_n = int(open_orders.get("sell_count") or 0)
+        except (TypeError, ValueError):
+            buy_n = sell_n = 0
+
+        # 0a. Grid-healthy gate (time-independent)
+        grid_state_w = world_state.get("grid_state") or {}
+        grid_centre = grid_state_w.get("centre_price")
+        grid_spacing = grid_state_w.get("spacing_pct")
+        current_price = world_state.get("price")
+        drift_pct = None
+        try:
+            if (grid_centre is not None and current_price is not None
+                    and float(grid_centre) > 0):
+                drift_pct = abs(float(current_price) - float(grid_centre)) \
+                            / float(grid_centre)
+        except (TypeError, ValueError):
+            drift_pct = None
+
+        grid_bilateral = buy_n >= 1 and sell_n >= 1
+        if (grid_bilateral
+                and grid_spacing is not None
+                and drift_pct is not None
+                and drift_pct < float(grid_spacing)):
+            cons["grid_action"] = "MAINTAIN"
+            overrides.append("[GRID_HEALTHY_NO_RECENTRE]")
+            notes.append(
+                f"[GRID_HEALTHY_NO_RECENTRE] grid bilateral "
+                f"({buy_n}b/{sell_n}s) and price drift {drift_pct*100:.2f}% < "
+                f"spacing {float(grid_spacing)*100:.2f}% — downgrading "
+                f"RECENTRE → MAINTAIN to preserve the resting book"
+            )
+            if cons.get("risk_action") in ("PAUSE_LONGS", "PAUSE_SHORTS"):
+                old_risk = cons["risk_action"]
+                cons["risk_action"] = "CLEAR"
+                notes.append(
+                    f"[GRID_HEALTHY_NO_RECENTRE] risk_action {old_risk} → "
+                    f"CLEAR to preserve the healthy book"
+                )
+            log.info(
+                "Hard rule: GRID_HEALTHY_NO_RECENTRE — bilateral "
+                "(%db/%ds), drift %.2f%% < spacing %.2f%%; "
+                "downgrading to MAINTAIN + CLEAR",
+                buy_n, sell_n, drift_pct*100, float(grid_spacing)*100,
+            )
+
+    # 0b. Cooldown timer — only fires if 0a didn't already downgrade.
     if cons.get("grid_action") == "RECENTRE":
         open_orders = world_state.get("open_orders") or {}
         try:
@@ -325,11 +861,6 @@ def enforce_hard_rules(consensus: dict, world_state: dict) -> dict:
                 f"ago (book={buy_n}b/{sell_n}s) — downgrading RECENTRE→MAINTAIN "
                 f"to give fresh grid time to attract fills"
             )
-            # Also neutralize PAUSE actions: a fresh balanced grid should not
-            # be partially cancelled on stale risk reasoning. Without this,
-            # PAUSE_LONGS would kill the buys we just placed, the engine
-            # integrity guard would emergency-rebuild, and the cycle would
-            # churn its full ladder every hour.
             if cons.get("risk_action") in ("PAUSE_LONGS", "PAUSE_SHORTS"):
                 old_risk = cons["risk_action"]
                 cons["risk_action"] = "CLEAR"
@@ -342,6 +873,167 @@ def enforce_hard_rules(consensus: dict, world_state: dict) -> dict:
                 "(%d buys / %d sells); downgrading to MAINTAIN + CLEAR",
                 recent_rebuild_hours*60, buy_n, sell_n,
             )
+
+    # 0c. RECENT_POSITION_HOLD — protect an open round-trip from being
+    # force-closed by a premature RECENTRE/TIGHTEN/WIDEN. When the bot
+    # has just filled (within 2h) AND the inventory skew reflects a
+    # meaningful open position (|skew| > 0.15) AND the book is bilateral,
+    # the right move is to let the grid close the round-trip naturally.
+    # Rebuilding here would unwind the position at the current spot,
+    # paying taker fees on the rebalance anchor and locking in whatever
+    # mark-to-market is happening right now (often a small loss against
+    # the entry). Defense against agents over-eager to rebalance — they
+    # have last_fill / position_state context in world_state now, but
+    # this hard rule is the Python-side backstop per CLAUDE.md doctrine.
+    if cons.get("grid_action") in ("RECENTRE", "TIGHTEN", "WIDEN"):
+        hours_since_fill = world_state.get("hours_since_last_fill")
+        try:
+            hours_since_fill_f = (
+                float(hours_since_fill) if hours_since_fill is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            hours_since_fill_f = None
+        try:
+            skew_now = float((world_state.get("inventory") or {})
+                              .get("inventory_skew") or 0.0)
+        except (TypeError, ValueError):
+            skew_now = 0.0
+        open_orders = world_state.get("open_orders") or {}
+        try:
+            buy_n_h = int(open_orders.get("buy_count") or 0)
+            sell_n_h = int(open_orders.get("sell_count") or 0)
+        except (TypeError, ValueError):
+            buy_n_h = sell_n_h = 0
+        bilateral = buy_n_h >= 1 and sell_n_h >= 1
+
+        # The hold's rationale is "let the grid close the round-trip
+        # naturally" — so it only applies when an imminent PROFITABLE close
+        # actually exists (mirrors Melchior Step 0.5: round_trip_net_pnl_usd
+        # > 0 AND round_trip_distance_pct < 0.5%). If skew is open but no
+        # profitable close is near, the rationale is absent: yield and let
+        # the council's RECENTRE stand — the gate likely woke MAGI precisely
+        # because the book is skewing one-sided, and holding would re-create
+        # the static-grid failure this whole layer exists to avoid.
+        ps = world_state.get("position_state") or {}
+        try:
+            rt_net = (float(ps.get("round_trip_net_pnl_usd"))
+                      if ps.get("round_trip_net_pnl_usd") is not None else None)
+        except (TypeError, ValueError):
+            rt_net = None
+        try:
+            rt_dist = (float(ps.get("round_trip_distance_pct"))
+                       if ps.get("round_trip_distance_pct") is not None else None)
+        except (TypeError, ValueError):
+            rt_dist = None
+        imminent_profitable_close = (
+            rt_net is not None and rt_net > 0
+            and rt_dist is not None and rt_dist < 0.5
+        )
+        base_hold = (hours_since_fill_f is not None
+                     and hours_since_fill_f < 2.0
+                     and abs(skew_now) > 0.15
+                     and bilateral)
+
+        if base_hold and imminent_profitable_close:
+            cons["grid_action"] = "MAINTAIN"
+            overrides.append("[RECENT_POSITION_HOLD]")
+            notes.append(
+                f"[RECENT_POSITION_HOLD] last fill {hours_since_fill_f:.2f}h "
+                f"ago, skew={skew_now:+.3f} (|>{0.15}|), book bilateral "
+                f"({buy_n_h}b/{sell_n_h}s) — open position; "
+                f"downgrading RECENTRE→MAINTAIN to let the grid close "
+                f"the round-trip naturally"
+            )
+            if cons.get("risk_action") in ("PAUSE_LONGS", "PAUSE_SHORTS"):
+                old_risk_h = cons["risk_action"]
+                cons["risk_action"] = "CLEAR"
+                notes.append(
+                    f"[RECENT_POSITION_HOLD] risk_action {old_risk_h} → "
+                    f"CLEAR — don't partially cancel the open position"
+                )
+            log.info(
+                "Hard rule: RECENT_POSITION_HOLD — fill %.2fh ago, "
+                "skew %+.3f, book %db/%ds, imminent profitable round-trip "
+                "(rt_net=%s, rt_dist=%s); downgrading to MAINTAIN",
+                hours_since_fill_f, skew_now, buy_n_h, sell_n_h, rt_net, rt_dist,
+            )
+        elif base_hold and not imminent_profitable_close:
+            log.info(
+                "Hard rule: RECENT_POSITION_HOLD yielded — fill %.2fh ago, "
+                "skew %+.3f, book %db/%ds, but no imminent profitable "
+                "round-trip (rt_net=%s, rt_dist=%s); letting council %s stand",
+                hours_since_fill_f, skew_now, buy_n_h, sell_n_h,
+                rt_net, rt_dist, cons.get("grid_action"),
+            )
+
+    # 0d. COUNCIL VETO — Casper's regime_action and Balthasar's
+    # geometry_veto. Operates on Melchior's ORIGINAL intent (captured
+    # at function entry), NOT on the current grid_action. This means
+    # the council-veto tag fires even when 0a/0b/0c already downgraded
+    # for their own reasons — both tags end up in hard_rule_overrides,
+    # so the operator can see both council judgment AND rule-layer
+    # judgment caught the same case. Defense-in-depth visibility.
+    #
+    # Permissive defaults: missing/unparseable fields default to
+    # EXECUTE / PROCEED in resolve_consensus, so this rule only fires
+    # when the agents EXPLICITLY voted to veto.
+    #
+    # Survival rules (1 KILL_SWITCH, 2 DAILY_LOSS_LIMIT, 3
+    # ALLOC_SKEW_CEILING) run after this and can still force HALT
+    # — council can't override survival floors.
+    if _original_grid_action in ("RECENTRE", "TIGHTEN", "WIDEN"):
+        regime_action_v = cons.get("regime_action") or "EXECUTE"
+        geometry_veto_v = cons.get("geometry_veto") or "PROCEED"
+        council_vetoed = False
+        if regime_action_v == "DEFER_STRUCTURAL":
+            overrides.append("[REGIME_DEFER]")
+            notes.append(
+                f"[REGIME_DEFER] Casper says regime defers structural "
+                f"change (was {_original_grid_action})"
+            )
+            log.info(
+                "Hard rule: REGIME_DEFER — Casper voted DEFER_STRUCTURAL "
+                "against Melchior's %s", _original_grid_action,
+            )
+            council_vetoed = True
+        elif regime_action_v == "STAND_DOWN":
+            overrides.append("[REGIME_STANDDOWN]")
+            notes.append(
+                f"[REGIME_STANDDOWN] Casper says regime stand-down "
+                f"(was {_original_grid_action})"
+            )
+            log.warning(
+                "Hard rule: REGIME_STANDDOWN — Casper voted STAND_DOWN "
+                "against Melchior's %s", _original_grid_action,
+            )
+            council_vetoed = True
+        if geometry_veto_v == "HOLD_GEOMETRY":
+            overrides.append("[BALTHASAR_HOLD_GEOMETRY]")
+            notes.append(
+                f"[BALTHASAR_HOLD_GEOMETRY] Balthasar says hold geometry "
+                f"(was {_original_grid_action})"
+            )
+            log.info(
+                "Hard rule: BALTHASAR_HOLD_GEOMETRY — Balthasar voted "
+                "HOLD_GEOMETRY against Melchior's %s", _original_grid_action,
+            )
+            council_vetoed = True
+        elif geometry_veto_v == "RISK_BLOCK":
+            overrides.append("[BALTHASAR_RISK_BLOCK]")
+            notes.append(
+                f"[BALTHASAR_RISK_BLOCK] Balthasar blocks geometry change "
+                f"(was {_original_grid_action})"
+            )
+            log.warning(
+                "Hard rule: BALTHASAR_RISK_BLOCK — Balthasar voted "
+                "RISK_BLOCK against Melchior's %s", _original_grid_action,
+            )
+            council_vetoed = True
+        if council_vetoed:
+            # Coerce to MAINTAIN (idempotent if 0a/0b/0c already did so).
+            # risk_action is left alone — council veto is geometry-only.
+            cons["grid_action"] = "MAINTAIN"
 
     # 1. Kill switch
     if os.path.exists(HARD_RULES["halt_file"]):
@@ -409,8 +1101,19 @@ def enforce_hard_rules(consensus: dict, world_state: dict) -> dict:
     #     rule would re-RECENTRE every cycle as long as no fill occurs, churning
     #     the grid. The cooldown gives a fresh rebuild time to attract fills.
     #
-    # Not applied if HALT is already set (kill-switch / loss limit takes priority).
-    if cons.get("grid_action") != "HALT" and cons.get("risk_action") != "HALT":
+    # Not applied if HALT is already set (kill-switch / loss limit / council
+    # collapse takes priority). Also skipped while [AGENT_DEGRADED:*] is in
+    # effect — a degraded council cannot supply trustworthy geometry, so a
+    # forced RECENTRE here would either churn the grid blindly or fall back
+    # to the scorer rank-1; neither is appropriate when we've explicitly
+    # frozen on council degradation.
+    _degraded_freeze_active = any(
+        t == "[COUNCIL_COLLAPSED]" or t.startswith("[AGENT_DEGRADED:")
+        for t in overrides
+    )
+    if (cons.get("grid_action") != "HALT"
+            and cons.get("risk_action") != "HALT"
+            and not _degraded_freeze_active):
         open_orders = world_state.get("open_orders") or {}
         try:
             buy_count = int(open_orders.get("buy_count") or 0)
@@ -545,6 +1248,96 @@ def enforce_hard_rules(consensus: dict, world_state: dict) -> dict:
                 old_risk_v, invalid_reason,
             )
 
+    # 8. Geometry source classification + scorer fallback.
+    # When the final consensus action will rebuild grid geometry
+    # (RECENTRE/TIGHTEN/WIDEN), check whether Melchior's r0 output carries
+    # a usable `geometry` block. If it doesn't, and the analytical scorer in
+    # world_state has an acceptable rank-1 variant, inject that variant into
+    # round_0['melchior']['geometry'] so the downstream _final_consensus
+    # picks it up unchanged. Otherwise leave geometry alone and let the
+    # engine fallback retain current spacing/levels.
+    #
+    # geometry_source is recorded on cons for debate_records observability:
+    #   - 'agent'            : Melchior emitted complete geometry
+    #   - 'scorer_fallback'  : this rule injected scorer rank-1
+    #   - 'unchanged'        : no geometry change happens this cycle
+    #                          (MAINTAIN/HALT, or no acceptable rank-1)
+    geometry_source = "unchanged"
+    if (round_0 is not None
+            and cons.get("grid_action") in ("RECENTRE", "TIGHTEN", "WIDEN")):
+        m_r0 = round_0.get("melchior")
+        m_geom = m_r0.get("geometry") if isinstance(m_r0, dict) else None
+        if not isinstance(m_geom, dict):
+            m_geom = {}
+        sp_val = m_geom.get("target_spacing_pct")
+        lv_val = m_geom.get("target_levels")
+        has_sp = isinstance(sp_val, (int, float)) and sp_val > 0
+        has_lv = isinstance(lv_val, int) and lv_val > 0
+        if has_sp and has_lv:
+            geometry_source = "agent"
+        else:
+            scored = world_state.get("scored_variants_top_10") or []
+            rank1 = scored[0] if scored else None
+            if (rank1
+                    and rank1.get("acceptable")
+                    and rank1.get("spacing_pct") is not None
+                    and rank1.get("levels") is not None):
+                injected = {
+                    "centre_price":       None,
+                    "target_spacing_pct": float(rank1["spacing_pct"]),
+                    "target_levels":      int(rank1["levels"]),
+                    "buy_level_bias":     1.0,
+                    "sell_level_bias":    1.0,
+                }
+                if isinstance(m_r0, dict):
+                    m_r0["geometry"] = injected
+                else:
+                    round_0["melchior"] = {"geometry": injected}
+                overrides.append("[GEOMETRY_INJECTED_FROM_SCORER]")
+                notes.append(
+                    f"[GEOMETRY_INJECTED_FROM_SCORER] Melchior emitted "
+                    f"no/partial geometry "
+                    f"(agent_sp={sp_val!r}, agent_lv={lv_val!r}); injected "
+                    f"scorer rank-1 (levels={injected['target_levels']}, "
+                    f"spacing_pct={injected['target_spacing_pct']:.4f}, "
+                    f"expected_daily_pnl_pct="
+                    f"{rank1.get('expected_daily_pnl_pct') or 0.0:.4f})"
+                )
+                log.warning(
+                    "Hard rule: GEOMETRY_INJECTED_FROM_SCORER — agent_sp=%r "
+                    "agent_lv=%r → rank-1 (lc=%d, sp=%.4f)",
+                    sp_val, lv_val,
+                    injected["target_levels"], injected["target_spacing_pct"],
+                )
+                geometry_source = "scorer_fallback"
+            else:
+                if not rank1:
+                    skip_reason = "scorer empty"
+                elif not rank1.get("acceptable"):
+                    skip_reason = "rank-1 unacceptable"
+                else:
+                    skip_reason = "rank-1 fields missing"
+                # No usable geometry path. Don't rebuild with a fabricated
+                # spacing and don't leave the existing grid running blind.
+                # Force GRID_PAUSE so the engine cancels all orders and
+                # idles until the next cycle, when the scorer (or Melchior)
+                # might produce usable geometry. GRID_PAUSE alone — no
+                # pause_longs/pause_shorts flags — because this rule re-
+                # fires on each cycle and flag-based state would chatter.
+                cons["grid_action"] = "GRID_PAUSE"
+                overrides.append("[NO_ACCEPTABLE_VARIANT]")
+                notes.append(
+                    f"[NO_ACCEPTABLE_VARIANT] {skip_reason} — forcing "
+                    f"GRID_PAUSE; engine will cancel all orders and idle "
+                    f"until next cycle"
+                )
+                log.warning(
+                    "Hard rule: NO_ACCEPTABLE_VARIANT (%s) — forcing "
+                    "GRID_PAUSE", skip_reason,
+                )
+                # geometry_source stays 'unchanged' — no geometry was applied
+    cons["geometry_source"] = geometry_source
+
     cons["hard_rule_overrides"] = overrides
     cons["reasoning"] = " ".join(s for s in notes if s).strip()
     return cons
@@ -602,8 +1395,49 @@ def _final_consensus(cons: dict, cycle_id: str, melchior_r0: dict) -> dict:
     """
     Shape the consensus dict for scheduler / engine consumption.
     Engine reads: grid_action, risk_action, regime, reason (singular!),
-    melchior_geometry (dict of centre_price/target_spacing_pct/biases).
+    melchior_geometry (dict of centre_price/target_spacing_pct/target_levels/
+    biases).
+
+    target_spacing_pct and target_levels are pulled from Melchior's actual
+    geometry block in her R0 response. Replaces the prior shadow-fill-winner
+    fallback. When Melchior's output is missing/unparseable, both fall back
+    to None and the engine retains the live grid's current spacing/levels.
+    centre_price stays None — recentres anchor to live spot at rebuild time.
     """
+    geom_raw = (melchior_r0 or {}).get("geometry") or {}
+    if not isinstance(geom_raw, dict):
+        # Defensive: a non-dict 'geometry' value means Melchior emitted
+        # something off-schema. Treat as missing and log the raw payload so
+        # operator can diagnose without rerunning the cycle.
+        log.warning(
+            "Melchior geometry was %s, not a dict — treating as None. "
+            "Raw r0: %r", type(geom_raw).__name__, melchior_r0,
+        )
+        geom_raw = {}
+
+    target_spacing_pct = geom_raw.get("target_spacing_pct")
+    target_levels = geom_raw.get("target_levels")
+    # Coerce to native types, defaulting to None on any failure.
+    try:
+        target_spacing_pct = (
+            float(target_spacing_pct)
+            if target_spacing_pct is not None else None
+        )
+    except (TypeError, ValueError):
+        target_spacing_pct = None
+    try:
+        target_levels = (
+            int(target_levels) if target_levels is not None else None
+        )
+    except (TypeError, ValueError):
+        target_levels = None
+
+    if target_spacing_pct is not None or target_levels is not None:
+        log.info(
+            "Melchior geometry → target_spacing_pct=%s target_levels=%s",
+            target_spacing_pct, target_levels,
+        )
+
     return {
         "grid_action":         cons.get("grid_action"),
         "risk_action":         cons.get("risk_action"),
@@ -611,9 +1445,11 @@ def _final_consensus(cons: dict, cycle_id: str, melchior_r0: dict) -> dict:
         "reason":              cons.get("reasoning"),
         "deadlock":            bool(cons.get("deadlock")),
         "hard_rule_overrides": cons.get("hard_rule_overrides") or [],
-        "melchior_geometry":   {  # empty values → engine falls back to current price + existing spacing
+        "melchior_geometry":   {
+            # centre stays None → engine anchors to live spot price on rebuild
             "centre_price":       None,
-            "target_spacing_pct": None,
+            "target_spacing_pct": target_spacing_pct,
+            "target_levels":      target_levels,
             "sell_level_bias":    1.0,
             "buy_level_bias":     1.0,
         },
@@ -632,6 +1468,11 @@ def _build_debate_record(cycle_id: str, trigger: str, world_state: dict,
         "cycle_id":  cycle_id,
         "timestamp": world_state.get("timestamp") or datetime.utcnow().isoformat(),
         "trigger":   trigger,
+        # Flight recorder: persist the exact inputs the council was shown this
+        # cycle so any decision is auditable after the fact. insert_debate_record
+        # JSON-serializes this dict into the world_state TEXT column. Without it
+        # the only copy lived in a Letta block overwritten every cycle.
+        "world_state": world_state,
     }
     for agent in ("casper", "melchior", "balthasar"):
         r0 = round_0.get(agent) or {}
@@ -644,35 +1485,52 @@ def _build_debate_record(cycle_id: str, trigger: str, world_state: dict,
         # list/dict values for *_evidence are JSON-encoded by insert_debate_record
         record[f"{agent}_r0_evidence"]   = r0.get("key_evidence") or []
 
-    record["debate_triggered"] = 1 if conflict else 0
-    if conflict:
-        a, b = conflict["agents"]
-        record["conflict_pair"] = f"{a}_{b}"
+    # debate_triggered semantics under always-R1 synthesis: True iff
+    # any agent's R1 position differs from their R0 position
+    record["debate_triggered"] = 1 if cons.get("debate_triggered") else 0
 
     if round_1:
         for agent in ("casper", "melchior", "balthasar"):
-            r1 = round_1.get(agent)
-            if r1 is None:
-                continue  # agent not in this conflict — columns stay NULL
-            held = bool(r1.get("held"))
-            record[f"{agent}_r1_held"] = 1 if held else 0
-            if held:
+            r1 = round_1.get(agent) or {}
+            if r1.get("_r1_parse_error"):
+                # synthesis call failed parse — fell back to R0
+                record[f"{agent}_r1_held"] = None
                 record[f"{agent}_revision_valid"] = None
-            else:
-                rv = r1.get("revision_valid")
-                # revision_valid was annotated in run_cycle (True/False)
-                record[f"{agent}_revision_valid"] = (
-                    1 if rv is True else (0 if rv is False else None)
-                )
-            record[f"{agent}_r1_text"] = r1.get("text") or ""
+                record[f"{agent}_r1_text"] = f"PARSE_ERROR: {r1.get('_r1_parse_error')!s}"[:500]
+                continue
+            r0_pos = (round_0.get(agent) or {}).get("position")
+            r1_pos = r1.get("position")
+            held = (r0_pos == r1_pos) if (r0_pos and r1_pos) else True
+            record[f"{agent}_r1_held"] = 1 if held else 0
+            # revision_valid retained for schema continuity; under
+            # synthesis architecture we accept R1's revision as valid by
+            # construction (the agent saw peer R0s and produced a final
+            # answer). True when revised, None when held.
+            record[f"{agent}_revision_valid"] = None if held else 1
+            # Stash the R1 crux as the human-readable summary
+            record[f"{agent}_r1_text"] = (r1.get("crux") or "")[:500]
 
     record["final_grid_action"] = cons.get("grid_action")
     record["final_risk_action"] = cons.get("risk_action")
-    record["deadlock"]          = 1 if cons.get("deadlock") else 0
+    record["deadlock"]          = 0  # synthesis architecture has no deadlock
+    # New columns for the structural-vote architecture
+    record["regime_action"] = cons.get("regime_action")
+    record["geometry_veto"] = cons.get("geometry_veto")
     # JSON-encoded list of bracketed hard-rule tags applied this cycle
     # (e.g. ["[RECENTRE_COOLDOWN]", "[PAUSE_INVALID]"]). The dashboard reads
     # this column directly instead of parsing magi_decisions.notes.
     record["hard_rule_overrides"] = cons.get("hard_rule_overrides") or []
+    # 'agent' | 'scorer_fallback' | 'unchanged' — set by enforce_hard_rules
+    # rule #8. Lets the dashboard show how often Melchior actually contributes
+    # geometry vs how often the hard-rule fallback carries the load.
+    record["geometry_source"] = cons.get("geometry_source") or "unchanged"
+    # Per-agent freshness-retry flags from council.py's R0 validator. None of
+    # the agents will carry the key if world_state wasn't passed through, so
+    # default to False to preserve the JSON shape across cycles.
+    record["freshness_retries"] = {
+        agent: bool((round_0.get(agent) or {}).get("freshness_retry"))
+        for agent in ("casper", "melchior", "balthasar")
+    }
     # applied_*, engine_clamped, clamp_reason are filled in later by the engine;
     # outcome_* fields are backfilled by the observer.
     return record
@@ -784,8 +1642,11 @@ def run_cycle(trigger: str = "manual", force: bool = False) -> dict:
     except Exception as e:
         log.error("Failed to push world_state to Letta: %s — agents will see stale state", e)
 
-    # 5. Round 0 in parallel
-    round_0 = run_round_0_parallel(cycle_id)
+    # 5. Round 0 in parallel — pass world_state so council.py's freshness
+    # validator can cross-check each agent's R0 evidence against the
+    # current world_state values and force a one-shot correction re-prompt
+    # on stale agents (see council.py:_validate_r0_freshness).
+    round_0 = run_round_0_parallel(cycle_id, world_state)
     log.info(
         "Round 0: casper=%s/%.2f melchior=%s/%.2f balthasar=%s/%.2f",
         round_0['casper'].get('position'),
@@ -796,57 +1657,65 @@ def run_cycle(trigger: str = "manual", force: bool = False) -> dict:
         float(round_0['balthasar'].get('conviction') or 0.0),
     )
 
-    # 6. Conflict detection — world_state is required for the grid-state rules
-    conflict = detect_conflict(round_0, world_state)
-    round_1 = None
+    # 6. Round 1 — ALWAYS fires as synthesis. Each agent's R1 prompt
+    # explicitly pastes peers' R0 outputs and asks for revision/hold
+    # in light of the integrated view. Replaces the prior
+    # conflict-triggered debate; CONFLICT_MATRIX retired.
+    log.info("Round 1: firing synthesis for all three agents")
+    round_1 = run_round_1(round_0, cycle_id)
+    for agent in ("casper", "melchior", "balthasar"):
+        r1 = round_1.get(agent) or {}
+        if r1.get("_r1_parse_error"):
+            log.warning(
+                "Round 1 [%s] parse error: %s — falling back to R0",
+                agent, r1.get("_r1_parse_error"),
+            )
+            continue
+        r0_pos = (round_0.get(agent) or {}).get("position")
+        r1_pos = r1.get("position")
+        if r1_pos and r0_pos and r1_pos != r0_pos:
+            log.info("Round 1 [%s] shifted %s -> %s", agent, r0_pos, r1_pos)
+    conflict = None  # retained for downstream signatures expecting it
 
-    # 8. Round 1 if conflict
-    if conflict:
-        log.info("Conflict detected: %s", conflict['reason'])
-        round_1 = run_round_1(conflict, cycle_id)
-        for agent in conflict['agents']:
-            r1 = round_1.get(agent)
-            if r1 is None:
-                continue
-            if r1.get('held'):
-                r1['revision_valid'] = None
-            else:
-                r0_evidence = (round_0.get(agent) or {}).get('key_evidence') or []
-                rev_ev = r1.get('revision_evidence') or ''
-                is_valid, why = validate_revision(r0_evidence, rev_ev)
-                r1['revision_valid'] = is_valid
-                log.info(
-                    "Round 1: %s revision %s — %s",
-                    agent, 'VALID' if is_valid else 'INVALID (capitulation)', why
-                )
-    else:
-        log.info("No conflict — proceeding with Round 0 consensus")
-
-    # 9. Resolve consensus from the debate
+    # 9. Resolve consensus from the synthesised votes
     cons = resolve_consensus(round_0, round_1, conflict)
     log.info(
-        "Consensus: grid=%s risk=%s deadlock=%s — %s",
+        "Consensus: grid=%s risk=%s regime=%s regime_action=%s "
+        "geometry_veto=%s debate_triggered=%s — %s",
         cons.get('grid_action'), cons.get('risk_action'),
-        cons.get('deadlock'), cons.get('reasoning'),
+        cons.get('regime'), cons.get('regime_action'),
+        cons.get('geometry_veto'), cons.get('debate_triggered'),
+        cons.get('reasoning'),
     )
 
-    # 10. Human alert on deadlock
-    if cons.get('deadlock'):
-        emit_human_alert(cycle_id, cons.get('reasoning', '(no reason)'))
-
-    # 11. Apply hard rules on top of LLM consensus
-    cons = enforce_hard_rules(cons, world_state)
+    # 11. Apply hard rules on top of LLM consensus.
+    # round_0 is passed so rule #8 (GEOMETRY_INJECTED_FROM_SCORER) can mutate
+    # round_0['melchior']['geometry'] before _final_consensus reads it below.
+    cons = enforce_hard_rules(cons, world_state, round_0)
     if cons.get('hard_rule_overrides'):
         log.info("Hard-rule overrides applied: %s", cons['hard_rule_overrides'])
+    log.info("Geometry source: %s", cons.get('geometry_source') or 'unchanged')
 
     # 12-13. Write structured debate record (canonical source of truth)
+    debate_inserted = False
     try:
         debate_record = _build_debate_record(
             cycle_id, trigger, world_state, round_0, conflict, round_1, cons
         )
         insert_debate_record(debate_record)
+        debate_inserted = True
     except Exception as e:
         log.error("Failed to insert debate_record: %s", e)
+
+    # 13b. Mark gate events consumed by THIS cycle so the next cycle's
+    # world_state window starts from a clean slate. Only run after the
+    # debate_records insert succeeds — if the insert failed we keep the
+    # events unconsumed so they re-surface on the next cycle.
+    if debate_inserted:
+        try:
+            _mark_gate_events_consumed(cycle_id, world_state.get("timestamp"))
+        except Exception as e:
+            log.warning("gate consume failed (non-fatal): %s", e)
 
     # 14. Dual-write to legacy magi_decisions for backward-compat readers:
     #     dashboard.py panels parse hard-rule tags from .notes, learning.py

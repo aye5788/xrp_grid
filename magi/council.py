@@ -45,7 +45,9 @@ load_dotenv(_REPO_ROOT / '.env')
 
 from letta_client import Letta
 
-from database import get_agent_registry_row, get_letta_agent_id, insert_alert
+from database import (get_agent_registry_row, get_letta_agent_id,
+                      insert_alert, insert_token_usage)
+from magi.costs import estimate_cost
 
 
 log = logging.getLogger(__name__)
@@ -150,6 +152,77 @@ def _alert_exception(agent_id: str, exc: BaseException,
         )
     except Exception as alert_err:
         log.error("insert_alert failed: %r", alert_err)
+
+
+def _record_token_usage_from_response(agent_id: str, response,
+                                       phase: str = "R0") -> None:
+    """Walk the step ids in `response`, sum token counts across them, and
+    write one token_usage row per LLM call. Model is taken from
+    agent_registry (the live source of truth); the per-step model string
+    from Letta is used only as a fallback when the registry has no row.
+
+    Best-effort: any exception is logged and swallowed — token accounting
+    must never block the council. Skipped when no step_id is present
+    (safe-default early returns, etc.).
+    """
+    step_ids = []
+    for msg in getattr(response, 'messages', []) or []:
+        sid = getattr(msg, 'step_id', None)
+        if sid and sid not in step_ids:
+            step_ids.append(sid)
+    if not step_ids:
+        return
+
+    prompt_tokens = 0
+    completion_tokens = 0
+    total_tokens = 0
+    step_model = None
+    for sid in step_ids:
+        try:
+            step = client.steps.retrieve(sid)
+        except Exception as e:
+            log.warning("[%s] %s: token-usage step retrieve %s failed: %r",
+                        agent_id, phase, sid, e)
+            continue
+        prompt_tokens     += int(getattr(step, 'prompt_tokens', 0) or 0)
+        completion_tokens += int(getattr(step, 'completion_tokens', 0) or 0)
+        total_tokens      += int(getattr(step, 'total_tokens', 0) or 0)
+        # Last non-empty step.model wins as the fallback label
+        sm = getattr(step, 'model', None)
+        if sm:
+            step_model = sm
+
+    if total_tokens == 0 and prompt_tokens == 0 and completion_tokens == 0:
+        # Nothing billable to record (all steps came back empty)
+        return
+
+    # Authoritative model string lives in agent_registry. Fall back to the
+    # step's model only if the registry has no row for this agent.
+    model = None
+    try:
+        reg = get_agent_registry_row(agent_id)
+        if reg and reg.get('model'):
+            model = reg['model']
+    except Exception as e:
+        log.warning("[%s] %s: agent_registry lookup failed: %r",
+                    agent_id, phase, e)
+    if not model:
+        model = step_model or 'unknown'
+
+    cost = 0.0
+    try:
+        cost = estimate_cost(model, prompt_tokens, completion_tokens)
+    except Exception as e:
+        log.warning("[%s] %s: estimate_cost failed: %r", agent_id, phase, e)
+
+    try:
+        insert_token_usage(
+            agent_id, model, prompt_tokens, completion_tokens,
+            total_tokens, cost, source=f"council_{phase.lower()}",
+        )
+    except Exception as e:
+        log.warning("[%s] %s: insert_token_usage failed: %r",
+                    agent_id, phase, e)
 
 
 # --- Letta client (module-level) ---
@@ -344,8 +417,22 @@ def _parse_json_strict(text: str) -> Optional[dict]:
     return None
 
 
+# Per-agent extension fields: when present, must be one of the listed
+# values. When ABSENT, the consumer defaults to the first entry
+# (EXECUTE / PROCEED). Permissive on missing — the council should never
+# block geometry changes because one agent's R0 dropped a field.
+REGIME_ACTIONS  = ("EXECUTE", "DEFER_STRUCTURAL", "STAND_DOWN")
+GEOMETRY_VETOS  = ("PROCEED", "HOLD_GEOMETRY",   "RISK_BLOCK")
+
+
 def _validate_r0(parsed: dict, agent_id: str) -> tuple[bool, str]:
-    """Validate a Round-0 parsed dict. Returns (ok, error_message)."""
+    """Validate a Round-0 parsed dict. Returns (ok, error_message).
+
+    Per-agent extension fields (added with the always-R1 synthesis
+    architecture) are OPTIONAL — missing fields default permissively
+    in resolve_consensus. When present, they must be one of the
+    declared values.
+    """
     if not isinstance(parsed, dict):
         return False, "not a dict"
     pos = parsed.get("position")
@@ -360,12 +447,342 @@ def _validate_r0(parsed: dict, agent_id: str) -> tuple[bool, str]:
     crux = parsed.get("crux")
     if not isinstance(crux, str):
         return False, "crux missing/not a string"
+    # Per-agent extension fields — OPTIONAL but enum-constrained when present
+    if agent_id == "casper":
+        ra = parsed.get("regime_action")
+        if ra is not None and ra not in REGIME_ACTIONS:
+            return False, f"regime_action={ra!r} not in {REGIME_ACTIONS}"
+    elif agent_id == "balthasar":
+        gv = parsed.get("geometry_veto")
+        if gv is not None and gv not in GEOMETRY_VETOS:
+            return False, f"geometry_veto={gv!r} not in {GEOMETRY_VETOS}"
     return True, ""
 
 
-def _r0_prompt(cycle_id: str) -> str:
+# Match floats with at least 2 decimal places. Does not include the leading
+# sign — negatives are handled by substring-matching the absolute form, since
+# world_state serialisation preserves the minus and target.2f preserves it
+# too (e.g. evidence "-0.0244" → target "-0.02", stale check against blob).
+_FLOAT_RE = re.compile(r'-?\d+\.\d{2,}')
+
+# Evidence items are typically "label: value" strings. If the label half
+# mentions a price-derived field, skip extracting numbers from that item —
+# prices can drift between world_state build and agent parse.
+_PRICE_LABEL_RE = re.compile(r'price', re.IGNORECASE)
+
+
+def _walk_ws_path_value_pairs(d: Optional[dict]) -> list:
+    """Walk a nested world_state dict/list and produce a list of
+    (dotted_path, value_str, value_2dp_str) tuples for every scalar leaf.
+
+    `value_2dp_str` is the 2-decimal form for ints and floats; for all
+    other scalar types it equals `value_str`. The dotted path uses dot
+    separators for dict keys and `[i]` indexing for list/tuple elements,
+    e.g. `portfolio.xrp_value_usd` or `open_orders.buys[0].price`.
+    """
+    pairs: list = []
+
+    def walk(node, prefix):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                new_prefix = f"{prefix}.{k}" if prefix else str(k)
+                walk(v, new_prefix)
+        elif isinstance(node, (list, tuple)):
+            for i, v in enumerate(node):
+                walk(v, f"{prefix}[{i}]")
+        elif isinstance(node, bool):
+            s = str(node)
+            pairs.append((prefix, s, s))
+        elif isinstance(node, (int, float)):
+            s = str(node)
+            try:
+                s2 = f"{float(node):.2f}"
+            except (TypeError, ValueError):
+                s2 = s
+            pairs.append((prefix, s, s2))
+        elif node is not None:
+            s = str(node)
+            pairs.append((prefix, s, s))
+
+    walk(d or {}, "")
+    return pairs
+
+
+def _find_closest_fresh(stale_str: str, ws_pairs: list) -> tuple:
+    """Given a stale numeric value string and the path-aware world_state
+    pairs from `_walk_ws_path_value_pairs`, return
+    (correct_value_2dp_str, dotted_path) for the numerically closest
+    candidate. Returns (None, None) when no candidate is within a
+    plausible distance — defined as `abs(stale - cand) <= max(|stale|, 1.0)`,
+    i.e. roughly within the same order of magnitude OR within 1.0
+    absolute units of zero. This guards against claiming a tiny
+    `vwap_dev_pct` is "the correct value" for a confabulated price.
+    """
+    try:
+        stale_val = float(stale_str)
+    except (TypeError, ValueError):
+        return None, None
+
+    best_path = None
+    best_val: Optional[float] = None
+    best_dist = float('inf')
+    for path, val_str, _val_2dp in ws_pairs:
+        try:
+            cand = float(val_str)
+        except (TypeError, ValueError):
+            continue
+        dist = abs(stale_val - cand)
+        if dist < best_dist:
+            best_dist = dist
+            best_path = path
+            best_val = cand
+
+    if best_path is None or best_val is None:
+        return None, None
+    if best_dist > max(abs(stale_val), 1.0):
+        return None, None
+    return f"{best_val:.2f}", best_path
+
+
+def _validate_r0_freshness(agent_id: str, r0_response: Optional[dict],
+                            world_state_dict: Optional[dict]) -> dict:
+    """Cross-check numeric values in the agent's R0 evidence against the
+    current world_state. Returns
+        {"stale": bool, "mismatches": [...], "checked": int}
+    where each entry in `mismatches` is a 3-tuple
+        (stale_value_str, correct_value_str_or_None, field_path_or_None).
+    `correct_value_str` and `field_path` are `None` when no plausible
+    candidate exists in the current world_state (i.e. the agent
+    hallucinated a value with no analog).
+
+    A float counts as fresh if its 2-decimal-precision form (or its raw
+    string form) appears as a value anywhere in the world_state. Evidence
+    items whose label half contains 'price' are skipped entirely
+    (build-vs-parse drift is expected on prices)."""
+    if not isinstance(r0_response, dict):
+        return {"stale": False, "mismatches": [], "checked": 0}
+    evidence_list = r0_response.get("key_evidence") or []
+    if not evidence_list or not isinstance(evidence_list, list):
+        return {"stale": False, "mismatches": [], "checked": 0}
+    if not world_state_dict:
+        # No world_state to compare against — can't penalise the agent.
+        return {"stale": False, "mismatches": [], "checked": 0}
+
+    ws_pairs = _walk_ws_path_value_pairs(world_state_dict)
+    fresh_strs: set = set()
+    for _path, val_str, val_2dp_str in ws_pairs:
+        if val_str:
+            fresh_strs.add(val_str)
+        if val_2dp_str:
+            fresh_strs.add(val_2dp_str)
+
+    extracted: list = []
+    for item in evidence_list:
+        if not isinstance(item, str):
+            continue
+        label, sep, _ = item.partition(":")
+        if sep and _PRICE_LABEL_RE.search(label):
+            continue
+        for m in _FLOAT_RE.findall(item):
+            extracted.append(m)
+
+    mismatches: list = []
+    for f_str in extracted:
+        try:
+            f_val = float(f_str)
+        except ValueError:
+            continue
+        target_2dp = f"{f_val:.2f}"
+        if target_2dp in fresh_strs or f_str in fresh_strs:
+            continue
+        correct_val, field_path = _find_closest_fresh(f_str, ws_pairs)
+        mismatches.append((f_str, correct_val, field_path))
+
+    return {
+        "stale": len(mismatches) > 0,
+        "mismatches": mismatches,
+        "checked": len(extracted),
+    }
+
+
+def _format_freshness_mismatches_compact(mismatches: list) -> str:
+    """Single-line representation of mismatches for log/alert messages.
+    Accepts the 3-tuple shape produced by `_validate_r0_freshness`."""
+    parts: list = []
+    for tup in mismatches or []:
+        if isinstance(tup, tuple) and len(tup) == 3:
+            stale, correct, path = tup
+            if correct is None or path is None:
+                parts.append(f"{stale} -> ? (no match)")
+            else:
+                parts.append(f"{stale} -> {correct} ({path})")
+        else:
+            parts.append(repr(tup))
+    return "[" + ", ".join(parts) + "]"
+
+
+def _freshness_retry_prompt(mismatches: list) -> str:
+    """Build the corrective re-prompt for the freshness-retry path.
+
+    `mismatches` is the 3-tuple shape produced by
+    `_validate_r0_freshness`: each entry is
+    (stale_value_str, correct_value_str_or_None, field_path_or_None).
+    The prompt frames the correction as an update to context (the
+    world_state moved between the agent's reasoning step and its output)
+    rather than as the agent having been wrong, and ends with an explicit
+    restatement of the JSON-only output contract — models under
+    correction pressure routinely exit the JSON contract and reply
+    conversationally, which trips SAFE_DEFAULTS. The restatement is the
+    belt-and-suspenders that keeps the parser happy.
+    """
+    bullet_lines: list = []
+    for tup in mismatches or []:
+        if isinstance(tup, tuple) and len(tup) == 3:
+            stale, correct, path = tup
+        else:
+            stale, correct, path = (str(tup), None, None)
+        if correct is None or path is None:
+            bullet_lines.append(
+                f"- Your prior response cited {stale} in key_evidence; no "
+                f"matching field exists in the current world_state. Re-vote "
+                f"citing only values present in the world_state block."
+            )
+        else:
+            bullet_lines.append(
+                f"- Your prior response cited {stale} in key_evidence. The "
+                f"current world_state has {correct} at {path}."
+            )
+    bullets = "\n".join(bullet_lines) if bullet_lines else (
+        "- (no fields available; re-read your world_state memory block "
+        "and cite only values present there)"
+    )
     return (
-        f"Cycle {cycle_id}. World state has been updated in your context "
+        "The world_state was updated between your reasoning step and "
+        "your output, so a few of the numbers you cited are no longer "
+        "current. Here are the current values for the fields you "
+        "referenced:\n"
+        f"{bullets}\n\n"
+        "Please re-emit your R0 vote using the current values. Respond "
+        "with a single JSON object on one line matching the schema "
+        '{"position", "conviction", "key_evidence", "crux"} — no prose, '
+        "no markdown fencing, no preamble, no closing summary."
+    )
+
+
+def _format_triggers_section(triggers: Optional[list]) -> str:
+    """Render the TRIGGERS section that precedes the rest of the R0
+    prompt. Identical text across all three agents.
+
+    `triggers` is the world_state["triggers_since_last_cycle"] list:
+    [{"trigger_id": "T1", "timestamp": <unix>, "details": {...}}, ...]
+    """
+    if not triggers:
+        return (
+            "=== NO TRIGGERS IN CURRENT WINDOW ===\n"
+            "No structural events detected since the last cycle. Evaluate "
+            "routine state.\n\n"
+        )
+    from datetime import datetime, timezone
+    lines: list = []
+    for t in triggers:
+        tid = t.get("trigger_id", "?")
+        ts = t.get("timestamp")
+        details = t.get("details") or {}
+        when = "?"
+        if isinstance(ts, (int, float)):
+            try:
+                when = datetime.fromtimestamp(
+                    float(ts), tz=timezone.utc
+                ).strftime("%H:%M UTC")
+            except Exception:
+                when = "?"
+        # Compact summary string per trigger type. Falls back to a
+        # generic key=value dump if the trigger isn't recognised.
+        if tid == "T1":
+            mp = details.get("max_move_pct")
+            summary = (f"Velocity spike: intra-hour |H-L|/L = "
+                       f"{float(mp)*100:.2f}% (> 3.0% threshold)"
+                       if mp is not None else "Velocity spike")
+        elif tid == "T2":
+            d = details.get("direction") or "?"
+            n = details.get("consecutive") or 0
+            summary = (f"Grid level breach: {n} consecutive 1h closes "
+                       f"{d} the outer grid level")
+        elif tid == "T3":
+            c = details.get("crossed_count")
+            summary = (f"Rapid level traversal: 1h candle crossed "
+                       f"{c} grid level lines (>= 4)"
+                       if c is not None else "Rapid level traversal")
+        elif tid == "T4":
+            ch = details.get("current_hours")
+            summary = (f"Fill drought crossed 24h: now "
+                       f"{float(ch):.1f}h since last fill"
+                       if ch is not None else "Fill drought crossed 24h")
+        elif tid == "T6":
+            r1 = details.get("rank1")
+            dp = details.get("deployed_pnl_pct")
+            r1p = details.get("rank1_pnl_pct")
+            improvement = details.get("improvement_pct")
+            imp_str = (f", PnL +{float(improvement)*100:.0f}%"
+                       if improvement is not None else "")
+            summary = (
+                f"Scorer rank-1 stable improvement: rank-1={r1} "
+                f"(pnl={r1p}) vs deployed pnl={dp}{imp_str}"
+            )
+        elif tid == "T7":
+            summary = "Scorer acceptability returned after prior stand-down"
+        elif tid == "T11":
+            summary = (f"Vol regime transition: "
+                       f"{details.get('prior')} → {details.get('current')}")
+        elif tid == "T12":
+            summary = (f"ADX threshold cross "
+                       f"({details.get('direction')}): "
+                       f"{details.get('prior_adx')} → "
+                       f"{details.get('current_adx')}")
+        elif tid == "T13":
+            summary = (f"VWAP deviation crossed "
+                       f"{details.get('direction')}: "
+                       f"{details.get('prior_vwap_dev_pct')}% → "
+                       f"{details.get('current_vwap_dev_pct')}%")
+        else:
+            summary = json.dumps(details, default=str)[:200]
+        lines.append(f"- [{tid} @ {when}] {summary}")
+    body = "\n".join(lines)
+    return (
+        "=== TRIGGERS IN CURRENT WINDOW ===\n"
+        "The following structural events occurred since the last cycle:\n"
+        f"{body}\n"
+        "Evaluate the current state with these events in mind, alongside "
+        "the world_state below.\n\n"
+    )
+
+
+def _extension_field_clause(agent_id: str) -> str:
+    """Per-agent extra field appended to the R0/R1 JSON schema for the
+    council's two-stage synthesis architecture. Casper emits
+    regime_action; Balthasar emits geometry_veto. Melchior unchanged
+    (his geometry field is already in the appendix path)."""
+    if agent_id == "casper":
+        return (
+            ', "regime_action": "<EXECUTE | DEFER_STRUCTURAL | STAND_DOWN — '
+            'whether the regime supports executing structural changes this '
+            'cycle>"'
+        )
+    if agent_id == "balthasar":
+        return (
+            ', "geometry_veto": "<PROCEED | HOLD_GEOMETRY | RISK_BLOCK — '
+            'whether risk conditions permit Melchior to change grid '
+            'geometry this cycle>"'
+        )
+    return ""
+
+
+def _r0_prompt(cycle_id: str, triggers: Optional[list] = None,
+               agent_id: Optional[str] = None) -> str:
+    ext = _extension_field_clause(agent_id or "")
+    return (
+        _format_triggers_section(triggers)
+        + f"Cycle {cycle_id}. World state has been updated in your context "
         f"window.\n\n"
         f"BEFORE DECIDING: read your self_model block.\n\n"
         f"If your self_model entry says you have been wrong about this kind "
@@ -393,7 +810,9 @@ def _r0_prompt(cycle_id: str) -> str:
         f"evidence entry must name the specific world_state field and "
         f"value that justifies the override>], "
         f'"crux": "<one sentence: the single thing that would change your '
-        f'mind>"}}. After responding, you may use core_memory tools to '
+        f'mind>"'
+        f"{ext}"
+        f'}}. After responding, you may use core_memory tools to '
         f"append a new observation to your self_model block if this cycle "
         f"taught you something worth recording."
     )
@@ -408,18 +827,114 @@ def _r0_retry_prompt(cycle_id: str) -> str:
     )
 
 
-def _r1_prompt(cycle_id: str, peer_agents: list) -> str:
+_R1_FRAMING_PER_AGENT = {
+    "casper": (
+        "You're Casper. Given Melchior's proposed grid_action and "
+        "Balthasar's risk read below, refine your regime classification "
+        "AND your regime_action verdict. Does the proposed action align "
+        "with the regime you classified in R0? If Balthasar identifies "
+        "risk you didn't see (open position, exhausted buffer, "
+        "concentrated skew), does that shift your read? Your regime_action "
+        "(EXECUTE/DEFER_STRUCTURAL/STAND_DOWN) is the lever the engine "
+        "reads — set it deliberately based on whether the regime supports "
+        "executing structural changes this cycle."
+    ),
+    "melchior": (
+        "You're Melchior. Given Casper's regime read and Balthasar's "
+        "risk read below, refine your grid_action and geometry. If Casper "
+        "says DEFER_STRUCTURAL or STAND_DOWN, your structural changes "
+        "won't execute this cycle — consider holding or revising. If "
+        "Balthasar says HOLD_GEOMETRY or RISK_BLOCK, what specifically "
+        "is he concerned about — open round-trip, recent rebuild, "
+        "buffer exhaustion? Re-emit your full R0 schema including "
+        "geometry if you still want a rebuild."
+    ),
+    "balthasar": (
+        "You're Balthasar. Given Melchior's specific proposed grid_action "
+        "and geometry, and Casper's regime read below, refine your "
+        "risk_action AND your geometry_veto verdict. Does Melchior's "
+        "specific RECENTRE/TIGHTEN/WIDEN create risk that warrants "
+        "HOLD_GEOMETRY (defer this cycle) or RISK_BLOCK (forbid the "
+        "change)? Does the regime affect your assessment? Your "
+        "geometry_veto is the lever the engine reads — set it "
+        "deliberately based on whether risk conditions permit the "
+        "specific geometry change proposed."
+    ),
+}
+
+
+def _format_peer_r0(peer_id: str, r0: dict) -> str:
+    """Render one peer's R0 output as a compact block for inclusion
+    in another agent's R1 user message. Strips conviction (R1 must
+    not anchor on authority) and any per-agent extension field that
+    only matters to the peer's own role."""
+    if not isinstance(r0, dict):
+        return f"[{peer_id} R0: missing]"
+    pos = r0.get("position", "?")
+    crux = r0.get("crux", "")
+    ev = r0.get("key_evidence") or []
+    ev_str = "; ".join(str(e) for e in ev[:5])
+    extras = []
+    if peer_id == "casper" and r0.get("regime_action"):
+        extras.append(f"regime_action={r0.get('regime_action')}")
+    if peer_id == "balthasar" and r0.get("geometry_veto"):
+        extras.append(f"geometry_veto={r0.get('geometry_veto')}")
+    if peer_id == "melchior":
+        geom = r0.get("geometry") or {}
+        ts = geom.get("target_spacing_pct")
+        tl = geom.get("target_levels")
+        if ts is not None or tl is not None:
+            extras.append(f"geometry=target_spacing_pct={ts} target_levels={tl}")
+    ext_str = (" | " + " ".join(extras)) if extras else ""
     return (
-        f"Cycle {cycle_id} Round 1. The cycle_phase block is now round_1. "
-        f"Your Round 0 position conflicts with: {', '.join(peer_agents)}. "
-        f"Their Round 0 outputs are visible in your context window via the "
-        f"corresponding _r0_output blocks. Respond ONLY with a JSON object "
-        f'on one line: either {{"hold": true, "challenge": "<specific '
-        f'rebuttal citing your strongest evidence>"}} OR {{"hold": false, '
-        f'"revised_position": "<new position>", "revision_evidence": '
-        f'"<specific data point NOT in your Round 0 key_evidence>"}}. Hidden '
-        f"from your view: peer conviction scores. Do not anchor to authority "
-        f"— reason from evidence only."
+        f"[{peer_id} R0] position={pos}{ext_str}\n"
+        f"  key_evidence: {ev_str}\n"
+        f"  crux: {crux}"
+    )
+
+
+def _r1_prompt(cycle_id: str, agent_id: str,
+                self_r0: Optional[dict],
+                peer_r0s: dict) -> str:
+    """Build the R1 synthesis prompt for one agent. Peer R0 content is
+    pasted explicitly in the user message — no reliance on Letta memory
+    tool reads — so the agent definitely sees what the others said.
+
+    `peer_r0s` is a dict {peer_agent_id: peer_r0_dict} of the OTHER two
+    agents' R0 outputs.
+    """
+    framing = _R1_FRAMING_PER_AGENT.get(agent_id) or (
+        "Refine your R0 position in light of peer outputs below."
+    )
+    self_pos = (self_r0 or {}).get("position", "?")
+    self_crux = (self_r0 or {}).get("crux", "")
+    self_ev = (self_r0 or {}).get("key_evidence") or []
+    self_ev_str = "; ".join(str(e) for e in self_ev[:5])
+    peer_block = "\n\n".join(
+        _format_peer_r0(pid, pr0) for pid, pr0 in peer_r0s.items()
+    )
+    ext = _extension_field_clause(agent_id)
+    return (
+        f"Cycle {cycle_id} — ROUND 1 SYNTHESIS.\n\n"
+        f"{framing}\n\n"
+        f"=== YOUR ROUND 0 ===\n"
+        f"position={self_pos}\n"
+        f"key_evidence: {self_ev_str}\n"
+        f"crux: {self_crux}\n\n"
+        f"=== PEER ROUND 0 OUTPUTS ===\n"
+        f"{peer_block}\n\n"
+        f"Respond ONLY with a single JSON object on one line — same "
+        f"schema as your R0, no markdown fences, no preamble. If your "
+        f"R1 position holds, restate your R0 fields and use key_evidence "
+        f"to engage peer concerns explicitly. If you revise, the new "
+        f"position is your final vote.\n"
+        f'{{"position": "<one of your valid actions>", '
+        f'"conviction": <float 0.0-1.0>, '
+        f'"key_evidence": [<3-5 short strings; reference peer reasoning '
+        f'where it affected your call>], '
+        f'"crux": "<one sentence>"'
+        f"{ext}"
+        f"}}"
     )
 
 
@@ -447,7 +962,8 @@ def set_cycle_phase(phase: str) -> None:
     log.debug("cycle_phase block set to %s", phase)
 
 
-def send_round_0(agent_id: str, cycle_id: str) -> dict:
+def send_round_0(agent_id: str, cycle_id: str,
+                  world_state: Optional[dict] = None) -> dict:
     """
     Send the Round-0 prompt to one agent, parse the response, update that
     agent's shared r0_output block (with conviction stripped — peers can't
@@ -456,6 +972,19 @@ def send_round_0(agent_id: str, cycle_id: str) -> dict:
 
     On parse failure: retry once with a stricter reminder. On second
     failure: return the per-agent safe default with an 'error' flag.
+
+    When `world_state` is provided, the parsed R0 evidence is run through
+    `_validate_r0_freshness`. On a stale evidence list, a SINGLE corrective
+    re-prompt is sent inline; the re-prompt inlines the correct values for
+    each stale citation so the model has a fresh anchor without needing to
+    re-introspect the memory block under correction pressure. If the
+    re-prompt response parses as a valid R0, it replaces the original
+    parse. If the re-prompt response is unparseable, the SAFE_DEFAULTS
+    path is taken (a known-stale vote is treated as worse than no vote)
+    AND a `category='freshness_retry_failed'` magi_alerts row is written
+    so the confabulation pattern is surfaced even when the contingency
+    layer absorbs it silently. The returned dict always carries
+    `freshness_retry` (bool) and `freshness_mismatches` (list of 3-tuples).
     """
     letta_id = get_letta_agent_id(agent_id)
     if not letta_id:
@@ -466,8 +995,18 @@ def send_round_0(agent_id: str, cycle_id: str) -> dict:
 
     parsed: Optional[dict] = None
     last_error = ""
+    freshness_retry: bool = False
+    freshness_mismatches: list = []
+    # Triggers from world_state are rendered into the R0 prompt's leading
+    # section. Same list, same framing, for all three agents. Empty list
+    # yields the "NO TRIGGERS" framing; non-empty yields per-trigger
+    # bullet lines. Threaded only through attempt 1 — the retry prompt
+    # is intentionally minimal (re-state JSON contract only).
+    triggers_list = (world_state or {}).get("triggers_since_last_cycle") or []
     for attempt in (1, 2):
-        prompt = _r0_prompt(cycle_id) if attempt == 1 else _r0_retry_prompt(cycle_id)
+        prompt = (_r0_prompt(cycle_id, triggers_list, agent_id=agent_id)
+                  if attempt == 1
+                  else _r0_retry_prompt(cycle_id))
         try:
             response = client.agents.messages.create(
                 letta_id,
@@ -482,6 +1021,9 @@ def send_round_0(agent_id: str, cycle_id: str) -> dict:
         # Live Steps-API check: even on a non-raising call, the step's
         # stop_reason may indicate insufficient_credits / llm_api_error etc.
         _check_steps_for_alerts(agent_id, response, phase=f"R0 attempt {attempt}")
+        # Token accounting — recorded even for parse-failure responses since
+        # the API was billed for them. Uses agent_registry as model source.
+        _record_token_usage_from_response(agent_id, response, phase="R0")
 
         # Scan ALL assistant messages and accept the first one that parses
         # to a valid R0 schema. Trailing chat-style messages emitted after
@@ -514,6 +1056,102 @@ def send_round_0(agent_id: str, cycle_id: str) -> dict:
         parsed = candidate
         break
 
+    # Freshness validator — runs only when a valid parse exists and the
+    # caller supplied world_state. Retry is capped at exactly one extra
+    # messages.create() call; if the corrected response is unparseable,
+    # we drop to SAFE_DEFAULTS (a known-stale vote is worse than no vote
+    # since the degraded-mode hard rule can handle the latter cleanly).
+    if parsed is not None and world_state is not None:
+        check = _validate_r0_freshness(agent_id, parsed, world_state)
+        if check.get("stale") and check.get("mismatches"):
+            freshness_mismatches = list(check["mismatches"])
+            log.warning(
+                "[FRESHNESS_FAIL] agent=%s mismatches=%s",
+                agent_id,
+                _format_freshness_mismatches_compact(freshness_mismatches),
+            )
+            freshness_retry = True
+            try:
+                retry_response = client.agents.messages.create(
+                    letta_id,
+                    messages=[{
+                        "role": "user",
+                        "content": _freshness_retry_prompt(freshness_mismatches),
+                    }],
+                )
+                _check_steps_for_alerts(agent_id, retry_response,
+                                         phase="R0 freshness retry")
+                _record_token_usage_from_response(agent_id, retry_response,
+                                                   phase="R0")
+                retry_texts = _assistant_texts(retry_response)
+                retry_parsed: Optional[dict] = None
+                retry_failure_reason: str = ""
+                if not retry_texts:
+                    retry_failure_reason = "no assistant_message in retry response"
+                else:
+                    for text in retry_texts:
+                        obj = _parse_json_strict(text)
+                        if not isinstance(obj, dict):
+                            retry_failure_reason = (
+                                f"retry response was prose, not JSON: "
+                                f"{text[:120]!r}"
+                            )
+                            continue
+                        ok, err = _validate_r0(obj, agent_id)
+                        if not ok:
+                            retry_failure_reason = (
+                                f"retry validation failed: {err}"
+                            )
+                            continue
+                        retry_parsed = obj
+                        retry_failure_reason = ""
+                        break
+                if retry_parsed is not None:
+                    log.info(
+                        "[FRESHNESS_RETRY_OK] agent=%s — replacing R0 with "
+                        "corrected response", agent_id,
+                    )
+                    parsed = retry_parsed
+                else:
+                    log.warning(
+                        "[FRESHNESS_RETRY_FAIL] agent=%s — corrected response "
+                        "unparseable; dropping to SAFE_DEFAULTS (%s)",
+                        agent_id, retry_failure_reason,
+                    )
+                    # Surface the confabulation pattern even when the
+                    # contingency layer absorbs the SAFE_DEFAULTS silently.
+                    # 60-min dedup on (category, agent_id) is built into
+                    # insert_alert — repeated failures inside an hour
+                    # collapse to one row, which is the right cadence for
+                    # an observability signal.
+                    try:
+                        insert_alert(
+                            severity='warn',
+                            category='freshness_retry_failed',
+                            agent_id=agent_id,
+                            message=(
+                                f"cycle={cycle_id} agent={agent_id}; "
+                                f"{retry_failure_reason or 'retry response unparseable'}; "
+                                f"mismatches: "
+                                f"{_format_freshness_mismatches_compact(freshness_mismatches)}"
+                            ),
+                        )
+                    except Exception as alert_err:
+                        log.warning(
+                            "[%s] insert_alert(freshness_retry_failed) "
+                            "failed: %r", agent_id, alert_err,
+                        )
+                    last_error = "freshness retry response unparseable"
+                    parsed = None
+            except Exception as e:
+                log.warning(
+                    "[FRESHNESS_RETRY_ERROR] agent=%s transport error: %s",
+                    agent_id, e,
+                )
+                _alert_exception(agent_id, e, phase="R0 freshness retry")
+                last_error = f"freshness retry transport error: {e!r}"
+                parsed = None
+
     if parsed is None:
         log.error(
             "[%s] R0 failed after retry — falling back to safe default. "
@@ -521,6 +1159,8 @@ def send_round_0(agent_id: str, cycle_id: str) -> dict:
         )
         safe = dict(SAFE_DEFAULTS[agent_id])
         safe["error"] = last_error
+        safe["freshness_retry"] = freshness_retry
+        safe["freshness_mismatches"] = freshness_mismatches
         # Still publish the safe default to the peer block so downstream
         # agents see SOMETHING and don't see a stale value from a prior cycle.
         peer_payload = {
@@ -547,22 +1187,31 @@ def send_round_0(agent_id: str, cycle_id: str) -> dict:
         _get_shared_block_id(f"{agent_id}_r0_output"),
         value=json.dumps(peer_payload),
     )
+    parsed["freshness_retry"] = freshness_retry
+    parsed["freshness_mismatches"] = freshness_mismatches
     return parsed
 
 
-def run_round_0_parallel(cycle_id: str) -> dict:
+def run_round_0_parallel(cycle_id: str,
+                          world_state: Optional[dict] = None) -> dict:
     """
     Fan out Round-0 to all three agents in parallel. Each agent's slot in the
     returned dict is either its parsed response (with conviction) or a safe
     default carrying an 'error' key. The cycle_phase block is set to
     'round_0' before fan-out so agents see the correct phase.
+
+    When `world_state` is supplied, it is threaded into `send_round_0` so
+    the freshness validator can cross-check each agent's evidence against
+    the current world_state values. Backward-compatible: callers that omit
+    `world_state` get the prior (no-validation) behaviour unchanged.
     """
     set_cycle_phase("round_0")
 
     agents = ("casper", "melchior", "balthasar")
     results: dict = {}
     with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = {pool.submit(send_round_0, a, cycle_id): a for a in agents}
+        futures = {pool.submit(send_round_0, a, cycle_id, world_state): a
+                   for a in agents}
         for fut, a in futures.items():
             try:
                 results[a] = fut.result()
@@ -570,6 +1219,8 @@ def run_round_0_parallel(cycle_id: str) -> dict:
                 log.exception("[%s] R0 future raised: %s", a, e)
                 safe = dict(SAFE_DEFAULTS[a])
                 safe["error"] = f"executor exception: {e!r}"
+                safe["freshness_retry"] = False
+                safe["freshness_mismatches"] = []
                 results[a] = safe
     return results
 
@@ -619,21 +1270,22 @@ def detect_conflict(round_0: dict, world_state: Optional[dict] = None) -> Option
     return matches[0][1]
 
 
-def send_round_1_challenge(agent_id: str, peer_agents: list, cycle_id: str) -> dict:
-    """
-    Send the Round-1 challenge to one agent. Peers' r0_output blocks are
-    already in this agent's context window — no tool call needed.
+def send_round_1_synthesis(agent_id: str, cycle_id: str,
+                             self_r0: dict, peer_r0s: dict) -> dict:
+    """Always-fires R1 synthesis call for one agent. The R1 user message
+    explicitly pastes peer R0 outputs (position, key_evidence, crux,
+    extension fields) — no reliance on Letta memory-tool reads.
 
-    Returns a normalised dict:
-      {"held": bool, "text": str,
-       "revised_position": str|None, "revision_evidence": str|None,
-       "error": str|None}
+    Returns the parsed R1 dict (same schema as R0 plus the agent's
+    extension field), with a `_r1_parse_error` slot populated if
+    parsing failed. On failure, callers should fall back to the
+    agent's R0 for the final consensus — permissive degradation.
     """
     letta_id = get_letta_agent_id(agent_id)
     if not letta_id:
         raise RuntimeError(f"agent_id={agent_id!r} not in agent_registry")
 
-    prompt = _r1_prompt(cycle_id, peer_agents)
+    prompt = _r1_prompt(cycle_id, agent_id, self_r0, peer_r0s)
 
     try:
         response = client.agents.messages.create(
@@ -643,82 +1295,57 @@ def send_round_1_challenge(agent_id: str, peer_agents: list, cycle_id: str) -> d
     except Exception as e:
         log.exception("[%s] R1 transport failed: %s", agent_id, e)
         _alert_exception(agent_id, e, phase="R1")
-        return {"held": True, "text": "", "revised_position": None,
-                "revision_evidence": None, "error": f"transport: {e!r}"}
+        return {"_r1_parse_error": f"transport: {e!r}"}
 
-    # Live Steps-API check on the R1 response too.
     _check_steps_for_alerts(agent_id, response, phase="R1")
+    _record_token_usage_from_response(agent_id, response, phase="R1")
 
-    # Scan all assistant messages; accept the first that parses to the
-    # R1 schema (must have 'hold'). Same rationale as R0: trailing
-    # chat-style messages emitted after core_memory.append must not
-    # clobber the structured response.
     texts = _assistant_texts(response)
-    parsed = None
-    last_text = ""
-    for t in texts:
-        last_text = t
-        obj = _parse_json_strict(t)
-        if isinstance(obj, dict) and "hold" in obj:
-            parsed = obj
-            break
+    parsed: Optional[dict] = None
+    last_parse_error = ""
+    for text in texts:
+        obj = _parse_json_strict(text)
+        if not isinstance(obj, dict):
+            last_parse_error = f"unparseable: {text[:200]!r}"
+            continue
+        ok, err = _validate_r0(obj, agent_id)
+        if not ok:
+            last_parse_error = f"validation: {err} in {text[:200]!r}"
+            continue
+        parsed = obj
+        break
 
     if parsed is None:
-        log.warning("[%s] R1 response unparseable / missing 'hold': %s",
-                    agent_id, last_text[:200])
-        # Treat unparseable as a hold (no revision) — preserves caller intent
-        return {"held": True, "text": last_text,
-                "revised_position": None, "revision_evidence": None,
-                "error": "unparseable"}
-
-    held = bool(parsed["hold"])
-    if held:
-        return {
-            "held": True,
-            "text": str(parsed.get("challenge", "")),
-            "revised_position": None,
-            "revision_evidence": None,
-            "error": None,
-        }
-
-    return {
-        "held": False,
-        "text": str(parsed.get("revision_evidence", "")),
-        "revised_position": parsed.get("revised_position"),
-        "revision_evidence": parsed.get("revision_evidence"),
-        "error": None,
-    }
+        log.warning("[%s] R1 synthesis response unparseable: %s",
+                    agent_id, last_parse_error)
+        return {"_r1_parse_error": last_parse_error
+                or "no parseable R0-schema JSON in R1 response"}
+    return parsed
 
 
-def run_round_1(conflict: dict, cycle_id: str) -> dict:
-    """
-    Send Round-1 challenges in parallel to the two agents named in
-    conflict['agents']. The third agent does not participate.
-    Returns {agent_id: dict-from-send_round_1_challenge}.
-    """
+def run_round_1(round_0: dict, cycle_id: str) -> dict:
+    """Always-fires synthesis: send R1 to ALL three agents in parallel.
+    Each agent's R1 user message pastes the OTHER two agents' R0
+    outputs explicitly. Returns {agent_id: parsed_r1_or_error_marker}.
+
+    Signature is intentionally simpler than the old conflict-driven
+    version; orchestrator.run_cycle calls this unconditionally."""
     set_cycle_phase("round_1")
-
-    agents_in_conflict = list(conflict["agents"])
-    peers_map = {
-        a: [p for p in agents_in_conflict if p != a]
-        for a in agents_in_conflict
-    }
-
+    agents = ("casper", "melchior", "balthasar")
     results: dict = {}
-    with ThreadPoolExecutor(max_workers=len(agents_in_conflict)) as pool:
-        futures = {
-            pool.submit(send_round_1_challenge, a, peers_map[a], cycle_id): a
-            for a in agents_in_conflict
-        }
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = {}
+        for a in agents:
+            self_r0 = round_0.get(a) or {}
+            peers = {p: round_0.get(p) or {} for p in agents if p != a}
+            futures[pool.submit(send_round_1_synthesis, a, cycle_id,
+                                self_r0, peers)] = a
         for fut, a in futures.items():
             try:
                 results[a] = fut.result()
             except Exception as e:
                 log.exception("[%s] R1 future raised: %s", a, e)
-                results[a] = {
-                    "held": True, "text": "", "revised_position": None,
-                    "revision_evidence": None, "error": f"executor: {e!r}",
-                }
+                results[a] = {"_r1_parse_error": f"executor: {e!r}"}
     return results
 
 
@@ -777,89 +1404,94 @@ def _most_conservative_risk(positions: list) -> str:
     return best or "CLEAR"
 
 
+def _final_per_agent(round_0: dict, round_1: dict, agent_id: str) -> dict:
+    """Return the agent's FINAL R1-or-R0 vote dict. Prefers R1 when
+    parseable; falls back to R0 on R1 parse failure. Permissive on
+    missing extension fields — caller applies defaults."""
+    r1 = (round_1 or {}).get(agent_id) or {}
+    if r1 and not r1.get("_r1_parse_error"):
+        return r1
+    return (round_0 or {}).get(agent_id) or {}
+
+
+def _safe_extension(agent_final: dict, key: str,
+                     allowed: tuple, default: str) -> str:
+    """Read an extension field permissively. Missing or unknown -> default."""
+    v = agent_final.get(key)
+    if isinstance(v, str) and v in allowed:
+        return v
+    return default
+
+
 def resolve_consensus(round_0: dict, round_1: Optional[dict],
-                      conflict: Optional[dict]) -> dict:
+                      conflict: Optional[dict] = None) -> dict:
+    """Always-R1 synthesis consensus.
+
+    Each agent's FINAL vote = their R1 if parseable, else their R0
+    (permissive fallback — R1 parse failure does not freeze the cycle).
+    The `conflict` argument is retained for backward signature
+    compatibility but is unused — CONFLICT_MATRIX retired with the
+    R1-always-fires architecture.
+
+    Adds two new fields to the consensus dict, both consumed by the
+    engine downstream of enforce_hard_rules:
+      - regime_action ∈ {EXECUTE, DEFER_STRUCTURAL, STAND_DOWN}
+        (from Casper's final vote; defaults EXECUTE)
+      - geometry_veto ∈ {PROCEED, HOLD_GEOMETRY, RISK_BLOCK}
+        (from Balthasar's final vote; defaults PROCEED)
+
+    debate_triggered (returned alongside) is True when ANY agent's
+    R1 position differs from their R0 position — synthesis caused
+    a vote shift.
     """
-    Final consensus rules:
-      - regime = casper's final position (r0 unless validly revised in r1)
-      - No conflict: grid_action = melchior.r0, risk_action = balthasar.r0
-      - Conflict + at least one valid revision: apply each agent's final
-        position into their slot
-      - Conflict + all-held / all-invalid: deadlock, grid_action='MAINTAIN',
-        risk_action=most conservative of proposals seen
-    """
-    final = {
-        "casper":    round_0.get("casper",    {}).get("position"),
-        "melchior":  round_0.get("melchior",  {}).get("position"),
-        "balthasar": round_0.get("balthasar", {}).get("position"),
+    casper_final    = _final_per_agent(round_0, round_1 or {}, "casper")
+    melchior_final  = _final_per_agent(round_0, round_1 or {}, "melchior")
+    balthasar_final = _final_per_agent(round_0, round_1 or {}, "balthasar")
+
+    grid_action = melchior_final.get("position") or "MAINTAIN"
+    risk_action = balthasar_final.get("position") or "CLEAR"
+    regime      = casper_final.get("position") or "UNCERTAIN"
+    regime_action = _safe_extension(
+        casper_final, "regime_action", REGIME_ACTIONS, "EXECUTE",
+    )
+    geometry_veto = _safe_extension(
+        balthasar_final, "geometry_veto", GEOMETRY_VETOS, "PROCEED",
+    )
+
+    # debate_triggered: did synthesis change anyone's position?
+    r1_shifts = []
+    for a in ("casper", "melchior", "balthasar"):
+        r0_pos = (round_0.get(a) or {}).get("position")
+        r1_pos = ((round_1 or {}).get(a) or {}).get("position")
+        if (r1_pos and r0_pos and r1_pos != r0_pos):
+            r1_shifts.append(f"{a}: {r0_pos}->{r1_pos}")
+    debate_triggered = bool(r1_shifts)
+
+    # R1 parse error tracking — surface for debate_records / observability
+    r1_errors = {
+        a: ((round_1 or {}).get(a) or {}).get("_r1_parse_error")
+        for a in ("casper", "melchior", "balthasar")
     }
+    r1_errors = {k: v for k, v in r1_errors.items() if v}
 
-    deadlock = False
-    revision_notes: list = []
-
-    if conflict and round_1:
-        validated_count = 0
-        for agent in conflict["agents"]:
-            r1 = round_1.get(agent, {})
-            if r1.get("held"):
-                continue
-            revised = r1.get("revised_position")
-            rev_ev = r1.get("revision_evidence") or ""
-            if not revised:
-                continue
-            r0_evidence = round_0.get(agent, {}).get("key_evidence", []) or []
-            is_valid, reason = validate_revision(r0_evidence, rev_ev)
-            if is_valid:
-                old = final[agent]
-                final[agent] = revised
-                validated_count += 1
-                revision_notes.append(
-                    f"{agent} revised from {old} to {revised} citing "
-                    f"{rev_ev[:200]!r}"
-                )
-            else:
-                log.info(
-                    "[%s] R1 revision rejected as capitulation: %s",
-                    agent, reason
-                )
-
-        if validated_count == 0:
-            deadlock = True
-
-    regime = final["casper"] or "UNCERTAIN"
-
-    if deadlock:
-        grid_action = "MAINTAIN"
-        # Most conservative of every balthasar proposal we have on record
-        proposed_risks = [round_0.get("balthasar", {}).get("position")]
-        if round_1 and isinstance(round_1.get("balthasar"), dict):
-            r1_b = round_1["balthasar"]
-            if r1_b.get("revised_position"):
-                proposed_risks.append(r1_b["revised_position"])
-        proposed_risks = [p for p in proposed_risks if p]
-        risk_action = _most_conservative_risk(proposed_risks)
-        reasoning = (
-            f"DEADLOCK: {conflict['reason']} Round 1 produced no valid revision."
-        )
-    elif conflict:
-        grid_action = final["melchior"]
-        risk_action = final["balthasar"]
-        if revision_notes:
-            reasoning = "Conflict resolved in Round 1: " + "; ".join(revision_notes)
-        else:
-            # Shouldn't happen — guarded by validated_count==0 → deadlock above
-            reasoning = "Conflict resolved with no revision notes (defensive fallback)"
+    if r1_shifts:
+        reasoning = "R1 synthesis shifted: " + "; ".join(r1_shifts)
     else:
-        grid_action = final["melchior"]
-        risk_action = final["balthasar"]
-        reasoning = "No conflict — consensus from Round 0"
+        reasoning = "R1 synthesis — all positions held"
+    if r1_errors:
+        reasoning += (f" (R1 parse errors: {list(r1_errors)} — "
+                       f"fell back to R0 for those)")
 
     return {
-        "grid_action": grid_action,
-        "risk_action": risk_action,
-        "regime":      regime,
-        "deadlock":    deadlock,
-        "reasoning":   reasoning,
+        "grid_action":    grid_action,
+        "risk_action":    risk_action,
+        "regime":         regime,
+        "regime_action":  regime_action,
+        "geometry_veto":  geometry_veto,
+        "debate_triggered": debate_triggered,
+        "deadlock":       False,  # legacy field; synthesis architecture
+                                  # has no deadlock concept
+        "reasoning":      reasoning,
     }
 
 

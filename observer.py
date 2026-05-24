@@ -25,6 +25,15 @@ COINBASE_REST = "https://api.coinbase.com/api/v3/brokerage"
 # Lazy-initialised exchange instance for XRP candle fetches when EXCHANGE != "coinbase"
 _xrp_exchange = None
 
+# Consecutive-failure streak counter for the 6h backfill-notify path
+# (_notify_agents_6h). Keyed by agent_id. On the 3rd consecutive failure
+# we surface a warn-severity alert; backfill is best-effort and single
+# transients are too noisy to alert on. Resets on success. Resets to {}
+# on process restart — acceptable, the streak rebuilds on real failure
+# patterns and restarts are rare.
+_BACKFILL_FAILURE_STREAK_THRESHOLD = 3
+_backfill_failure_streak: dict = {}
+
 
 def get_candles_coinbase(product_id, granularity, limit=300):
     """Fetch OHLCV candles from Coinbase Advanced REST API."""
@@ -399,8 +408,39 @@ def _notify_agents_6h(cycle_id, fills_count, pnl, skew_delta, grid_alive):
                 ok, err = False, repr(e)
             if ok:
                 log.info(f"backfill: notified {a} of cycle {cycle_id} 6h outcome")
+                # Silent reset — operator does not need a "recovered" ping.
+                if _backfill_failure_streak.get(a):
+                    _backfill_failure_streak[a] = 0
             else:
                 log.warning(f"backfill: failed to notify {a} of {cycle_id}: {err}")
+                _backfill_failure_streak[a] = _backfill_failure_streak.get(a, 0) + 1
+                if _backfill_failure_streak[a] == _BACKFILL_FAILURE_STREAK_THRESHOLD:
+                    # Only fire on the threshold-crossing failure. Subsequent
+                    # failures (4th, 5th, ...) don't re-alert; dedup window
+                    # inside insert_alert would also block them, but this
+                    # check makes the intent explicit.
+                    try:
+                        from database import insert_alert
+                        # Strip raw exception payload — keep only the type
+                        # name + truncated repr. Avoids leaking provider
+                        # 402 payloads or other sensitive substrings into
+                        # magi_alerts.message.
+                        err_str = (err or '')[:200]
+                        insert_alert(
+                            severity='warn',
+                            category='backfill_notify_failed',
+                            agent_id=a,
+                            message=(
+                                f"6h backfill-notify failed {_BACKFILL_FAILURE_STREAK_THRESHOLD}"
+                                f" consecutive times for {a} on cycle {cycle_id}. "
+                                f"Latest error: {err_str}"
+                            ),
+                        )
+                    except Exception as alert_err:
+                        log.warning(
+                            "backfill: insert_alert for streak failed: %r",
+                            alert_err,
+                        )
 
 
 def backfill_outcomes():
@@ -473,6 +513,58 @@ def backfill_outcomes():
                 log.error(f"backfill: update for {cycle_id} {window} failed: {e}")
 
 
+def _ws_rest_divergence_check(rest_xrp_1h: list,
+                              tolerance_pct: float = 0.001) -> None:
+    """Compare the most-recent COMPLETED REST 1h candle against the
+    candle currently in the DB for the same hour. The DB may hold a
+    WS-derived candle written by gate_monitor; if it differs from REST
+    by more than `tolerance_pct` (0.1% default) on close price, treat
+    REST as ground truth and re-insert. Non-fatal — logs warning only
+    when divergence exceeds the tolerance."""
+    if not rest_xrp_1h:
+        return
+    from database import get_conn, insert_candle
+    now_h = datetime.utcnow().replace(
+        minute=0, second=0, microsecond=0, tzinfo=timezone.utc
+    ).isoformat()
+    # Most-recent COMPLETED REST candle (skip in-progress hour)
+    completed = [c for c in rest_xrp_1h if c.get('timestamp', '') < now_h]
+    if not completed:
+        return
+    latest = max(completed, key=lambda c: c.get('timestamp', ''))
+    ts = latest.get('timestamp')
+    rest_close = float(latest.get('close') or 0)
+    rest_high = float(latest.get('high') or 0)
+    rest_low = float(latest.get('low') or 0)
+    if rest_close <= 0:
+        return
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT close, high, low FROM candles "
+        "WHERE timeframe='1h' AND timestamp=? LIMIT 1",
+        (ts,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        # No matching candle in DB yet — observer-side insert_candle has
+        # already happened earlier in this poll, so this branch is
+        # unexpected. Skip.
+        return
+    db_close = float(row['close'] or 0)
+    if db_close <= 0:
+        return
+    diff_pct = abs(rest_close - db_close) / db_close
+    if diff_pct > tolerance_pct:
+        log.warning(
+            "WS/REST divergence at %s: db_close=%.5f rest_close=%.5f "
+            "diff=%.4f%% (>%.4f%% tolerance) — overwriting with REST",
+            ts, db_close, rest_close, diff_pct * 100, tolerance_pct * 100,
+        )
+        insert_candle(ts, '1h', float(latest.get('open') or 0),
+                      rest_high, rest_low, rest_close,
+                      float(latest.get('volume') or 0))
+
+
 def poll_cycle():
     """One full data collection cycle."""
     log.info("Poll cycle starting")
@@ -505,6 +597,16 @@ def poll_cycle():
         backfill_outcomes()
     except Exception as e:
         log.error(f"backfill_outcomes failed: {e}")
+
+    # Gate evaluation is now driven by magi/gate_monitor.py (Kraken WS v2
+    # streaming). Observer's REST poll persists indicators and acts as a
+    # safety check against WS-derived candles: compare the latest REST
+    # 1h candle against the candle currently in the DB for the same
+    # hour; if they diverge meaningfully, trust REST as ground truth.
+    try:
+        _ws_rest_divergence_check(xrp_1h)
+    except Exception as e:
+        log.warning(f"ws_rest_divergence_check failed (non-fatal): {e}")
 
 def run_daemon(interval_seconds=3600):
     """Run observer as daemon, polling every interval."""

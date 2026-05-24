@@ -26,9 +26,18 @@ load_dotenv(_REPO_ROOT / '.env')
 from letta_client import Letta
 
 import database as db
+from magi.world_state_schema import render_persona_with_signals
+from magi.validate_schema import main as validate_schema_main
 
 
 PROMPT_DIR = _REPO_ROOT / 'magi' / 'prompts'
+
+# Persona block size ceiling (Letta chars). Bumped to 20000 in the
+# schema-driven persona migration (2026-05-21) — the auto-generated
+# SIGNALS YOU RECEIVE block adds ~3-7k chars per agent depending on
+# consumer count, pushing total persona size past the prior 8000/9000
+# limits. 20000 leaves room for future schema additions.
+PERSONA_BLOCK_LIMIT = 20000
 
 # Existing system models -> Letta handles. The Letta handle for Balthasar's
 # claude-sonnet-4-6 was discovered via client.models.list(); _validate_model()
@@ -48,8 +57,11 @@ AGENT_SPECS = [
     },
     {
         'agent_id':    'balthasar',
-        # existing system uses 'claude-sonnet-4-6' (see magi/balthasar.py:127)
-        'model':       'anthropic/claude-sonnet-4-6',
+        # Switched from claude-sonnet-4-6 on 2026-05-18 — Haiku 4.5 is ~4–5×
+        # cheaper per call and retains tool-use + extended-thinking support,
+        # which Balthasar's risk-veto role needs but does not benefit from
+        # Sonnet's deeper reasoning budget in observed cycles.
+        'model':       'anthropic/claude-haiku-4-5',
         'prompt_file': PROMPT_DIR / 'balthasar_prompt.txt',
     },
 ]
@@ -174,6 +186,20 @@ def main():
             "(Letta Cloud API key from app.letta.com → Settings → API Keys)"
         )
 
+    # Schema-validation gate — runs BEFORE any Letta call so a broken
+    # schema or persona reference aborts the provisioning before any
+    # network side-effects. validate_schema_main() exits 0 on PASS, 1 on
+    # ERROR, 2 on internal failure. We tolerate exit 0 only.
+    print("Validating world_state schema vs runtime output and personas ...")
+    vrc = validate_schema_main()
+    if vrc != 0:
+        sys.exit(
+            f"ERROR: magi.validate_schema returned exit {vrc}. Provisioning "
+            f"aborted before any Letta call. Fix schema/persona errors "
+            f"above and re-run."
+        )
+    print("  schema validation: PASS")
+
     # Letta Cloud is the SDK default when only api_key is passed —
     # base_url resolves to https://api.letta.com automatically.
     client = Letta(api_key=api_key)
@@ -256,7 +282,10 @@ def main():
                 })
                 continue
 
-            new_persona = prompt_path.read_text()
+            # Render persona with the auto-generated SIGNALS block injected
+            # between the BEGIN/END markers. The schema is the single source
+            # of truth for what signals each agent sees.
+            new_persona = render_persona_with_signals(agent_id)
             try:
                 existing_blocks = list(
                     client.agents.blocks.list(existing_letta_id)
@@ -269,7 +298,8 @@ def main():
                 if persona_block is None:
                     # Defensive: shouldn't happen, but don't crash.
                     new_block = client.blocks.create(
-                        label='persona', value=new_persona, limit=8000,
+                        label='persona', value=new_persona,
+                        limit=PERSONA_BLOCK_LIMIT,
                     )
                     client.agents.blocks.attach(
                         new_block.id, agent_id=existing_letta_id,
@@ -285,6 +315,13 @@ def main():
                 else:
                     old_len = len(persona_block.value)
                     new_len = len(new_persona)
+                    # Bump block limit if the new persona would exceed it.
+                    if persona_block.limit < PERSONA_BLOCK_LIMIT:
+                        client.blocks.update(
+                            persona_block.id, limit=PERSONA_BLOCK_LIMIT,
+                        )
+                        print(f"  bumped persona block limit "
+                              f"{persona_block.limit} → {PERSONA_BLOCK_LIMIT}")
                     client.agents.blocks.update(
                         block_label='persona',
                         agent_id=existing_letta_id,
@@ -337,13 +374,16 @@ def main():
         prompt_path = spec['prompt_file']
         if not prompt_path.exists():
             sys.exit(f"ERROR: missing prompt file {prompt_path}")
-        persona_value = prompt_path.read_text()
+        # Render persona with the auto-generated SIGNALS block injected
+        # between the BEGIN/END markers (same path used by the UPDATE
+        # branch above).
+        persona_value = render_persona_with_signals(agent_id)
 
         memory_blocks = [
             {
                 'label': 'persona',
                 'value': persona_value,
-                'limit': 8000,
+                'limit': PERSONA_BLOCK_LIMIT,
             },
             {
                 'label': 'self_model',

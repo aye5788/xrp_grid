@@ -164,6 +164,9 @@ Signs: caps lock, short messages, "WTF," "OMG," "JUST DO IT."
 ## Memory and context discipline
 - The repo at `aye5788/xrp_grid` is the source of truth for code.
 - The handoff docs (00, 01, 02, this file) are the source of truth for state and plans.
+- Publish the handoff docs by running `bash /root/magi_docs/sync.sh`, which
+  pushes them to the private repo `aye5788/magi-docs`. That is the definitive
+  doc-publish path; `aye5788/xrp_grid` is code only — never push docs there.
 - If user memory and a doc disagree, the doc wins.
 - If a doc and the live code disagree, the live code wins (and update the doc).
 - Don't trust training data on Kraken or Letta specifics — both have changed.

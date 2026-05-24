@@ -261,7 +261,8 @@ def init_db():
         outcome_6h_backfilled INTEGER DEFAULT 0,
         outcome_24h_backfilled INTEGER DEFAULT 0,
 
-        hard_rule_overrides TEXT
+        hard_rule_overrides TEXT,
+        geometry_source TEXT
     )''')
     c.execute('''CREATE INDEX IF NOT EXISTS idx_debate_records_cycle_id
         ON debate_records (cycle_id)''')
@@ -270,8 +271,28 @@ def init_db():
 
     # Future-proof ALTERs for debate_records (idempotent — match the
     # try/except pattern used above for magi_decisions).
+    # geometry_source: 'agent' | 'scorer_fallback' | 'unchanged'
+    # Captures whether Melchior contributed geometry, the hard-rule fallback
+    # injected the analytical scorer's rank-1 variant, or no geometry change
+    # happened this cycle (MAINTAIN, or RECENTRE with neither agent nor
+    # acceptable rank-1 available).
     for _alter in (
         "ALTER TABLE debate_records ADD COLUMN hard_rule_overrides TEXT",
+        "ALTER TABLE debate_records ADD COLUMN geometry_source TEXT",
+        # freshness_retries: per-agent JSON dict of whether council.py's R0
+        # freshness validator forced a one-shot correction re-prompt this
+        # cycle. Shape: {"casper": bool, "melchior": bool, "balthasar": bool}.
+        # Populated by orchestrator from the round_0 result dicts.
+        "ALTER TABLE debate_records ADD COLUMN freshness_retries TEXT",
+        # world_state: full JSON snapshot of the world_state dict the council
+        # was actually shown this cycle (scored_variants_top_10,
+        # current_spacing_pct/current_levels, indicators, price, inventory,
+        # etc.). This is the council's flight recorder. Before this column,
+        # world_state was only pushed to a single Letta Cloud block that gets
+        # overwritten every cycle — so no past decision's inputs were
+        # recoverable and decisions like MAINTAIN-on-empty-grid could not be
+        # audited after the fact. Written by orchestrator._build_debate_record.
+        "ALTER TABLE debate_records ADD COLUMN world_state TEXT",
     ):
         try:
             c.execute(_alter)
@@ -354,6 +375,103 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+    # --- Memory rotation lifecycle ---
+    # One row per agent per rotation attempt (success OR failure). Status
+    # vocabulary matches magi.memory_lifecycle.rotate_agent_memory:
+    #   success / validation_failed / merge_failed / snapshot_failed
+    #   / compact_failed / skipped / skipped_degraded / error
+    # degraded_count_in_window: # of last-30 R0 rows for this agent that
+    # matched SAFE_DEFAULTS (conviction=0, crux=(no response)). Populated
+    # on every rotation attempt; the pre-gate skips when >= 12/30 (40%).
+    c.execute('''CREATE TABLE IF NOT EXISTS memory_rotations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        cycle_number INTEGER NOT NULL,
+        self_model_chars_before INTEGER,
+        self_model_chars_after INTEGER,
+        patterns_added INTEGER,
+        status TEXT NOT NULL,
+        snapshot_path TEXT,
+        error_detail TEXT,
+        degraded_count_in_window INTEGER DEFAULT 0
+    )''')
+    c.execute('''CREATE INDEX IF NOT EXISTS idx_memory_rotations_agent_ts
+        ON memory_rotations (agent_id, timestamp)''')
+    # Idempotent ALTER for pre-existing DBs (this column was added 2026-05-20).
+    for _alter in (
+        "ALTER TABLE memory_rotations ADD COLUMN degraded_count_in_window INTEGER DEFAULT 0",
+    ):
+        try:
+            c.execute(_alter)
+        except sqlite3.OperationalError:
+            pass
+
+    # --- Generic system state (key/value) ---
+    # Used for cross-restart counters that need to survive a scheduler
+    # restart. First user: rotation_cycle_counter (driven by scheduler.py;
+    # consumed by magi.memory_lifecycle.maybe_rotate).
+    c.execute('''CREATE TABLE IF NOT EXISTS system_state (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )''')
+
+    # Gate layer: trip-wire events from magi/gate.py. One row per
+    # trigger evaluated per observer poll (both fired and quiet rows);
+    # the orchestrator reads unconsumed rows (consumed_in_cycle IS NULL)
+    # at build_world_state time and surfaces fired events to the
+    # council. consumed_in_cycle is set to the cycle_id after the cycle's
+    # debate_records row commits, so the same trigger does not appear
+    # in the next cycle's window.
+    c.execute('''CREATE TABLE IF NOT EXISTS magi_gate_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp REAL NOT NULL,
+        trigger_id TEXT NOT NULL,
+        fired INTEGER NOT NULL,
+        details TEXT,
+        consumed_in_cycle TEXT
+    )''')
+    c.execute('''CREATE INDEX IF NOT EXISTS idx_gate_events_timestamp
+        ON magi_gate_events(timestamp)''')
+    c.execute('''CREATE INDEX IF NOT EXISTS idx_gate_events_unconsumed
+        ON magi_gate_events(consumed_in_cycle)
+        WHERE consumed_in_cycle IS NULL''')
+
+    # Council two-stage synthesis vote fields (added with the always-R1
+    # synthesis architecture). Idempotent ALTERs — first run adds the
+    # columns; subsequent runs noop the ALTER and silently skip.
+    #   regime_action ∈ {EXECUTE, DEFER_STRUCTURAL, STAND_DOWN}
+    #   geometry_veto ∈ {PROCEED, HOLD_GEOMETRY, RISK_BLOCK}
+    # Default-on-missing is permissive: EXECUTE / PROCEED. The engine
+    # downgrades grid_action to MAINTAIN when either is non-permissive.
+    for migration in (
+        "ALTER TABLE debate_records ADD COLUMN regime_action TEXT",
+        "ALTER TABLE debate_records ADD COLUMN geometry_veto TEXT",
+    ):
+        try:
+            c.execute(migration)
+        except sqlite3.OperationalError:
+            pass  # already exists
+
+    # WebSocket health metrics for the always-on gate_monitor service.
+    # One row written every state transition + a heartbeat row every ~5s
+    # while connected. Dashboard reads MAX(id) for the live chip.
+    # state ∈ {'connected','reconnecting','degraded','disconnected','starting'}.
+    # 'degraded' means WS down + REST fallback active. 'reconnecting'
+    # means WS down + actively retrying with backoff.
+    c.execute('''CREATE TABLE IF NOT EXISTS ws_health (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp REAL NOT NULL,
+        state TEXT NOT NULL,
+        last_heartbeat_age_sec REAL,
+        reconnect_count_1h INTEGER,
+        last_tick_age_sec REAL,
+        notes TEXT
+    )''')
+    c.execute('''CREATE INDEX IF NOT EXISTS idx_ws_health_timestamp
+        ON ws_health(timestamp)''')
+
     conn.commit()
     conn.close()
     print("Database initialised.")
@@ -387,14 +505,21 @@ def get_candles(timeframe, limit=500):
 
 
 def get_latest_candle_hl(timeframe='1h'):
-    """Return (high, low) of the most recent completed candle,
-    or (None, None) if no candles exist."""
+    """Return (high, low) of the most recent COMPLETED candle, or (None, None)
+    if no completed candle exists. A candle is completed once its timestamp
+    is strictly before the top of the current UTC hour — selecting by highest
+    id would otherwise return the in-progress candle, whose high/low only
+    cover the first few minutes of the current hour and silently mask
+    mid-hour fills."""
+    current_hour_start = datetime.utcnow().replace(
+        minute=0, second=0, microsecond=0
+    ).isoformat()
     conn = get_conn()
     row = conn.execute(
         '''SELECT high, low FROM candles
-           WHERE timeframe=?
-           ORDER BY id DESC LIMIT 1''',
-        (timeframe,)
+           WHERE timeframe=? AND timestamp < ?
+           ORDER BY timestamp DESC LIMIT 1''',
+        (timeframe, current_hour_start)
     ).fetchone()
     conn.close()
     if row:
@@ -459,6 +584,98 @@ def insert_grid_order(timestamp, order_id, side, price, size, status,
          fee, filled_at, fill_price))
     conn.commit()
     conn.close()
+
+
+def get_gate_trigger_stats(window_hours=168):
+    """Per-trigger gate fire-rate over the trailing window, for monitoring
+    whether thresholds are too loose (firing constantly → needless wakes) or
+    too tight (never firing → missed depletion). Reads magi_gate_events
+    (one row per trigger per eval). Excludes the *_eval bookkeeping rows.
+
+    Returns:
+      {
+        'window_hours': int,
+        'generated_at_utc': iso,
+        'triggers': [ {trigger_id, evals, fires_window, fires_24h,
+                       last_fired_ts (unix), last_fired_details (json str)} ],
+        'wakes': {  # off-schedule MAGI cycles caused by gate wakes
+            'window': int, 'last_24h': int, 'by_trigger': {gate_wake:Tn: count} }
+      }
+    """
+    import time as _t
+    from datetime import datetime, timedelta, timezone
+
+    conn = get_conn()
+    try:
+        now = _t.time()
+        cutoff = now - window_hours * 3600
+        cutoff_24 = now - 24 * 3600
+
+        rows = conn.execute(
+            "SELECT trigger_id, SUM(fired) AS fires, COUNT(*) AS evals, "
+            "MAX(CASE WHEN fired=1 THEN timestamp END) AS last_fired_ts "
+            "FROM magi_gate_events WHERE timestamp >= ? "
+            "GROUP BY trigger_id",
+            (cutoff,),
+        ).fetchall()
+        rows24 = conn.execute(
+            "SELECT trigger_id, SUM(fired) AS f FROM magi_gate_events "
+            "WHERE timestamp >= ? GROUP BY trigger_id",
+            (cutoff_24,),
+        ).fetchall()
+        fires24 = {r['trigger_id']: (r['f'] or 0) for r in rows24}
+
+        triggers = []
+        for r in rows:
+            tid = r['trigger_id']
+            if tid.endswith('_eval'):   # bookkeeping/edge-state rows, not real fires
+                continue
+            details = None
+            if r['last_fired_ts']:
+                drow = conn.execute(
+                    "SELECT details FROM magi_gate_events "
+                    "WHERE trigger_id=? AND fired=1 ORDER BY id DESC LIMIT 1",
+                    (tid,),
+                ).fetchone()
+                details = drow['details'] if drow else None
+            triggers.append({
+                'trigger_id': tid,
+                'evals': r['evals'] or 0,
+                'fires_window': r['fires'] or 0,
+                'fires_24h': fires24.get(tid, 0),
+                'last_fired_ts': r['last_fired_ts'],
+                'last_fired_details': details,
+            })
+        triggers.sort(key=lambda t: t['trigger_id'])
+
+        # Off-schedule wakes: debate_records.trigger LIKE 'gate_wake:%'
+        # (timestamp is ISO text there, not unix).
+        iso_cut = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).isoformat()
+        iso_cut_24 = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        wake_rows = conn.execute(
+            "SELECT trigger, COUNT(*) AS n FROM debate_records "
+            "WHERE trigger LIKE 'gate_wake:%' AND timestamp >= ? GROUP BY trigger",
+            (iso_cut,),
+        ).fetchall()
+        wake_24 = conn.execute(
+            "SELECT COUNT(*) AS n FROM debate_records "
+            "WHERE trigger LIKE 'gate_wake:%' AND timestamp >= ?",
+            (iso_cut_24,),
+        ).fetchone()
+        by_trigger = {r['trigger']: r['n'] for r in wake_rows}
+
+        return {
+            'window_hours': window_hours,
+            'generated_at_utc': datetime.now(timezone.utc).isoformat(),
+            'triggers': triggers,
+            'wakes': {
+                'window': sum(by_trigger.values()),
+                'last_24h': (wake_24['n'] if wake_24 else 0),
+                'by_trigger': by_trigger,
+            },
+        }
+    finally:
+        conn.close()
 
 
 def update_grid_order_status(order_id, status,
@@ -577,6 +794,12 @@ def get_trajectory_context():
         'cycles_since_structural_change': None,
         'pause_longs_active': 0,
         'pause_shorts_active': 0,
+        # fills_per_hour: derived from fills_since_last_magi_{buys,sells}
+        # divided by hours since the last MAGI decision. Defaults to 0.0
+        # when no prior decision exists (first cycle on a fresh DB).
+        # Consumed by Melchior's Step 3 MID-band gate per
+        # magi/world_state_schema.py.
+        'fills_per_hour': 0.0,
     }
 
     if grid_row:
@@ -632,6 +855,21 @@ def get_trajectory_context():
             else:
                 break
         result['cycles_since_structural_change'] = stable
+
+        # fills_per_hour — total fills (buys+sells) since the last MAGI
+        # decision divided by hours since that decision. Floor of 0.01h
+        # avoids div-by-zero on rapid re-fires.
+        try:
+            last_dt = datetime.fromisoformat(last_decision_ts)
+            hours_since = (datetime.utcnow() - last_dt).total_seconds() / 3600.0
+            hours_since = max(hours_since, 0.01)
+            total_fills = (
+                int(result['fills_since_last_magi_buys'] or 0)
+                + int(result['fills_since_last_magi_sells'] or 0)
+            )
+            result['fills_per_hour'] = round(total_fills / hours_since, 4)
+        except (ValueError, TypeError):
+            result['fills_per_hour'] = 0.0
 
     return result
 
@@ -803,14 +1041,21 @@ def get_cost_summary(days_back=30):
     from datetime import timedelta
     conn = get_conn()
     cutoff = (datetime.utcnow() - timedelta(days=days_back)).isoformat()
-    rows = conn.execute('''SELECT agent, model,
-        SUM(prompt_tokens) as prompt_tokens,
-        SUM(completion_tokens) as completion_tokens,
-        SUM(total_tokens) as total_tokens,
-        SUM(estimated_cost_usd) as cost,
+    # Display model comes from agent_registry (live source of truth). Fall
+    # back to MAX(token_usage.model) when an agent has no registry row
+    # (e.g. one-off / pre-registry rows). One row per agent so legacy
+    # model strings collapse into the current label.
+    rows = conn.execute('''SELECT tu.agent AS agent,
+        COALESCE(ar.model, MAX(tu.model)) AS model,
+        SUM(tu.prompt_tokens) as prompt_tokens,
+        SUM(tu.completion_tokens) as completion_tokens,
+        SUM(tu.total_tokens) as total_tokens,
+        SUM(tu.estimated_cost_usd) as cost,
         COUNT(*) as calls
-        FROM token_usage WHERE timestamp > ?
-        GROUP BY agent, model''', (cutoff,)).fetchall()
+        FROM token_usage tu
+        LEFT JOIN agent_registry ar ON ar.agent_id = tu.agent
+        WHERE tu.timestamp > ?
+        GROUP BY tu.agent''', (cutoff,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -1101,6 +1346,12 @@ def insert_debate_record(record_dict):
             data[key] = json.dumps(val)
         elif key == 'hard_rule_overrides' and isinstance(val, (list, dict)):
             data[key] = json.dumps(val)
+        elif key == 'freshness_retries' and isinstance(val, (list, dict)):
+            data[key] = json.dumps(val)
+        elif key == 'world_state' and isinstance(val, (list, dict)):
+            # default=str mirrors council.update_world_state's serialization
+            # so non-JSON-native values (e.g. datetimes) never raise here.
+            data[key] = json.dumps(val, default=str)
 
     fields = ', '.join(data.keys())
     placeholders = ', '.join(['?' for _ in data])
@@ -1285,6 +1536,36 @@ def insert_alert(severity, category, message, agent_id=None,
     conn.commit()
     row_id = cur.lastrowid
     conn.close()
+    # Fire push notification for critical-severity alerts only. Wrapped in
+    # try/except — the notification layer must never break alert capture.
+    # send_ntfy() itself is also failure-tolerant; this is a belt-and-braces
+    # guard for import-time errors.
+    if severity == 'critical':
+        try:
+            from magi.notify import send_ntfy
+            agent_part = f"{agent_id} " if agent_id else ""
+            title = f"MAGI: {agent_part}{category}".strip()
+            # Body intentionally OMITS the raw message text. ntfy.sh
+            # topics are public, and critical-alert messages routinely
+            # carry sensitive upstream payloads (402 responses include
+            # remaining credit balances, API errors can include keys in
+            # debug strings, etc.). The operator opens the dashboard for
+            # the full detail — the push is just the "go look now" signal.
+            body_parts = [f"[{severity.upper()}]"]
+            if agent_id:
+                body_parts.append(f"agent={agent_id}")
+            if category:
+                body_parts.append(f"cat={category}")
+            body_parts.append("→ open dashboard")
+            send_ntfy(
+                title=title,
+                body=' '.join(body_parts),
+                severity=severity,
+                agent_id=agent_id,
+                category=category,
+            )
+        except Exception:
+            pass
     return row_id
 
 
@@ -1402,6 +1683,88 @@ def get_capitulation_rate(agent_id, days=7):
         'invalid_revisions': invalid,
         'capitulation_pct': round(pct, 2),
     }
+
+
+# --- System state (key/value, used for cross-restart counters) ---
+
+def get_system_state(key, default=None):
+    """Read a single value from the system_state table.
+
+    Returns the stored string value, or `default` (any type) if the key
+    is missing. Numeric callers cast on read (e.g. int(get_system_state(
+    'rotation_cycle_counter', '0')))."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT value FROM system_state WHERE key=?", (key,)
+    ).fetchone()
+    conn.close()
+    return row['value'] if row else default
+
+
+def set_system_state(key, value):
+    """Upsert `key=value` into system_state with updated_at=now."""
+    now = datetime.utcnow().isoformat()
+    conn = get_conn()
+    conn.execute(
+        '''INSERT INTO system_state (key, value, updated_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET
+               value=excluded.value,
+               updated_at=excluded.updated_at''',
+        (key, str(value), now),
+    )
+    conn.commit()
+    conn.close()
+
+
+# --- Memory rotation lifecycle ---
+
+def insert_memory_rotation(agent_id, cycle_number, chars_before,
+                           chars_after, patterns_added, status,
+                           snapshot_path=None, error_detail=None,
+                           degraded_count_in_window=0):
+    """Insert a memory_rotations row. Called by
+    magi.memory_lifecycle.maybe_rotate once per agent per rotation
+    attempt regardless of outcome. Failed rotations are as important to
+    track as successful ones, so this is always called from the wrapper.
+
+    degraded_count_in_window: count of last-30 R0 rows that matched
+    SAFE_DEFAULTS for this agent. Drives status='skipped_degraded' when
+    >= 12 (40% threshold).
+    """
+    conn = get_conn()
+    conn.execute(
+        '''INSERT INTO memory_rotations
+            (timestamp, agent_id, cycle_number,
+             self_model_chars_before, self_model_chars_after,
+             patterns_added, status, snapshot_path, error_detail,
+             degraded_count_in_window)
+           VALUES (?,?,?,?,?,?,?,?,?,?)''',
+        (datetime.utcnow().isoformat(), agent_id, int(cycle_number),
+         chars_before, chars_after,
+         int(patterns_added or 0), status,
+         snapshot_path,
+         (error_detail or None) if error_detail is None
+            else str(error_detail)[:1000],
+         int(degraded_count_in_window or 0)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_recent_memory_rotations(limit=10):
+    """Return the most recent N memory_rotations rows."""
+    conn = get_conn()
+    rows = conn.execute(
+        '''SELECT id, timestamp, agent_id, cycle_number,
+                  self_model_chars_before, self_model_chars_after,
+                  patterns_added, status, snapshot_path, error_detail
+           FROM memory_rotations
+           ORDER BY timestamp DESC LIMIT ?''',
+        (int(limit),),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 if __name__ == "__main__":

@@ -16,13 +16,16 @@ disagree, the handoff docs win for state; this file wins for how to work.
 
 ## 1. What MAGI is
 
-MAGI is an XRP/USD spot grid bot running on Kraken in paper mode, with a
-three-agent LLM council on Letta Cloud advising structural decisions. The
+MAGI is an XRP/USD spot grid bot running on Kraken — **live as of
+2026-05-23** (paper⇄live is a single env-var toggle: `MAGI_LIVE_CONFIRM=YES`
+in `.env` plus the `CONFIRM_LIVE` gate file; remove either + restart to
+revert to paper) — with a three-agent LLM council on Letta Cloud advising
+structural decisions. The
 council is Casper (Gemini-3-flash-preview, regime), Melchior (GPT-4o, grid
 microstructure), Balthasar (claude-sonnet-4-6, risk/survival). Current
 capital under management is ~$67 (≈14 XRP + ~$47 USD). The goal is a
 profitable adaptive grid: net-positive PnL after Kraken tier-0 fees
-(maker 0.16%, taker 0.26%) with >50% directional accuracy on the bot's
+(maker 0.25%, taker 0.40%) with >50% directional accuracy on the bot's
 trade actions, surviving without manual intervention.
 
 This is a trading system, not a research project, not a learning
@@ -114,12 +117,67 @@ re-derive these.
   for code behavior. Handoff docs and this file describe intent; if
   they disagree with the live state, the live state is current and
   the docs are stale.
+- **Publishing the handoff docs.** The five docs (`CLAUDE.md`,
+  `00`–`03`) are published to the private repo `aye5788/magi-docs` by
+  running `bash /root/magi_docs/sync.sh` — it copies the current docs
+  out of `/root/xrp_grid`, commits, and pushes `origin main`. That is
+  the definitive doc-publish path. `aye5788/xrp_grid` is the code repo
+  only; never push docs there.
 - Grid spacing clamps: `MIN_GRID_SPACING_PCT = 0.003`,
   `MAX_GRID_SPACING_PCT = 0.025` (0.3% to 2.5%). Set in `config.py`.
+- **Per-order size is FIXED at `ORDER_SIZE_XRP = 1.65`** (config.py, the
+  Kraken XRP minimum). Operator directive 2026-05-24: every grid order —
+  buy, sell, and the executed anchor — is exactly 1.65 XRP, never more,
+  regardless of holdings or level count. `engine.compute_order_size`
+  returns this flat constant (or `0.0` when a side has no levels). The
+  prior holdings-division model (`xrp/N` / `(usd/N)/centre`, floored at
+  the min, capped at half-inventory) is **removed** — do not re-introduce
+  it; it produced 14–24 XRP orders on the small live book. To deploy more
+  capital, raise the level count (more 1.65-XRP orders), not the size.
+  Buy and sell sides are equal-sized, so round trips match 1:1 under
+  FIFO. The shadow sim's level-switch is size-invariant (its PnL metric
+  is a ratio), so it was deliberately left on its own sizing model.
 - Asset analysis (already complete): DOGE, XRP, SOL viable; ADA
   eliminated. XRP optimal spacing is 1.5%.
-- Kraken tier-0 fees: maker 0.16% (`MAKER_FEE`), taker 0.26%
-  (`TAKER_FEE`). A round-trip needs >~0.4% to clear fees.
+- Kraken tier-0 fees: maker 0.25% (`MAKER_FEE`), taker 0.40%
+  (`TAKER_FEE`). Round-trip break-even revised: maker-maker round-trip
+  ~0.50%; taker-taker ~0.80%. At XRP's 1.5% optimal spacing the grid is
+  still net-positive but margin is thinner than prior doctrine assumed.
+  Verified via live test order 2026-05-23.
+- **Per-level scorer fee basis is MAKER, not taker** (`config.py:
+  GRID_LEVEL_FEE_PER_SIDE = MAKER_FEE`, set 2026-05-24). The
+  `spacing_evaluator` acceptability/ranking is the enforcement point for
+  "every grid level must be net-positive after fees, or stand down"
+  (`acceptable iff spacing > 2*fee AND total_pnl_pct > 0`). The recurring
+  per-level round-trip is two MAKER fills (resting arms), so the floor is
+  `2*MAKER_FEE = 0.50%` — NOT taker. All three scorer call sites
+  (`scheduler.py` first-boot, `orchestrator.py` Melchior world_state +
+  current-config, `gate.py`) pass `GRID_LEVEL_FEE_PER_SIDE`. Do not revert
+  to `TAKER_FEE` here: taker pinned the tightest selectable spacing at 1.0%
+  and made the grid stand down in low vol; maker unlocks the fee-positive
+  0.75% grid (validated: ~3–6× more fills on live candles, all net-positive).
+  The one-time anchor IS a taker market order, but it is an amortized setup
+  cost handled in `engine._execute_anchor`, deliberately outside the
+  per-level fee-positivity model. This is also why "Melchior should author
+  spacing" is the wrong frame — the deterministic scorer owns fee-positive
+  spacing (GPT-4o can't reliably author geometry); the lever is the scorer's
+  fee input, which was the actual miscalibration.
+- **Live execution path** (shipped 2026-05-23): `engine._execute_anchor`
+  places a real Kraken market order via `KrakenExchange.add_market_order`,
+  polls `query_order` (QueryOrders) for fill, reconciles inventory from
+  `get_balances()`. Resting arms: live `place_order` persists to
+  `grid_orders` by Kraken txid; `engine.reconcile_live_fills_from_kraken()`
+  (live counterpart to paper `simulate_fills`, called from the observer
+  cycle when `not engine.paper`) matches our open txids against
+  `get_closed_orders` (ClosedOrders) and marks fills with Kraken's real
+  price/fee. Inventory is always truth-of-record via `get_balances()`,
+  never recomputed from the fee constants.
+- **Dashboard auth** is app-side: a Flask signed-cookie session in
+  `dashboard.py` (`/login`, `/logout`, `before_request` gate; password in
+  `.env:DASHBOARD_PASSWORD`, `SECRET_KEY` in `.env`; 365-day cookie).
+  nginx `auth_basic` was removed — the cloudflared tunnel hits Flask:5000
+  directly, so nginx was never in the public path. Token-authenticated
+  API calls (`X-Magi-Token`) bypass the login gate for automation.
 - Letta SDK note: `llm_config` is deprecated for `c.agents.update`;
   use provider-shaped `model_settings`. `parallel_tool_calls` is
   server-forced to True regardless of what you send.
@@ -135,8 +193,128 @@ re-derive these.
   Python 3.11 at `evals/.venv/` (uv-managed, separate from MAGI's main
   Python 3.10 venv). Requires `LETTA_EVALS_PROJECT_ID` set in `.env`
   pointing at a Letta Cloud project distinct from production.
+- **Council-degradation contingency** (closed out 2026-05-20). Three
+  hooks share a single fingerprint: an R0 row with
+  `conviction == 0.0 AND crux LIKE '(no response)%'` is a degradation
+  marker (matches `magi/council.py:SAFE_DEFAULTS`).
+  1. **Degraded-mode hard rule** at the top of
+     `enforce_hard_rules` (item -1): queries the last 2 historical
+     `debate_records` rows (current cycle not yet inserted — write order
+     verified) and counts agents that hit SAFE_DEFAULTS in BOTH rows.
+     1 degraded → `[AGENT_DEGRADED:<agent_id>]` freeze
+     (force `grid_action=MAINTAIN`, `risk_action=CLEAR`). 2-3 degraded →
+     `[COUNCIL_COLLAPSED]` HALT. Rule 6 (`GRID_DEGENERATE`) skips while
+     this freeze is in effect — a degraded council cannot supply
+     trustworthy geometry. Edge-triggered alerts fire only on
+     tier-up transitions; tier persisted in
+     `system_state['last_degraded_tier']` (values `"0"` / `"1"` / `"2"`).
+  2. **Observer backfill-notify alerting**: `_backfill_failure_streak`
+     in `observer.py` (module-level dict) counts consecutive
+     `client.agents.messages.create` failures per agent. Threshold = 3
+     — only the 3rd consecutive failure fires `insert_alert` with
+     `severity='warn'`, `category='backfill_notify_failed'`. Resets to 0
+     on any success (silent — no "recovered" ping). Process restart
+     resets counters to {} (acceptable; streak rebuilds on real
+     failure patterns).
+  3. **Memory-rotation pre-gate**: in
+     `magi/memory_lifecycle.py:rotate_agent_memory`, step 0 (before
+     snapshot) counts SAFE_DEFAULTS in the last 30 R0 rows for the
+     target agent. If `>= 12/30` (40%), abort that agent's rotation
+     with `status='skipped_degraded'` — no snapshot, no compact, no
+     merge, no reset. New `memory_rotations.degraded_count_in_window`
+     column records the count for every attempt (success or skip).
+     `magi_alerts` row written at `severity='warn'`,
+     `category='rotation_skipped_degraded'` — dashboard-only, no ntfy.
+  - All three use `database.insert_alert` as the single capture point.
+    Items 2 + 3 are `warn` severity (dashboard-only). Item 1 is
+    `critical` (fires `magi/notify.py:send_ntfy` → phone).
+- **READINESS panel** (decision-support, not control logic). One
+  live-readiness gate set evaluated on every dashboard render via
+  `magi/readiness.py:evaluate()`; rendered below the INVENTORY +
+  PAPER P&L pair as a chip-grid matching the AGENT HEALTH style.
+  - **Live readiness** — should real capital be deployed? Nine gates
+    (L1–L9) evaluated against entire trading history since first
+    fill. Verdict: 0 fails → GREEN, 1-2 → YELLOW, 3+ → RED.
+  - The obsolete **renewal-decision** gate set (R1–R7, trailing-14d,
+    "renew the $20/mo Letta plan by 2026-06-03?") was **removed
+    2026-05-23** once the bot went live — it answered a question that
+    no longer applies. `evaluate()` now returns only `{'live': …,
+    'generated_at_utc': …}`. Don't re-introduce it.
+  - Round-trip counting uses `grid.pnl._fifo_match` GLOBALLY for the
+    lifetime gates — correct for inventory accounting.
+  - HALT-state tracking does NOT exist; the fill-gap gate (L6)
+    therefore counts HALT-induced gaps as if they were system
+    downtime. Surfaced in the gate `detail` string. If HALT
+    timestamps ever get logged, update `_max_fill_gap_hours` to
+    exclude them.
+  - API: `/api/readiness` — JSON shape `{live:{verdict,gates},
+    generated_at_utc}`, matches the panel structure. Click-to-expand
+    on each chip writes the full gate dict to browser console.log.
+  - The verdict enforces nothing. The operator decides.
+- **Push notifications** layer: `magi/notify.py:send_ntfy()` fires HTTPS
+  POSTs to `ntfy.sh` for `severity='critical'` rows written via
+  `database.insert_alert`. Topic URL is read from `.env`
+  (`NTFY_TOPIC_URL`, full HTTPS URL form `https://ntfy.sh/<slug>`).
+  Severity gating: `critical` → priority 5 (bypasses iOS DND);
+  `warn`/`warning` → priority 3 (sent only if a caller invokes
+  `send_ntfy` directly — `insert_alert` itself only fires on critical);
+  `info` → never sent. Unset or empty `NTFY_TOPIC_URL` → silent no-op
+  (alert capture must keep working without the notification layer). The
+  3s timeout + blanket `except` inside `send_ntfy` make notification
+  failure non-blocking by design. **ntfy.sh topics are public** —
+  anyone who guesses the slug can read everything sent. The body
+  intentionally contains ONLY severity / agent_id / category + "open
+  dashboard" — never raw provider payloads, balance numbers, API keys,
+  or anything operationally sensitive. Dashboard chip panel
+  (`AGENT HEALTH`, served above ALERTS) is the visual companion: green/
+  yellow/red per agent computed from the last 3 R0 rows in
+  `debate_records`, where degraded = `conviction=0.0 AND crux LIKE
+  '(no response)%'` (same SAFE_DEFAULTS fingerprint as `council.py`).
+  API: `/api/agent_health`.
 
 ## 5. Operating discipline
+
+### Schema contract — world_state fields are declared, not inferred
+
+`magi/world_state_schema.py:FIELDS` is the single source of truth for
+which fields appear in `world_state` and which agents consume each.
+Adding/removing a field in `build_world_state()` MUST be matched by
+a schema entry. Two enforcement layers:
+
+- **Runtime:** `magi/world_state_schema.py:alert_on_runtime_drift(ws)`
+  runs at the end of every `build_world_state()` call. On any
+  mismatch (schema field missing from output, or output path not
+  in schema), writes a `magi_alerts` row with `severity='critical',
+  category='schema_drift_runtime'`. The existing ntfy push fires
+  immediately. Trading continues — schema drift is a maintenance
+  failure, not a trading-stop event.
+- **Provisioning:** `magi/provision_agents.py` calls
+  `magi/validate_schema.py:main()` BEFORE any Letta API call. Any
+  ERROR aborts provisioning with exit 1. There is no
+  `--allow-broken-refs` flag; fix the schema or the persona.
+
+Personas reference world_state via two mechanisms:
+1. The **auto-generated SIGNALS YOU RECEIVE** block, rendered from
+   the schema between `<!-- BEGIN_AUTOGENERATED_SIGNALS -->` and
+   `<!-- END_AUTOGENERATED_SIGNALS -->` markers in each persona
+   file. The first line inside the block is a `DO NOT EDIT` comment.
+   Hand-edits between the markers are silently overwritten at every
+   provisioning run — the schema is the source of truth.
+2. The **hand-authored decision tree** (everything outside the
+   markers). References in the decision tree are validated:
+   broken dotted-path references and broken bare names produce
+   ERRORs; cross-domain prose mentions in the shared SYSTEM CONTEXT
+   preamble are scoped out of validation.
+
+To change what an agent sees: edit `FIELDS` (consumers list +
+per-agent usage hint), then run `python -m magi.provision_agents`.
+Don't edit the SIGNALS block in persona files directly.
+
+CLI: `python -m magi.validate_schema` exits 0 on PASS, 1 on ERROR.
+
+### General discipline
+
+
 
 Discipline that prevents wasted work.
 

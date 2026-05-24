@@ -1,11 +1,19 @@
-# Token pricing per million tokens — update if pricing changes
+# Token pricing per million tokens — update if pricing changes.
+# Keys are matched after stripping any provider prefix (e.g. the live
+# agent_registry stores 'anthropic/claude-haiku-4-5'; estimate_cost
+# strips 'anthropic/' before lookup).
 MODEL_PRICING = {
     'gpt-4o': {'input': 2.50, 'output': 10.00},
     'gpt-4o-mini': {'input': 0.15, 'output': 0.60},
     'claude-sonnet-4-6': {'input': 3.00, 'output': 15.00},
+    'claude-haiku-4-5': {'input': 1.00, 'output': 5.00},
     'claude-opus-4-7': {'input': 15.00, 'output': 75.00},
     'gemini-2.5-flash': {'input': 0.30, 'output': 2.50},
     'gemini-2.5-pro': {'input': 1.25, 'output': 10.00},
+    # Preview-tier pricing not yet published; using 2.5-flash as a
+    # conservative placeholder. Verify and update once Google posts
+    # gemini-3-flash-preview rates.
+    'gemini-3-flash-preview': {'input': 0.30, 'output': 2.50},
 }
 
 # Fixed monthly subscriptions — edit as needed

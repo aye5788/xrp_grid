@@ -246,24 +246,31 @@ class ShadowSimulator:
                 self.variants[(lc, sp)] = sg
 
     def rebuild(self, centre: float, spacing_pct: float = None):
-        """Rebuild all variants around centre. Each variant uses its own
-        configured spacing; the spacing_pct arg is accepted but ignored
-        (kept for back-compat with callers that pass the live grid spacing)."""
+        """Rebuild all variants around centre. spacing_pct, when provided,
+        is applied to ALL variants and overrides their per-variant spacing
+        — this is the "spacing tracks live" behaviour. Variants now differ
+        only in level count; spacing is no longer a variant dimension since
+        Melchior's analytical scorer picks spacing directly each cycle.
+        When spacing_pct is None, each variant's existing spacing is used
+        (fallback for callers that don't yet pass the live value)."""
         for (lc, sp), sg in self.variants.items():
-            sg.rebuild(centre, sp)
+            effective_sp = float(spacing_pct) if spacing_pct is not None else sp
+            sg.rebuild(centre, effective_sp)
         log.info(
             f"ShadowSimulator rebuilt {len(self.variants)} variants "
-            f"@ centre={centre}"
+            f"@ centre={centre} spacing={spacing_pct}"
         )
 
     def update_centre(self, centre: float, spacing_pct: float = None):
-        """Fan centre update to all variants. Each variant preserves its own
-        spacing. spacing_pct arg ignored for back-compat."""
+        """Fan centre update to all variants. spacing_pct, when provided,
+        is also propagated to every variant so the shadow sim's spacing
+        always matches the live grid."""
         for (lc, sp), sg in self.variants.items():
-            sg.update_centre(centre, sp)
+            effective_sp = float(spacing_pct) if spacing_pct is not None else sp
+            sg.update_centre(centre, effective_sp)
         log.info(
             f"ShadowSimulator centre updated {len(self.variants)} variants "
-            f"@ centre={centre} (orders preserved, per-variant spacings)"
+            f"@ centre={centre} spacing={spacing_pct} (orders preserved)"
         )
 
     def process_tick(self, price: float):
@@ -327,10 +334,19 @@ class ShadowSimulator:
         return best_key[0], best_key[1], best_pnl
 
     def persist_all(self):
-        """Persist all variant states to DB."""
+        """Persist all variant states to DB.
+
+        Uses sg.spacing_pct (the live-tracked spacing, updated each
+        update_centre() call) rather than the dict key's original sp.
+        Without this, the DB row's spacing_pct column would stay frozen
+        at whatever SPACING_VARIANTS held at init time (currently
+        [0.025], a placeholder), while the in-memory sg.spacing_pct
+        tracked the live grid's true spacing.
+        """
         from database import upsert_shadow_grid_state
         from config import MAKER_FEE
-        for (lc, sp), sg in self.variants.items():
+        for (lc, _sp_key), sg in self.variants.items():
+            sp = float(sg.spacing_pct)  # live spacing — what update_centre set
             half = lc // 2
             centre = sg.centre or 0.0
             if centre > 0 and half > 0:
