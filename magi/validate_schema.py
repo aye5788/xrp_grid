@@ -144,4 +144,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    from magi import adam
+    adam.init_oneshot("validate_schema")
     sys.exit(main())

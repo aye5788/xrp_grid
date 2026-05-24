@@ -338,7 +338,7 @@ def run_magi_cycle(trigger='scheduled'):
         else:
             log.warning("MAGI cycle returned no result")
     except Exception as e:
-        log.error(f"MAGI cycle error: {e}")
+        log.exception("MAGI cycle error: %s", e)
 
     # Counter + rotation hook — runs whether the cycle succeeded or failed.
     # Wrapped internally so nothing in here can crash the scheduler loop.
@@ -816,4 +816,6 @@ def _start_internal_server():
 
 
 if __name__ == "__main__":
+    from magi import adam
+    adam.init("scheduler")
     main()

@@ -1153,7 +1153,7 @@ def send_round_0(agent_id: str, cycle_id: str,
                 parsed = None
 
     if parsed is None:
-        log.error(
+        log.warning(
             "[%s] R0 failed after retry — falling back to safe default. "
             "Last error: %s", agent_id, last_error
         )

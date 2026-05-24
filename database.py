@@ -1768,4 +1768,6 @@ def get_recent_memory_rotations(limit=10):
 
 
 if __name__ == "__main__":
+    from magi import adam
+    adam.init_oneshot("database")
     init_db()

@@ -39,6 +39,7 @@ from datetime import datetime
 from typing import Optional
 
 from dotenv import load_dotenv
+import icontract
 
 from database import (
     get_candles,
@@ -678,6 +679,119 @@ def _maybe_fire_degradation_alert(curr_count: int,
                     curr_tier, e)
 
 
+_CANONICAL_OVERRIDE_TAGS = {
+    # Council degradation
+    "[AGENT_DEGRADED:casper]",
+    "[AGENT_DEGRADED:melchior]",
+    "[AGENT_DEGRADED:balthasar]",
+    "[COUNCIL_COLLAPSED]",
+    # Rule 0 — RECENTRE block
+    "[GRID_HEALTHY_NO_RECENTRE]",
+    "[RECENTRE_COOLDOWN]",
+    "[RECENT_POSITION_HOLD]",
+    # Rule 0d — council veto
+    "[REGIME_DEFER]",
+    "[REGIME_STANDDOWN]",
+    "[BALTHASAR_HOLD_GEOMETRY]",
+    "[BALTHASAR_RISK_BLOCK]",
+    # Survival floors
+    "[KILL_SWITCH]",
+    "[DAILY_LOSS_LIMIT]",
+    "[ALLOC_SKEW_CEILING]",
+    "[USD_BUFFER_FLOOR]",
+    "[XRP_BUFFER_FLOOR]",
+    # Grid integrity / pause / geometry
+    "[GRID_DEGENERATE]",
+    "[PAUSE_INVALID]",
+    "[GEOMETRY_INJECTED_FROM_SCORER]",
+    "[NO_ACCEPTABLE_VARIANT]",
+}
+# AGENT_DEGRADED is emitted templated as "[AGENT_DEGRADED:<agent_id>]". The three
+# valid agent_ids (casper/melchior/balthasar) are enumerated above rather than
+# prefix-matched, so this stays a closed membership test and a malformed or
+# unexpected agent_id correctly trips Invariant 2. ([GUARDRAILS_BLOCKED] is emitted
+# by _early_halt_return, NOT by enforce_hard_rules, so it is deliberately absent.)
+
+_RULE_0D_REGIME_VETOS    = {"DEFER_STRUCTURAL", "STAND_DOWN"}
+_RULE_0D_GEOMETRY_VETOS  = {"HOLD_GEOMETRY", "RISK_BLOCK"}
+_RULE_0D_TRIGGER_ACTIONS = {"RECENTRE", "TIGHTEN", "WIDEN"}
+_RULE_0D_COVERAGE_TAGS   = {
+    "[REGIME_DEFER]", "[REGIME_STANDDOWN]",
+    "[BALTHASAR_HOLD_GEOMETRY]", "[BALTHASAR_RISK_BLOCK]",
+}
+# Rules that run AFTER rule 0d and may legitimately overwrite its MAINTAIN
+# coercion (see the precedence ladder in enforce_hard_rules' docstring). When
+# one of these tags is present, a non-MAINTAIN grid_action does NOT violate
+# Invariant 1 — survival/integrity rules outrank the council veto.
+_RULE_0D_SUPERSEDING_TAGS = {
+    "[KILL_SWITCH]", "[DAILY_LOSS_LIMIT]", "[ALLOC_SKEW_CEILING]",
+    "[GRID_DEGENERATE]", "[NO_ACCEPTABLE_VARIANT]",
+}
+
+
+# The contract predicates below delegate their set logic to these helpers.
+# Keeping set()/any()/`or []` OUT of the @ensure lambda bodies matters: icontract
+# re-walks the lambda AST to build the violation message, and it cannot recompute
+# `set(x or []) & y` (raises 'bool' object is not iterable). Opaque helper calls
+# sidestep that, and icontract still reports each helper's return value plus the
+# `result.get("hard_rule_overrides")` argument in the failure message. The helpers
+# are also independently unit-testable.
+def _has_rule0d_coverage_tag(overrides):
+    """True if the override list carries >=1 rule-0d council-veto tag."""
+    return any(tag in (overrides or []) for tag in _RULE_0D_COVERAGE_TAGS)
+
+
+def _has_rule0d_superseding_tag(overrides):
+    """True if a higher-precedence rule (HALT / RECENTRE / GRID_PAUSE) ran after
+    rule 0d and legitimately overwrote its MAINTAIN coercion."""
+    return any(tag in (overrides or []) for tag in _RULE_0D_SUPERSEDING_TAGS)
+
+
+def _unknown_override_tags(overrides):
+    """Set of override tags that are NOT canonical (empty set when all valid)."""
+    return set(overrides or []) - _CANONICAL_OVERRIDE_TAGS
+
+
+@icontract.snapshot(lambda consensus: consensus.get("regime_action"), name="in_regime_action")
+@icontract.snapshot(lambda consensus: consensus.get("geometry_veto"), name="in_geometry_veto")
+@icontract.snapshot(lambda consensus: consensus.get("grid_action"),   name="in_grid_action")
+@icontract.ensure(
+    lambda OLD, result: (
+        not (
+            (OLD.in_regime_action in _RULE_0D_REGIME_VETOS
+             or OLD.in_geometry_veto in _RULE_0D_GEOMETRY_VETOS)
+            and OLD.in_grid_action in _RULE_0D_TRIGGER_ACTIONS
+        )
+        or (
+            _has_rule0d_coverage_tag(result.get("hard_rule_overrides"))
+            and (
+                result.get("grid_action") == "MAINTAIN"
+                or _has_rule0d_superseding_tag(result.get("hard_rule_overrides"))
+            )
+        )
+    ),
+    description=(
+        "Invariant 1 (rule 0d coverage): when input regime_action is "
+        "DEFER_STRUCTURAL/STAND_DOWN or geometry_veto is HOLD_GEOMETRY/"
+        "RISK_BLOCK AND input grid_action is RECENTRE/TIGHTEN/WIDEN, rule 0d "
+        "must record the veto with at least one of [REGIME_DEFER]/"
+        "[REGIME_STANDDOWN]/[BALTHASAR_HOLD_GEOMETRY]/[BALTHASAR_RISK_BLOCK], "
+        "and returned grid_action must be MAINTAIN UNLESS a later "
+        "higher-precedence rule legitimately superseded it (at least one of "
+        "[KILL_SWITCH]/[DAILY_LOSS_LIMIT]/[ALLOC_SKEW_CEILING]/[GRID_DEGENERATE]/"
+        "[NO_ACCEPTABLE_VARIANT] present — see the precedence ladder in the "
+        "docstring). Regression guard for cyc_1779480012 (2026-05-22T20:00:12)."
+    ),
+)
+@icontract.ensure(
+    lambda result: _unknown_override_tags(result.get("hard_rule_overrides")) == set(),
+    description=(
+        "Invariant 2 (override-tag integrity): every entry in "
+        "result['hard_rule_overrides'] must be a member of "
+        "_CANONICAL_OVERRIDE_TAGS; _unknown_override_tags(...) reported above "
+        "is the offending unknown tag(s)."
+    ),
+)
 def enforce_hard_rules(consensus: dict, world_state: dict,
                         round_0: dict | None = None) -> dict:
     """
@@ -689,6 +803,27 @@ def enforce_hard_rules(consensus: dict, world_state: dict,
     mutate `round_0['melchior']['geometry']` in place so the downstream
     `_final_consensus` helper picks the injected values up unchanged.
     The caller is expected to pass the same round_0 dict to _final_consensus.
+
+    Precedence ladder — rules run in this order, and a LATER rule may overwrite
+    an EARLIER rule's grid_action assignment. That is the precedence design, not
+    a bug: survival and integrity rules outrank council judgment.
+        -1.  Council-degradation freeze → MAINTAIN (1 agent) / HALT (council collapsed)
+        0a/0b/0c. RECENTRE block        → MAINTAIN (GRID_HEALTHY_NO_RECENTRE /
+                                          RECENTRE_COOLDOWN / RECENT_POSITION_HOLD)
+        0d.  Council veto               → MAINTAIN (REGIME_DEFER / REGIME_STANDDOWN /
+                                          BALTHASAR_HOLD_GEOMETRY / BALTHASAR_RISK_BLOCK)
+        1.   Kill switch                → HALT
+        2.   Daily loss limit           → HALT
+        3.   Allocation skew ceiling    → HALT
+        4/5. USD / XRP buffer floors    → risk_action CLEAR (grid_action untouched)
+        6.   Grid degenerate            → RECENTRE
+        7.   PAUSE_INVALID              → risk_action CLEAR
+        8.   Geometry injection / no acceptable variant → GRID_PAUSE
+    Rule 0d coerces grid_action to MAINTAIN, but rules 1-3 (→HALT), 6 (→RECENTRE)
+    and 8 (→GRID_PAUSE) run afterward and can legitimately supersede it. This is
+    why Invariant 1 requires a rule-0d coverage tag yet accepts a non-MAINTAIN
+    grid_action when one of those superseding rules (_RULE_0D_SUPERSEDING_TAGS)
+    also left its tag in hard_rule_overrides.
     """
     cons = dict(consensus)
     overrides = list(cons.get("hard_rule_overrides") or [])
@@ -1738,6 +1873,8 @@ def run_cycle(trigger: str = "manual", force: bool = False) -> dict:
 
 
 if __name__ == "__main__":
+    from magi import adam
+    adam.init_oneshot("orchestrator")
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s %(levelname)s %(name)s — %(message)s',

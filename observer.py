@@ -15,6 +15,8 @@ from config import COINBASE_API_KEY, COINBASE_API_SECRET, SYMBOL, DB_PATH
 # Load /root/xrp_grid/.env so LETTA_BASE_URL / LETTA_SERVER_PASSWORD are
 # available for the outcome-backfill agent notifications.
 load_dotenv()
+from magi import adam
+adam.init("observer")
 
 logging.basicConfig(level=logging.INFO,
     format='%(asctime)s %(levelname)s %(name)s — %(message)s')

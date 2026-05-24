@@ -57,9 +57,9 @@ class GridEngine:
             else:
                 gate_3_token = False
                 gate_3_label = "skipped — file does not exist"
-            log.error(f"Live gate — gate_1_env ({LIVE_CONFIRMATION_ENV_VAR}={LIVE_CONFIRMATION_ENV_VALUE}): {'PASS' if gate_1_env else 'FAIL'}")
-            log.error(f"Live gate — gate_2_file ({LIVE_CONFIRMATION_FILE}): {'PASS' if gate_2_file else 'FAIL'}")
-            log.error(f"Live gate — gate_3_token: {gate_3_label}")
+            log.info(f"Live gate — gate_1_env ({LIVE_CONFIRMATION_ENV_VAR}={LIVE_CONFIRMATION_ENV_VALUE}): {'PASS' if gate_1_env else 'FAIL'}")
+            log.info(f"Live gate — gate_2_file ({LIVE_CONFIRMATION_FILE}): {'PASS' if gate_2_file else 'FAIL'}")
+            log.info(f"Live gate — gate_3_token: {gate_3_label}")
             if gate_1_env and gate_2_file and gate_3_token:
                 log.warning("LIVE MODE ACTIVE — all three confirmation gates passed — real orders will be placed")
             else:
@@ -170,7 +170,7 @@ class GridEngine:
                         pm["xrp_value_usd"], pm["allocation_skew"],
                     )
                 else:
-                    log.error("[PAPER RESET] Kraken returned zero balances; falling back to defaults")
+                    log.warning("[PAPER RESET] Kraken returned zero balances; falling back to defaults")
                     self.paper_inventory = {'xrp': 0.0, 'usd': 100.0}
             except Exception as e:
                 log.error(f"[PAPER RESET] Kraken balance fetch failed: {e}; falling back to defaults")
@@ -440,11 +440,11 @@ class GridEngine:
         current_price = self.get_current_price()
         if current_price:
             if side == 'buy' and price > current_price * 1.001:
-                log.error(f"Refusing buy order — price {price} above market {current_price}")
+                log.warning(f"Refusing buy order — price {price} above market {current_price}")
                 order['status'] = 'rejected'
                 return order
             if side == 'sell' and price < current_price * 0.999:
-                log.error(f"Refusing sell order — price {price} below market {current_price}")
+                log.warning(f"Refusing sell order — price {price} below market {current_price}")
                 log.warning(
                     f"Sell order rejected — price {price:.5f} below sanity threshold "
                     f"{current_price * 0.999:.5f} (current={current_price:.5f})"
@@ -1373,7 +1373,7 @@ class GridEngine:
                 for k in keys_to_remove:
                     del self.paper_orders[k]
             if cancelled == 0 and pre_buys == 0:
-                log.warning(
+                log.info(
                     "MAGI PAUSE_LONGS no-op — book already had 0 buy orders"
                 )
             else:
@@ -1412,7 +1412,7 @@ class GridEngine:
                 for k in keys_to_remove:
                     del self.paper_orders[k]
             if cancelled == 0 and pre_sells == 0:
-                log.warning(
+                log.info(
                     "MAGI PAUSE_SHORTS no-op — book already had 0 sell orders"
                 )
             else:

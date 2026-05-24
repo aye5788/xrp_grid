@@ -440,4 +440,6 @@ def main():
 
 
 if __name__ == "__main__":
+    from magi import adam
+    adam.init_oneshot("provision_agents")
     main()

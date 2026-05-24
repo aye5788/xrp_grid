@@ -174,6 +174,8 @@ def run_learning_cycle(force: bool = False):
 
 
 if __name__ == "__main__":
+    from magi import adam
+    adam.init_oneshot("learning")
     import argparse
     import json
     logging.basicConfig(level=logging.INFO,

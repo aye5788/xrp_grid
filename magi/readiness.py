@@ -453,4 +453,6 @@ def evaluate() -> dict:
 
 
 if __name__ == '__main__':
+    from magi import adam
+    adam.init_oneshot("readiness")
     print(json.dumps(evaluate(), indent=2, default=str))
