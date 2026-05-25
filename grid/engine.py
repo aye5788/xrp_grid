@@ -519,24 +519,52 @@ class GridEngine:
             }
         return order
 
-    def cancel_all_orders(self):
-        """Cancel all open orders."""
-        if self.paper:
-            now_iso = datetime.utcnow().isoformat()
-            cancelled = 0
-            for order_id, order in list(self.paper_orders.items()):
-                if order.get('status') == 'open':
-                    try:
-                        update_grid_order_status(order_id, 'cancelled', filled_at=now_iso)
-                    except Exception as e:
-                        log.warning(f"Failed to persist cancel for {order_id}: {e}")
-                    cancelled += 1
-            count = len(self.paper_orders)
-            self.paper_orders.clear()
-            log.info(f"[PAPER] Cancelled {cancelled} open orders ({count} total cleared)")
-            return cancelled
+    def _finalize_local_cancel_state(self) -> int:
+        """Sync local order state after a cancel.
 
-        return self.exchange.cancel_all_open_orders()
+        Marks every locally-'open' order 'cancelled' in grid_orders
+        (filled_at reused as the close-time, matching the prior paper-branch
+        behavior) and then clears self.paper_orders. Returns the number of
+        orders marked cancelled. Safe to call when self.paper_orders is empty
+        (returns 0, no-op).
+
+        Shared by both branches of cancel_all_orders so the ONE_GRID
+        invariant — which counts self.paper_orders — never sees an order that
+        has already been cancelled on the exchange. Before this existed the
+        live branch cancelled on Kraken but left the local dict untouched,
+        false-firing the tripwire on every RECENTRE until the next reconcile.
+        """
+        now_iso = datetime.utcnow().isoformat()
+        cancelled = 0
+        for order_id, order in list(self.paper_orders.items()):
+            if order.get('status') == 'open':
+                try:
+                    update_grid_order_status(order_id, 'cancelled', filled_at=now_iso)
+                except Exception as e:
+                    log.warning(f"Failed to persist cancel for {order_id}: {e}")
+                cancelled += 1
+        self.paper_orders.clear()
+        return cancelled
+
+    def cancel_all_orders(self):
+        """Cancel all open orders, then sync local state.
+
+        Both modes end with self.paper_orders cleared and the affected
+        grid_orders rows marked 'cancelled' via the shared local-sync helper,
+        so the (informational) ONE_GRID invariant never counts an order that
+        has already been cancelled. In live mode the Kraken cancel runs FIRST
+        — if it raises, local sync never runs and the dict is left intact
+        rather than falsely claiming the orders are gone.
+        """
+        exchange_result = None
+        if not self.paper:
+            exchange_result = self.exchange.cancel_all_open_orders()
+        cancelled = self._finalize_local_cancel_state()
+        if self.paper:
+            log.info("[PAPER] Cancelled %d orders", cancelled)
+            return cancelled
+        log.info("[KRAKEN] Cancelled %d orders (local sync)", cancelled)
+        return exchange_result
 
     def simulate_fills(self, current_price: float,
                        candle_high: float = None,
@@ -745,9 +773,10 @@ class GridEngine:
         after this returns a real price — the rest of the grid stays
         theoretical until the anchor confirms an actual trade can happen.
 
-        In paper mode the fill is synchronous at current_price and TAKER_FEE
-        is charged (market-order semantics). Live-mode market execution is
-        not implemented yet; refuses with an error.
+        Places a market order at current spot. Paper-mode fills synchronously
+        at spot with TAKER_FEE; live-mode places a real Kraken market order
+        via add_market_order and polls query_order for fill, then reconciles
+        inventory from get_balances().
         """
         # ONE GRID INVARIANT — anchor must execute from a clean book.
         # initialise_grid() calls cancel_all_orders() before us; this is
