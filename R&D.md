@@ -220,6 +220,157 @@ The droplet (`/root/xrp_grid`) is not touched by this work. The MAGI
 production system continues to run independently with no awareness of this
 research.
 
+## Success criteria: analyst vs Jim Cramer
+
+The methodology question isn't "can a trained model match XGBoost accuracy."
+It's whether the trained model produces outputs operationally trustworthy
+enough that downstream policy can act on its confidence rather than overriding
+it with hard rules. The bar is closer to "would a serious technical analyst be
+respected" than "did the prediction match the label."
+
+A serious analyst is someone whose predictions you can act on differently
+depending on how confident they are. A Jim Cramer is someone whose confidence
+is decorative.
+
+Six qualities distinguish them:
+
+1. **Puts numbers on predictions before outcomes.** Evaluable confidence, not
+   vibes.
+2. **Numbers approximately match reality.** Calibration — when they say 70%,
+   they're right 70% of the time.
+3. **Distinguishes confident-knowing from guessing.** Can commit to
+   uncertainty on genuinely uncertain cases.
+4. **Honest about base rates and method limits.** Acknowledges what TA can and
+   can't do at given horizons.
+5. **Failures are interpretable.** Wrong calls cluster near class boundaries or
+   in identifiable regimes, not at random.
+6. **Beats trivial baselines.** Majority, random, "predict yesterday."
+
+The operational test: at confidence threshold X, model commits to Y% of test
+rows and gets Z% correct. If high-confidence accuracy meaningfully exceeds
+low-confidence accuracy, the model's confidence carries actionable information.
+If not, the confidence is Cramer-level decoration regardless of headline
+accuracy.
+
+## Reinforcement framework for training shaping
+
+The MAGI architecture currently inverts the agent-rule relationship: agents
+emit suggestions, hard rules decide. We want the inverse — agent outputs are
+primary, rules are guardrails for edge cases that fire rarely. For that
+inversion to be defensible, the agent must earn it by being right when
+confident, uncertain when ambiguous, consistent across identical inputs, and
+interpretable in its failure modes.
+
+Reinforcers identified:
+
+| Reinforcer | Trainable | Notes |
+|---|---|---|
+| Correctness at stated confidence | Yes | Direct calibration signal |
+| Useful confidence spread across population | Emergent | Measured in eval |
+| Confidence-stratified accuracy | Emergent | High-conf accuracy must exceed low-conf accuracy |
+| Boundary failures over random failures | Yes | Ordinal loss weighting |
+| Consistency under repetition | Emergent | Tested via two-pass identical-input check |
+| Honest uncertainty on ambiguous cases | Yes | DRA target — reinforce uncertainty on near-boundary cases |
+
+Trainable reinforcers go into the loss function. Emergent reinforcers are
+measured in eval to detect whether the training-side contingencies produced the
+desired population-level behavior.
+
+### Both positive and negative reinforcement, not punishment
+
+Punishment teaches avoidance of the punished behavior, not understanding of why
+it was wrong. A model punished for "overconfident wrong answers" has multiple
+avoidance paths:
+
+- Be uniformly low-confidence on everything (collapses useful spread)
+- Pattern-match specific feature signatures that don't get punished
+  (memorization)
+- Output the training distribution regardless of input (blanket strategy)
+
+Only one path produces the intended behavior (genuine calibrated judgment). The
+others look like avoidance of the punishment signal without internalizing the
+lesson.
+
+Differential reinforcement of alternative behaviors (DRA) is non-negotiable:
+explicitly reinforce both warranted high confidence and appropriate uncertainty
+as positive behaviors. Reinforcing only one collapses the other (pure "be less
+confident" pressure produces uniformly underconfident models; pure "be more
+confident" pressure produces gambling behavior).
+
+The literature term for the right loss structure is "proper scoring rule" — a
+function whose expected value is maximized only by reporting your true
+probability estimate. Log-loss and label-smoothed cross-entropy have this
+property when implemented correctly. The training landscape is structurally
+aversive (high loss when miscalibrated) and the path out is calibration. Not
+punishment of overconfidence; negative reinforcement against miscalibration
+with positive reinforcement for accurate self-report.
+
+## Manufactured contingencies and the sculpting metaphor
+
+We dictate the training reality. Contingencies the model encounters don't have
+to mirror naturalistic conditions. If we want the model to learn from
+being-bested (predictions were wrong AND an alternative was right), we can
+construct training examples with synthetic "alternative model" predictions. The
+reinforcement signal is structural, not metaphysical — the model experiences
+the contingency, not the source.
+
+This collapses the implementation complexity of inter-model training. No second
+model required at training time. No additional API calls. Just training data
+structured to present the contingencies we want shaped.
+
+Sculpting metaphor for staging:
+
+- **Phase 1 (wedge):** basic SFT with label smoothing. Establishes rough shape
+  of the task. Heavy-handed, imprecise, fast. Don't try to do refined work
+  here.
+- **Phase 2 (chisel):** preference-based fine-tuning targeted at specific
+  behaviors that survived Phase 1 imperfectly — calibration adjustment,
+  boundary case sensitivity. Cal-DPO with difficulty-weighted preferences is
+  the published methodology.
+- **Phase 3 (rasp/refinement):** inter-model disagreement contingencies,
+  multi-round refinement, attribution-of-failure signals. These refine specific
+  competencies that earlier phases established approximately.
+
+Each phase appropriate to where the work is. Don't use refined tools on
+shapeless marble; don't use heavy tools on near-finished work.
+
+Research literature grounding:
+
+- Standard fine-tuning predictably breaks calibration (CogCalib 2025, multiple
+  confirmations).
+- Prior-knowledge overlap with fine-tuning data causes overconfidence; novel
+  data improves calibration.
+- Cal-DPO (NeurIPS 2024) is the validated method for calibration-aware
+  preference training.
+- Difficulty-based preference selection (2025) confirms boundary cases provide
+  strongest learning signal.
+- BaseCal (Jan 2026): base models more calibrated than instruct counterparts;
+  usable as calibration anchor.
+
+## Operational decision threshold for the research track
+
+Methodology success isn't a single number — it's whether the model produces
+operationally trustworthy calibrated outputs. The five-question check:
+
+1. Is the model right often enough to be useful at all? (accuracy vs baselines)
+2. When the model says it's confident, is it actually right? (high-confidence
+   accuracy)
+3. When the model says it's unsure, is it actually unsure? (low-confidence
+   accuracy lower than high-confidence)
+4. Does it produce a useful range of confidence levels? (confidence
+   distribution shape)
+5. Are the failures interpretable? (confusion matrix structure)
+
+- **All five yes** → "serious analyst" model, methodology validated, worth
+  continuing.
+- **1 and 2 yes, others no** → "competent guesser without judgment,"
+  methodology partially worked, needs Phase 2.
+- **1 no** → methodology didn't work at this scale, R&D track stops.
+
+This framing replaces ECE/accuracy targets as the primary verdict. The
+operational test is what matters; numerical metrics are diagnostic of why the
+operational test did or didn't pass.
+
 ## Status
 
 Active. Currently at: features clean, XGBoost amplitude baseline established,
