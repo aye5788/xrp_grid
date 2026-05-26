@@ -340,6 +340,51 @@ def _current_variant_position(grid_state: dict | None) -> dict:
     }
 
 
+def _grid_position(grid_state: dict | None, price) -> dict | None:
+    """Where current price sits relative to the grid's outer band — the same
+    centre ± (n_pairs · spacing) envelope T2 (gate.t2_grid_breach) uses.
+
+    Makes 'the grid has drifted off price and can no longer fill without a
+    recentre' a first-class, legible signal for the council instead of
+    something each agent has to infer from a buried T2 trigger detail.
+
+    Returns None when grid_state / price are unavailable (no grid yet) —
+    personas treat None (or fillable=True) as 'no stranding signal'. When a
+    dict is returned it ALWAYS carries all three keys, so the world_state
+    schema contract holds (grid_position.* declared in world_state_schema).
+    """
+    if not grid_state or price is None:
+        return None
+    centre = grid_state.get('centre_price')
+    spacing = grid_state.get('spacing_pct')
+    if centre is None or spacing is None:
+        return None
+    try:
+        centre = float(centre)
+        spacing = float(spacing)
+        price = float(price)
+        levels = int(grid_state.get('levels') or 5)
+    except (TypeError, ValueError):
+        return None
+    n_pairs = max(1, levels // 2)
+    upper = centre * (1.0 + n_pairs * spacing)
+    lower = centre * (1.0 - n_pairs * spacing)
+    if price > upper:
+        side = "above"
+        pct = round((price - upper) / upper * 100.0, 3)
+    elif price < lower:
+        side = "below"
+        pct = round((lower - price) / lower * 100.0, 3)
+    else:
+        side = "inside"
+        pct = 0.0
+    return {
+        "side": side,
+        "pct_outside_band": pct,
+        "fillable": side == "inside",
+    }
+
+
 def _score_current_config(candles: list, current_levels, current_spacing,
                             fee_rate_per_side: float):
     """Score the live grid's (levels, spacing) under the same analytical model
@@ -505,6 +550,10 @@ def build_world_state() -> dict:
         "cooldown_status":          _cooldown_status(open_orders),
         "shadow_variants":          _shadow_variants_for_world_state(),
         "current_variant_position": _current_variant_position(grid_state),
+        # Where price sits vs the grid band (T2 envelope). fillable=False =>
+        # the grid has drifted off price and cannot fill until re-centred —
+        # the council's signal that a RECENTRE is corrective, not trend-chasing.
+        "grid_position":            _grid_position(grid_state, price),
         # Analytical scoring surface for Melchior — replaces the prior
         # shadow-fill-based spacing search.
         "scored_variants_top_10":   scored_top_10,

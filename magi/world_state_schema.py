@@ -304,6 +304,34 @@ FIELDS = {
         "consumers": [],
     },
 
+    # ---------------- grid_position block (price vs grid band) ----------------
+    # Derived in orchestrator._grid_position from the same centre ± n_pairs·spacing
+    # envelope T2 uses. None when no grid exists; when present, all three keys
+    # are always set (schema-contract requirement). fillable=False signals a
+    # stranded grid (price outside the band) that cannot fill until re-centred.
+
+    "grid_position.side": {
+        "type": "str",
+        "description": "where price sits vs the grid band: 'inside' | 'above' | 'below'",
+        "consumers": ["casper", "balthasar"],
+        "casper_usage": "R1/regime_action — a stranded grid (side != inside) means a RECENTRE re-establishes fills near price rather than chasing the trend; do not STAND_DOWN against a corrective recentre on that basis alone",
+        "balthasar_usage": "geometry_veto — when side != inside (stranded), a RECENTRE is risk-reducing; do not RISK_BLOCK it solely on a hostile/trending regime",
+    },
+    "grid_position.pct_outside_band": {
+        "type": "float",
+        "description": "percent distance from price to the nearest band edge; 0.0 when inside",
+        "consumers": ["casper", "balthasar"],
+        "casper_usage": "context — magnitude of grid drift off price",
+        "balthasar_usage": "context — how far the grid has stranded; larger => recentre more clearly corrective",
+    },
+    "grid_position.fillable": {
+        "type": "bool",
+        "description": "True iff price is inside the grid band (the resting book can fill without a recentre); False => stranded",
+        "consumers": ["casper", "balthasar"],
+        "casper_usage": "R1 — False means standing down perpetuates a non-filling grid; weigh recentre as corrective",
+        "balthasar_usage": "geometry_veto carve-out — False => a dead book is the larger survival risk; prefer PROCEED on a recentre unless a survival-grade signal independently fires",
+    },
+
     # ---------------- inventory block ----------------
 
     "inventory.xrp_held": {

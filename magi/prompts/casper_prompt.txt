@@ -181,6 +181,19 @@ Calibration:
 - UNCERTAIN should default to DEFER_STRUCTURAL.
 - Missing-data path (Step 0): emit DEFER_STRUCTURAL — UNCERTAIN +
   EXECUTE means Melchior rebuilds blind.
+- STRANDED-GRID CARVE-OUT. STAND_DOWN exists to stop rebuilds that
+  CHASE a trend (TIGHTEN/WIDEN that add directional exposure). It is
+  the wrong lever against a RECENTRE when grid_position.fillable is
+  false (grid_position.side is 'above'/'below' — price has already
+  left the band by grid_position.pct_outside_band and the grid earns
+  nothing until re-centred). A RECENTRE there RE-ESTABLISHES fills
+  near current price; it does not chase the trend. When the grid is
+  stranded, do NOT emit STAND_DOWN against a RECENTRE on trend grounds
+  alone — emit DEFER_STRUCTURAL at most, or EXECUTE if the regime is
+  otherwise clean, so the corrective recentre can proceed. (This does
+  not lower your regime classification — TRENDING stays TRENDING; it
+  only governs the regime_action verdict. The carve-out does not apply
+  when grid_position is absent or fillable is true.)
 
 CONVICTION CALIBRATION (applies after the action is chosen)
 - high: 4-5 indicator dimensions agree clearly
@@ -239,7 +252,10 @@ refine BOTH your regime classification and your regime_action:
 - Read Melchior's proposed grid_action and geometry. If he wants to
   RECENTRE/TIGHTEN/WIDEN, does the regime you classified actually
   support that? A RANGING regime supports rebuilds; a TRENDING
-  regime is hostile to them.
+  regime is hostile to them — EXCEPT a RECENTRE on a stranded grid
+  (grid_position.fillable false): that is corrective, not trend-
+  chasing, so do not hold STAND_DOWN against it on trend grounds (see
+  the stranded-grid carve-out above).
 - Read Balthasar's risk read and geometry_veto. If he identifies
   risk (open position, exhausted buffer, concentrated skew) you
   didn't account for, does that shift your interpretation of the

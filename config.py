@@ -47,6 +47,33 @@ MIN_GRID_SPACING_PCT = 0.003   # Hard floor: 0.3%. SAFETY CLAMP ONLY —
 # structural-downtrend conditions (price <8% of EMA200, EMA50<EMA200,
 # vol HIGH, vwap_dev<-2%) no longer all hold.
 REGIME_GATE_ENABLED = False  # Set True for live trading, False for paper validation
+
+# Gate-wake precondition guards (scheduler.py). These govern whether an
+# off-schedule wake-class gate trigger (T2 grid breach, T11 vol-regime flip,
+# T14 book one-sided) is allowed to wake the LLM council. They do NOT change
+# whether the gate DETECTS the condition — gate.py detection is unchanged.
+# Both are credit-burn defenses, not trading logic.
+#
+# WAKE_REQUIRES_ACTIVE_GRID — when True, a wake is suppressed when the most
+# recent MAGI cycle ended with a blocking hard-rule override (PAUSE_INVALID,
+# REGIME_STANDDOWN, HALT, GRID_DEGENERATE, KILL_SWITCH, etc.) or
+# geometry_veto=RISK_BLOCK, or grid_state.halt=1 — i.e. the grid is not in an
+# active trading state, so waking the council on ANY trigger produces no
+# actionable change and only burns Letta credits. The event is consumed
+# without waking. Applies to all wake-class triggers (T2/T11/T14). Set False
+# to disable (e.g. during edge-case investigation) without code changes.
+WAKE_REQUIRES_ACTIVE_GRID = True
+#
+# WAKE_DWELL_MINUTES — a wake-class condition must PERSIST this many minutes
+# before it is allowed to wake the council. Filters transient breaches/flips
+# (a wick outside the band, a one-bar regime flip, a book that refills within
+# a couple of minutes) that would otherwise spend a cycle on a condition
+# already gone by the time the council runs. Measured on 1m candles (T2) or
+# the trigger's live state + event age (T11/T14). 0 disables the dwell. 15min
+# is short relative to the 1/hr wake throttle and 4h scheduled cadence, so it
+# adds little latency while removing intraperiod noise.
+WAKE_DWELL_MINUTES = 15
+
 GRID_CENTRE_DEFAULT = None
 MAX_INVENTORY_USD = 50.0
 # Per-order size is FIXED at the Kraken XRP minimum. Every grid order

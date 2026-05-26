@@ -49,6 +49,24 @@ WAKE_CLASS_TRIGGERS = ("T14", "T2", "T11")
 WAKE_MIN_INTERVAL_MIN = 60
 _last_magi_cycle_at = None   # set by run_magi_cycle; drives the wake throttle
 
+# Hard-rule override tags that indicate the grid is NOT in an active trading
+# state. A wake-class trigger (T2/T11/T14) is suppressed (see
+# WAKE_REQUIRES_ACTIVE_GRID in config.py) when the most recent debate_records
+# row contains any of these tags. Use startswith matching to handle
+# parameterised tags like [AGENT_DEGRADED:...].
+_WAKE_BLOCKING_OVERRIDE_PREFIXES = (
+    "[PAUSE_INVALID]",
+    "[REGIME_STANDDOWN]",
+    "[HALT]",
+    "[GRID_DEGENERATE]",
+    "[COUNCIL_COLLAPSED]",
+    "[GRID_PAUSE]",
+    "[KILL_SWITCH]",
+    "[DAILY_LOSS_LIMIT]",
+    "[ALLOC_SKEW_CEILING]",
+    "[AGENT_DEGRADED",     # prefix: actual tag is [AGENT_DEGRADED:<agent_id>]
+)
+
 EST = ZoneInfo('America/New_York')
 
 # Global engine instance
@@ -475,6 +493,281 @@ def should_run_magi(now_est: datetime, last_magi_hour: int) -> bool:
     return False
 
 
+def _is_wake_suppressed_nontrading() -> tuple:
+    """Return (suppressed: bool, reason: str) for a candidate wake-class gate
+    wake (T2/T11/T14).
+
+    When the grid is in a non-trading state the council cannot act on ANY
+    wake-class trigger — waking it produces zero new information and burns
+    Letta credits. This was the May-25 bleed: T2 (level-triggered) re-fired
+    every hour during a 12h PAUSE_INVALID/REGIME_STANDDOWN standdown, waking
+    the council ~10 times for nothing. The same shape applies to T11/T14, so
+    the guard is trigger-agnostic. This function detects the non-trading state
+    and tells the caller to suppress the wake.
+
+    Non-trading is defined as any of:
+      - The most recent debate_records row has hard_rule_overrides containing
+        a blocking tag (PAUSE_INVALID, REGIME_STANDDOWN, HALT, GRID_DEGENERATE,
+        COUNCIL_COLLAPSED, GRID_PAUSE, KILL_SWITCH, DAILY_LOSS_LIMIT,
+        ALLOC_SKEW_CEILING, AGENT_DEGRADED).
+      - The most recent debate_records row has geometry_veto='RISK_BLOCK'
+        (REGIME_STANDDOWN is blocking geometry changes even when not listed as
+        a hard_rule_override tag on every cycle).
+      - The most recent grid_state row has halt=1.
+
+    Reads DB directly on every call — no caching — so state is always current.
+    Any DB failure is non-fatal: returns (False, '') so the wake fires rather
+    than being permanently suppressed by a read error.
+    """
+    import sqlite3 as _sq
+    import json as _json
+    try:
+        from config import DB_PATH
+        conn = _sq.connect(DB_PATH)
+        conn.row_factory = _sq.Row
+        try:
+            # Check 1: most recent cycle's hard_rule_overrides and geometry_veto.
+            row = conn.execute(
+                "SELECT hard_rule_overrides, geometry_veto "
+                "FROM debate_records ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if row:
+                overrides_raw = row["hard_rule_overrides"]
+                if overrides_raw:
+                    try:
+                        overrides = _json.loads(overrides_raw)
+                    except (ValueError, TypeError):
+                        overrides = []
+                    for tag in overrides:
+                        for prefix in _WAKE_BLOCKING_OVERRIDE_PREFIXES:
+                            if str(tag).startswith(prefix):
+                                return True, f"last cycle hard_rule_override={tag}"
+                gv = row["geometry_veto"] or ""
+                if gv == "RISK_BLOCK":
+                    return True, "last cycle geometry_veto=RISK_BLOCK"
+
+            # Check 2: grid halt flag.
+            gs = conn.execute(
+                "SELECT halt FROM grid_state ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if gs and gs["halt"]:
+                return True, "grid_state.halt=1"
+
+        finally:
+            conn.close()
+    except Exception as e:
+        log.warning(
+            "_is_wake_suppressed_nontrading: DB read failed (%s) — "
+            "not suppressing", e
+        )
+    return False, ""
+
+
+def _consume_wake_gate_event(trigger_id: str, sentinel: str) -> None:
+    """Mark ALL unconsumed fired events for `trigger_id` consumed with the
+    given sentinel value (e.g. 'wake_suppressed_nontrading',
+    'wake_breach_cleared').
+
+    Called when a wake is suppressed or dropped so the event(s) do not
+    re-trigger the guard every 60 seconds until a real cycle finally consumes
+    them. Consuming the whole unconsumed-fired set (not just the newest row)
+    prevents stale fired rows from accumulating while a condition is being
+    deferred or has cleared. The next event (fired on a later gate evaluation)
+    starts a fresh evaluation.
+
+    Failure is non-fatal: logs a warning and continues.
+    """
+    try:
+        import sqlite3 as _sq
+        from config import DB_PATH
+        conn = _sq.connect(DB_PATH)
+        try:
+            conn.execute(
+                "UPDATE magi_gate_events SET consumed_in_cycle=? "
+                "WHERE trigger_id=? AND fired=1 AND consumed_in_cycle IS NULL",
+                (sentinel, trigger_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        log.warning("_consume_wake_gate_event(%s): DB write failed: %s",
+                    trigger_id, e)
+
+
+def _wake_dwell_status(trigger_id: str) -> tuple:
+    """Decide whether a pending wake-class trigger has PERSISTED long enough
+    to justify spending a council cycle. Returns (status, reason):
+
+      'wake'  — condition is live and has persisted >= WAKE_DWELL_MINUTES.
+      'defer' — condition is live but hasn't dwelled long enough yet. Caller
+                does NOT consume and does NOT wake; the next 60s loop re-checks
+                once dwell accrues (or the condition clears). No credit spend.
+      'drop'  — condition is no longer live (a transient breach/flip/one-sided
+                blip that resolved). Caller consumes the event without waking.
+
+    WAKE_DWELL_MINUTES <= 0 disables the dwell (always 'wake'). Any DB/parse
+    failure returns 'wake' — fail toward the prior behaviour rather than
+    silently swallowing a real signal by deferring forever.
+    """
+    from config import WAKE_DWELL_MINUTES
+    if not WAKE_DWELL_MINUTES or WAKE_DWELL_MINUTES <= 0:
+        return "wake", "dwell disabled"
+    import sqlite3 as _sq
+    import json as _json
+    import time as _time
+    try:
+        from config import DB_PATH
+        conn = _sq.connect(DB_PATH)
+        conn.row_factory = _sq.Row
+        try:
+            ev = conn.execute(
+                "SELECT timestamp, details FROM magi_gate_events "
+                "WHERE trigger_id=? AND fired=1 AND consumed_in_cycle IS NULL "
+                "ORDER BY id DESC LIMIT 1",
+                (trigger_id,),
+            ).fetchone()
+            if ev is None:
+                return "wake", "no pending fired event to dwell on"
+            age_min = max(0.0, (_time.time() - float(ev["timestamp"])) / 60.0)
+            try:
+                details = _json.loads(ev["details"]) if ev["details"] else {}
+            except (ValueError, TypeError):
+                details = {}
+
+            if trigger_id == "T2":
+                return _dwell_t2(conn, age_min, float(WAKE_DWELL_MINUTES))
+            if trigger_id == "T14":
+                return _dwell_t14(conn, age_min, float(WAKE_DWELL_MINUTES))
+            if trigger_id == "T11":
+                return _dwell_t11(conn, details, age_min,
+                                  float(WAKE_DWELL_MINUTES))
+            # Unknown wake trigger — generic age-only dwell.
+            if age_min >= WAKE_DWELL_MINUTES:
+                return "wake", (f"age {age_min:.1f}min >= dwell "
+                                f"{WAKE_DWELL_MINUTES}min")
+            return "defer", (f"age {age_min:.1f}min < dwell "
+                             f"{WAKE_DWELL_MINUTES}min")
+        finally:
+            conn.close()
+    except Exception as e:
+        log.warning("_wake_dwell_status(%s): failed (%s) — waking",
+                    trigger_id, e)
+        return "wake", f"dwell check error: {e}"
+
+
+def _grid_band(conn) -> tuple:
+    """(centre, upper, lower) for the current grid, or (None, None, None)."""
+    gs = conn.execute(
+        "SELECT centre_price, spacing_pct, levels FROM grid_state "
+        "ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if not gs or gs["centre_price"] is None or gs["spacing_pct"] is None:
+        return None, None, None
+    try:
+        centre = float(gs["centre_price"])
+        spacing = float(gs["spacing_pct"])
+        levels = int(gs["levels"] or 5)
+    except (TypeError, ValueError):
+        return None, None, None
+    n_pairs = max(1, levels // 2)
+    return centre, centre * (1.0 + n_pairs * spacing), \
+        centre * (1.0 - n_pairs * spacing)
+
+
+def _dwell_t2(conn, age_min: float, dwell_min: float) -> tuple:
+    """T2 dwell: price must have stayed beyond the SAME grid boundary for
+    >= dwell_min, measured on 1m candles (a true continuous dwell, matching
+    the operator's 'remains above/below for X minutes'). Falls back to event
+    age + latest 1h close when 1m history is too short (startup / REST
+    fallback path, which only writes 1h candles)."""
+    _, upper, lower = _grid_band(conn)
+    if upper is None:
+        return "defer", "no grid_state for band"
+
+    def _side(c: float):
+        if c > upper:
+            return "above"
+        if c < lower:
+            return "below"
+        return None
+
+    need = max(1, int(round(dwell_min)))  # one 1m candle ~= one minute
+    rows = conn.execute(
+        "SELECT close FROM candles WHERE timeframe='1m' "
+        "ORDER BY timestamp DESC LIMIT ?",
+        (need,),
+    ).fetchall()
+    if len(rows) >= need:
+        sides = [_side(float(r["close"])) for r in rows]
+        newest = sides[0]
+        if newest is None:
+            return "drop", "breach cleared (latest 1m inside band)"
+        if all(s == newest for s in sides):
+            return "wake", f"price {newest} band for >= {need}min (1m)"
+        return "defer", (f"breach {newest} not yet sustained {need}min (1m)")
+
+    # Fallback: insufficient 1m history.
+    last_1h = conn.execute(
+        "SELECT close FROM candles WHERE timeframe='1h' "
+        "ORDER BY timestamp DESC LIMIT 1"
+    ).fetchone()
+    if not last_1h:
+        return "defer", "no candle history for dwell"
+    side = _side(float(last_1h["close"]))
+    if side is None:
+        return "drop", "breach cleared (latest 1h inside band)"
+    if age_min >= dwell_min:
+        return "wake", (f"price {side} band, event age {age_min:.0f}min >= "
+                        f"{dwell_min:.0f}min (1h fallback)")
+    return "defer", (f"breach {side}, age {age_min:.0f}min < "
+                     f"{dwell_min:.0f}min (1h fallback)")
+
+
+def _dwell_t14(conn, age_min: float, dwell_min: float) -> tuple:
+    """T14 dwell: the book must STILL be one-sided now and have been so for
+    >= dwell_min. A book that refilled (or fully emptied) within the window
+    was a transient drain — drop it."""
+    rows = conn.execute(
+        "SELECT side, COUNT(*) n FROM grid_orders WHERE status='open' "
+        "GROUP BY side"
+    ).fetchall()
+    buys = sells = 0
+    for r in rows:
+        if r["side"] == "buy":
+            buys = int(r["n"])
+        elif r["side"] == "sell":
+            sells = int(r["n"])
+    total = buys + sells
+    one_sided = total > 0 and ((buys == 0) != (sells == 0))
+    if not one_sided:
+        return "drop", f"book no longer one-sided (buys={buys} sells={sells})"
+    if age_min >= dwell_min:
+        return "wake", (f"book one-sided {age_min:.0f}min >= "
+                        f"{dwell_min:.0f}min")
+    return "defer", f"book one-sided {age_min:.0f}min < {dwell_min:.0f}min"
+
+
+def _dwell_t11(conn, details: dict, age_min: float, dwell_min: float) -> tuple:
+    """T11 dwell: the vol-regime flip must NOT have reverted and must have
+    held >= dwell_min. `details` carries {'prior':…, 'current':…} from the
+    firing evaluation; if the live regime has returned to `prior`, the flip
+    was transient — drop it."""
+    prior = details.get("prior")
+    flipped_to = details.get("current")
+    cur = conn.execute(
+        "SELECT vol_regime FROM indicators WHERE timeframe='1h' "
+        "ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    cur_regime = cur["vol_regime"] if cur else None
+    if prior is not None and cur_regime == prior:
+        return "drop", f"regime reverted to {prior} (flip transient)"
+    if age_min >= dwell_min:
+        return "wake", (f"regime held {flipped_to} {age_min:.0f}min >= "
+                        f"{dwell_min:.0f}min")
+    return "defer", f"regime flip {age_min:.0f}min < {dwell_min:.0f}min"
+
+
 def _pending_wake_class_trigger():
     """Return the trigger_id of an unconsumed, fired, wake-class gate event
     (or None). This is the off-schedule wake signal: it is the same
@@ -748,12 +1041,59 @@ def main():
             if throttle_ok:
                 pending = _pending_wake_class_trigger()
                 if pending:
-                    log.info(
-                        "Gate wake: %s fired since last cycle — running "
-                        "off-schedule MAGI cycle (throttle %dmin satisfied)",
-                        pending, WAKE_MIN_INTERVAL_MIN,
-                    )
-                    run_magi_cycle(trigger=f'gate_wake:{pending}')
+                    # Two-stage wake gate. gate.py DETECTION is unchanged —
+                    # only the decision to spend a council cycle is guarded:
+                    #   1. Non-trading suppression. If the grid is standing
+                    #      down (PAUSE_INVALID / REGIME_STANDDOWN / HALT /
+                    #      GRID_DEGENERATE / halt etc.) the council cannot act
+                    #      on ANY wake trigger, so consume + skip. This is the
+                    #      direct fix for the May-25 bleed (T2 re-fired hourly
+                    #      for 12h during a standdown → 10 useless wakes).
+                    #      Applies to T2/T11/T14. WAKE_REQUIRES_ACTIVE_GRID
+                    #      disables.
+                    #   2. Dwell. The condition must PERSIST WAKE_DWELL_MINUTES
+                    #      before waking, so a transient breach/flip/one-sided
+                    #      blip that has resolved by council-time doesn't spend
+                    #      a cycle. 'defer' re-checks next loop (no spend);
+                    #      'drop' consumes a cleared event.
+                    from config import WAKE_REQUIRES_ACTIVE_GRID
+                    decided = False
+                    if WAKE_REQUIRES_ACTIVE_GRID:
+                        suppressed, reason = _is_wake_suppressed_nontrading()
+                        if suppressed:
+                            log.info(
+                                "gate_wake_suppressed: %s fired but %s — "
+                                "consuming event, no wake fired",
+                                pending, reason,
+                            )
+                            _consume_wake_gate_event(
+                                pending, "wake_suppressed_nontrading")
+                            decided = True
+
+                    if not decided:
+                        status, reason = _wake_dwell_status(pending)
+                        if status == "drop":
+                            log.info(
+                                "gate_wake_dropped: %s — %s; consuming "
+                                "event, no wake", pending, reason,
+                            )
+                            _consume_wake_gate_event(
+                                pending, "wake_breach_cleared")
+                        elif status == "defer":
+                            log.info(
+                                "gate_wake_deferred: %s — %s; re-checking "
+                                "next loop", pending, reason,
+                            )
+                            # NOT consumed, NOT woken: re-evaluate next tick
+                            # once the dwell accrues or the condition clears.
+                        else:  # 'wake'
+                            log.info(
+                                "Gate wake: %s fired and %s — running "
+                                "off-schedule MAGI cycle (throttle %dmin "
+                                "satisfied)",
+                                pending, reason, WAKE_MIN_INTERVAL_MIN,
+                            )
+                            run_magi_cycle(trigger=f'gate_wake:{pending}')
 
         # Sleep 60 seconds between checks
         time.sleep(60)

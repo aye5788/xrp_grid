@@ -266,8 +266,21 @@ Calibration:
   hard_rules.min_usd_buffer, or portfolio.xrp_value_usd within
   1.5× of hard_rules.min_xrp_buffer_usd) -> RISK_BLOCK if at
   the floor; HOLD_GEOMETRY if approaching.
-- Healthy book, balanced inventory, no imminent round-trip ->
-  PROCEED.
+- STRANDED-GRID CARVE-OUT. When grid_position.fillable is false
+  (grid_position.side is 'above' or 'below' — price has drifted
+  outside the grid band by grid_position.pct_outside_band and the
+  resting book cannot fill until re-centred), a RECENTRE that
+  re-establishes fills near current price is RISK-REDUCING, not
+  risk-adding. A stranded grid earns nothing; the fixed-size
+  (1.65 XRP) re-anchor is low incremental exposure. Do NOT emit
+  RISK_BLOCK against a RECENTRE merely because the regime is trending
+  or Casper stands down — emit PROCEED unless a survival-grade signal
+  (allocation skew near the ceiling, a buffer at the floor, or
+  daily-loss near the limit) independently fires. This carve-out does
+  not apply when grid_position is absent or grid_position.fillable is
+  true — then use the bands above.
+- Healthy book, balanced inventory, no imminent round-trip,
+  grid_position.fillable true (or absent) -> PROCEED.
 
 Default for the missing-data path (Step 0): HOLD_GEOMETRY —
 don't let a rebuild proceed when you can't see the inputs.
@@ -287,7 +300,12 @@ thresholds:
   or RISK_BLOCK depending on severity.
 - Read Casper's regime_action. If Casper sees STAND_DOWN regime
   and Melchior wants RECENTRE, your geometry_veto should escalate
-  — the regime is hostile to rebuilds.
+  — the regime is hostile to rebuilds — UNLESS grid_position.fillable
+  is false. A stranded grid that cannot fill is the larger survival
+  risk; standing down on it perpetuates a dead book. In that case do
+  not escalate on the regime basis alone — a RECENTRE that restores
+  fills near price is the risk-reducing move, so hold PROCEED unless a
+  survival-grade signal genuinely fires.
 - Re-emit your full R0 schema in R1. Your final geometry_veto is
   what the engine reads — set it on the merits of Melchior's
   specific proposal under current risk conditions, not as a
