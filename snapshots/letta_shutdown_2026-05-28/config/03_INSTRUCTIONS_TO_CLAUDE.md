@@ -2,16 +2,6 @@ These are explicit operating instructions for Claude in this project.
 Read them at the start of every session. They override generic helpfulness
 defaults where they conflict.
 
-> **STATUS — SHUT DOWN (2026-05-28). Migrating off Letta.** MAGI is stopped:
-> services disabled, live orders cancelled, state snapshotted to
-> `snapshots/letta_shutdown_2026-05-28/`, Letta agents preserved (not deleted).
-> The "vital signs at session start" / audit / engine-vs-council guidance below
-> assumes a *running* system — it does not apply while shut down. Do NOT restart
-> services, call the Letta agents, or cancel the Letta subscription without
-> explicit operator direction. The pending direction is a native (OpenAI /
-> Anthropic / Google) rebuild, which is a separate decision — do not start it
-> from these docs.
-
 ## Read first, every session
 
 1. `CLAUDE.md` — operating discipline, architecture intent, recurring

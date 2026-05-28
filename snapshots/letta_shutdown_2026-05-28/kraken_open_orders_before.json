@@ -1,0 +1,91 @@
+{
+  "open": {
+    "OQHKVY-BBBZV-ZJ2FCX": {
+      "refid": null,
+      "userref": 1872484718,
+      "status": "open",
+      "opentm": 1779984143.958133,
+      "starttm": 0,
+      "expiretm": 0,
+      "descr": {
+        "pair": "XRPUSD",
+        "aclass": "forex",
+        "type": "sell",
+        "ordertype": "limit",
+        "price": "1.34010",
+        "price2": "0",
+        "leverage": "none",
+        "order": "sell 1.65000000 XRPUSD @ limit 1.34010",
+        "close": ""
+      },
+      "vol": "1.65000000",
+      "vol_exec": "0.00000000",
+      "cost": "0.00000000",
+      "fee": "0.00000000",
+      "price": "0.00000000",
+      "stopprice": "0.00000000",
+      "limitprice": "0.00000000",
+      "misc": "",
+      "oflags": "post,fciq",
+      "time_in_force": "gtc"
+    },
+    "OXTOWS-WMPV5-5LVEDQ": {
+      "refid": null,
+      "userref": 1866901658,
+      "status": "open",
+      "opentm": 1779984142.516751,
+      "starttm": 0,
+      "expiretm": 0,
+      "descr": {
+        "pair": "XRPUSD",
+        "aclass": "forex",
+        "type": "buy",
+        "ordertype": "limit",
+        "price": "1.29095",
+        "price2": "0",
+        "leverage": "none",
+        "order": "buy 1.65000000 XRPUSD @ limit 1.29095",
+        "close": ""
+      },
+      "vol": "1.65000000",
+      "vol_exec": "0.00000000",
+      "cost": "0.00000000",
+      "fee": "0.00000000",
+      "price": "0.00000000",
+      "stopprice": "0.00000000",
+      "limitprice": "0.00000000",
+      "misc": "",
+      "oflags": "post,fciq",
+      "time_in_force": "gtc"
+    },
+    "OZKOST-BDX6E-I5AFPB": {
+      "refid": null,
+      "userref": 2015054099,
+      "status": "open",
+      "opentm": 1779984142.093798,
+      "starttm": 0,
+      "expiretm": 0,
+      "descr": {
+        "pair": "XRPUSD",
+        "aclass": "forex",
+        "type": "buy",
+        "ordertype": "limit",
+        "price": "1.30078",
+        "price2": "0",
+        "leverage": "none",
+        "order": "buy 1.65000000 XRPUSD @ limit 1.30078",
+        "close": ""
+      },
+      "vol": "1.65000000",
+      "vol_exec": "0.00000000",
+      "cost": "0.00000000",
+      "fee": "0.00000000",
+      "price": "0.00000000",
+      "stopprice": "0.00000000",
+      "limitprice": "0.00000000",
+      "misc": "",
+      "oflags": "post,fciq",
+      "time_in_force": "gtc"
+    }
+  }
+}

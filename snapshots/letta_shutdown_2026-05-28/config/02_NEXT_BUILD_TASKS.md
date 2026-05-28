@@ -1,16 +1,5 @@
 # Next Build Tasks
 
-> **2026-05-28 — SYSTEM SHUT DOWN for Letta migration.** The running MAGI was
-> cleanly stopped (services disabled, live orders cancelled, state snapshotted to
-> `snapshots/letta_shutdown_2026-05-28/`; see `01_CURRENT_STATE.md` "Session
-> 2026-05-28 — SHUTDOWN"). The work queue below was written for the **live Letta
-> system and is now mostly historical** — most items target a runtime that is no
-> longer running. The single pending direction is: **rebuild the council on each
-> vendor's native platform (OpenAI / Anthropic / Google), dropping the Letta
-> layer.** That rebuild is a separate decision and a separate prompt — it is NOT
-> designed here and should not be started from this doc. Do not resume the items
-> below without operator direction; many will be superseded by the rebuild.
-
 ## Maintenance contract (read before adding/removing world_state fields)
 
 Adding or removing a field in `magi/orchestrator.py:build_world_state()`

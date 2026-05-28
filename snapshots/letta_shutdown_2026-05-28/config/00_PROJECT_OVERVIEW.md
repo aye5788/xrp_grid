@@ -1,20 +1,12 @@
 # MAGI — XRP Grid Bot — Project Overview
 
-> **STATUS — SHUT DOWN (2026-05-28 18:48 UTC). Migrating off Letta.**
-> Services `magi.service` + `magi-dashboard.service` are stopped + disabled,
-> live Kraken orders cancelled, full state snapshotted to
-> `snapshots/letta_shutdown_2026-05-28/`. Letta Cloud agents preserved (not
-> deleted). Plan: rebuild the council natively on OpenAI / Anthropic / Google,
-> drop the Letta runtime. Rebuild not yet started. Everything below describes
-> the system **as it ran up to the shutdown** — historical, not live.
-
 ## What this system is
 
-MAGI is a grid-trading bot for XRP/USD on Kraken, **was live 2026-05-23 →
-2026-05-28** (paper⇄live was a single env-var toggle — `MAGI_LIVE_CONFIRM=YES`
-in `.env` + the `CONFIRM_LIVE` gate file). The end goal is profitable live
-trading at meaningful scale. Hard constraint: right >50% of the time AND
-profitable after fees.
+MAGI is a grid-trading bot for XRP/USD on Kraken, **live as of 2026-05-23**
+(paper⇄live is a single env-var toggle — `MAGI_LIVE_CONFIRM=YES` in `.env` +
+the `CONFIRM_LIVE` gate file; remove either + restart to revert to paper).
+The end goal is profitable live trading at meaningful scale. Hard constraint:
+right >50% of the time AND profitable after fees.
 
 ## Architecture
 
@@ -233,16 +225,13 @@ safety clamps.
   knobs synced via `magi/provision_agents.AGENT_CONFIG`.
 
 ## Services
-| Service | State since 2026-05-28 shutdown | Pre-shutdown role |
-|---|---|---|
-| `magi.service` | **inactive + disabled** | active (scheduler, observer, MAGI cycles) |
-| `magi-dashboard.service` | **inactive + disabled** | active (Flask :5000; public via cloudflared tunnel → api.ethobs.uk, app-side Flask cookie auth — see `/login`) |
-| `letta.service` | inactive + disabled (self-hosted Docker, dormant for rollback only) | unchanged |
+| Service | Expected state |
+|---|---|
+| `magi.service` | active (scheduler, observer, MAGI cycles) |
+| `magi-dashboard.service` | active (Flask :5000; public via cloudflared tunnel → api.ethobs.uk, app-side Flask cookie auth — see `/login`) |
+| `letta.service` | inactive + disabled (self-hosted Docker, dormant for rollback only) |
 
-Both MAGI services were stopped + disabled on 2026-05-28 for the Letta migration
-and will NOT auto-start on reboot. Do not restart without operator direction.
-(Historical restart command, for reference only:
-`systemctl restart magi.service magi-dashboard.service`.)
+Restart together: `systemctl restart magi.service magi-dashboard.service`.
 
 ## Out of scope / dead code
 - Self-hosted Letta Docker (dormant; `/root/xrp_grid/letta/` and pgdata preserved for rollback)

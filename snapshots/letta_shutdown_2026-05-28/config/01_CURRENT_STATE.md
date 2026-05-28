@@ -1,15 +1,6 @@
 # MAGI — Current State
 
-> **2026-05-28 18:48 UTC — SYSTEM SHUT DOWN for Letta migration.** Both services
-> stopped + disabled, all live Kraken orders cancelled (3, all 1.65 XRP), full
-> state snapshotted to `snapshots/letta_shutdown_2026-05-28/`. Letta agents
-> preserved, not deleted. Rebuild on native vendor platforms is the pending
-> direction (not started). See "Session 2026-05-28 — SHUTDOWN" immediately below.
-> Everything dated before this and written in the present tense describes the
-> system as it ran up to the shutdown.
-
-Last updated: 2026-05-28 (**MAGI SHUT DOWN 18:48 UTC for Letta migration — see
-Session 2026-05-28 — SHUTDOWN below.** Earlier same day: **PnL-tracking overhaul + dashboard fixes + audit of
+Last updated: 2026-05-28 (**PnL-tracking overhaul + dashboard fixes + audit of
 the post-restart council; two observer fixes STAGED for the next magi.service
 restart**. PnL tracking is now live-scoped (Kraken-txid discriminator) +
 equity-based from the go-live baseline — the old all-fills FIFO overstated by
@@ -44,47 +35,6 @@ credit-burn guard shipped** — see Session 2026-05-25 below. Prior: 2026-05-24 
 `ORDER_SIZE_XRP` constant; live service restarted 12:37 UTC, live mode
 confirmed preserved. See Session 2026-05-24 below. Prior: 2026-05-23 —
 **BOT IS LIVE** — flipped paper→live, live order + fill-reconcile path shipped, fee constants corrected to tier-0 0.25%/0.40%, dashboard auth moved to Flask cookie, renewal READINESS panel removed — see Session 2026-05-23 below. Prior: 2026-05-22 — council restructured to R1-always-fires + two new structural vote fields the engine reads; gate layer with calibrated triggers + Kraken WebSocket v2 substrate shipped; agent state wiped + recreated; freshness validator + retry + warn-alert shipped. See "Session 2026-05-22" entries below).
-
-## Session 2026-05-28 — SHUTDOWN (Letta migration prep)
-
-Controlled stop of the running system to migrate off Letta Cloud and rebuild the
-council on each vendor's native platform (OpenAI / Anthropic / Google) with native
-caching and owned state. Stop-and-preserve only; the rebuild is a separate,
-not-yet-started decision. Driven by the council token-cost investigation earlier
-this session (see below / the cost memory): ~$5-6/day council spend on a ~$67 book
-is economically inverted, and ~half is structural (4h cadence ≫ provider cache TTLs,
-3 agents × cold-cache input/cycle) that no Letta-side config fixes.
-
-What was done (all completed, no failures):
-- **Services:** `magi.service` + `magi-dashboard.service` **stopped + disabled**
-  (`systemctl disable`; won't auto-start on reboot). Scheduler logged a clean stop
-  at 18:49:07 UTC. Self-hosted Letta Docker confirmed still down (no containers).
-- **Kraken (was LIVE, not paper):** 3 real open orders cancelled via
-  `KrakenExchange.cancel_all_open_orders()`, 0 remaining (verified). All were grid
-  orders at the fixed 1.65 XRP size: sell @1.34010, buy @1.29095, buy @1.30078.
-  XRP/USD inventory was NOT liquidated.
-- **Snapshot** at `snapshots/letta_shutdown_2026-05-28/`:
-  - Letta agent state (read-only): per-agent config, all 8 memory blocks (full
-    text), full recall-storage message history (casper 825 / melchior 466 /
-    balthasar 704 msgs), 3 tool defs. Balthasar `self_model` preserved at its
-    bloated 25,069 chars (the cycle-60 `merge_failed` / skipped-reset cause).
-  - `db/observer.db` (12.9 MB, integrity ok) + empty `magi.db`. Row counts:
-    debate_records 231, magi_decisions 435, token_usage 1001, memory_rotations 9.
-  - `config/`: `.env`, `config.py`, all five handoff docs, orchestrator/council/
-    memory_lifecycle modules, and the three persona prompt files.
-  - `git_head.txt` (HEAD 6dc4345 "doc update"), `git_status.txt`, `git_diff.txt`
-    (clean tree). Plus `SHUTDOWN_NOTES.md` with the full manifest.
-- **Last cycle that ran:** cyc_1779984050 @ 2026-05-28T16:00:50 UTC (scheduled;
-  Casper RANGING / Melchior RECENTRE / Balthasar CLEAR; R1 fired, last billed call
-  16:02:20).
-- **Letta agents NOT deleted** — they persist on Letta's servers, reachable via the
-  API. Do not cancel the Letta subscription until the rebuild is complete and the
-  snapshots are verified usable.
-- **Stale-process note:** two orphaned Claude Code shell loops from 2026-05-07
-  (PIDs 671668, 677419) are still polling observer.db; not MAGI, harmless,
-  recommend killing — left running pending operator confirmation.
-
-Everything below this section describes the system **as it ran up to the shutdown**.
 
 ## Session 2026-05-28 changes
 

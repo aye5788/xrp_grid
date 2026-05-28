@@ -14,33 +14,13 @@ Handoff docs to read at session start:
 CLAUDE.md is intent and discipline. The handoff docs are state. If they
 disagree, the handoff docs win for state; this file wins for how to work.
 
-> **STATUS — SHUT DOWN (2026-05-28 18:48 UTC). Migrating off Letta.**
-> The running MAGI system was cleanly stopped on 2026-05-28: `magi.service`
-> and `magi-dashboard.service` are **stopped + disabled** (won't restart on
-> reboot), all live Kraken orders were cancelled, and full state was
-> snapshotted to `snapshots/letta_shutdown_2026-05-28/` (Letta agent
-> blocks/threads/config, observer.db, env/config/docs, git record — see that
-> dir's `SHUTDOWN_NOTES.md`). The three Letta Cloud agents were **NOT
-> deleted** — they persist on Letta's servers and remain reachable via the
-> API. The plan is to rebuild the council on each vendor's native platform
-> (OpenAI / Anthropic / Google) with native caching and owned state, dropping
-> the Letta runtime layer. **The rebuild is a separate, not-yet-started
-> decision** — do not begin it from this doc. Until then, treat everything
-> below describing a *running* system as historical: it documents how MAGI
-> operated up to the shutdown, not a live system. Do NOT restart the services
-> or call the Letta agents without explicit operator direction. Do NOT cancel
-> the Letta Cloud subscription until the rebuild is complete and the snapshots
-> are verified usable.
-
 ## 1. What MAGI is
 
-> Historical as of the 2026-05-28 shutdown above. MAGI **was** live; it is
-> now stopped. The description below is the system as it ran.
-
-MAGI is an XRP/USD spot grid bot running on Kraken — **was live 2026-05-23
-→ 2026-05-28** (paper⇄live was a single env-var toggle: `MAGI_LIVE_CONFIRM=YES`
-in `.env` plus the `CONFIRM_LIVE` gate file) — with a three-agent LLM council
-on Letta Cloud advising structural decisions. The
+MAGI is an XRP/USD spot grid bot running on Kraken — **live as of
+2026-05-23** (paper⇄live is a single env-var toggle: `MAGI_LIVE_CONFIRM=YES`
+in `.env` plus the `CONFIRM_LIVE` gate file; remove either + restart to
+revert to paper) — with a three-agent LLM council on Letta Cloud advising
+structural decisions. The
 council is Casper (Gemini-3-flash-preview, regime), Melchior (GPT-4o, grid
 microstructure), Balthasar (risk/survival). NOTE (2026-05-26): live Balthasar
 runs `claude-haiku-4-5`, not the `claude-sonnet-4-6` this line long stated —
