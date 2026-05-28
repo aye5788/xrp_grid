@@ -48,9 +48,11 @@ schema enables projection whenever needed — it's a routing change in
 
 
 Priorities reordered 2026-05-22. The structural-vote restructure shipped:
-R1 always fires, Casper emits `regime_action`, Balthasar emits `geometry_veto`,
-hard rule 0d reads both additively with existing rule overrides. This was
-the operational answer to the "council ornamental?" question raised by
+Casper emits `regime_action`, Balthasar emits `geometry_veto`, hard rule 0d
+reads both additively with existing rule overrides. (R1 was made "always-fires"
+in that restructure but was reverted to CONDITIONAL on 2026-05-27 — a
+novelty-aware gate, `council.should_run_r1`, for cost reasons; see item 0.)
+This was the operational answer to the "council ornamental?" question raised by
 the prior renewal-decision framing. The COUNCIL LEVERS dashboard panel
 makes the answer observable.
 
@@ -63,32 +65,229 @@ The pre-live blockers (§7–§9 below) were all RESOLVED 2026-05-23 — the bot
 
 ## Highest priority
 
-### 1. Rule 0d tag-emission / engine downgrade — open bug
+### 0★. [HIGHEST PRIORITY — CAPITAL PRESERVATION] Grid bleeds in sustained downtrends — add a deterministic stand-down
 
-`cyc_1779480012` (2026-05-22T20:00:12) is the first post-recreation cycle
-where Melchior voted `RECENTRE` while peers voted veto (Casper `STAND_DOWN`
-+ Balthasar `RISK_BLOCK`). Expected outcome: hard rule 0d fires
-`[REGIME_STANDDOWN]` and `[BALTHASAR_RISK_BLOCK]`, downgrades to MAINTAIN,
-writes the tags to `debate_records.hard_rule_overrides`.
+Discovered 2026-05-28 auditing the 9 council cycles since the 2026-05-27 16:09
+restart. In a sustained downtrend (XRP ~$1.32→$1.26 over the window) the grid
+**recenters into the fall and buys a falling knife.** As price walks below the
+book it goes one-sided (`buy_count=0`, `grid_position.side='below'`,
+`fillable=False`); T14 wakes MAGI, which correctly fires
+`GRID_DEGENERATE → RECENTRE` and re-centers lower — then price keeps dropping
+and it recenters again. Each recentre accumulates 1.65 XRP at a progressively
+lower price. **Live equity since go-live is ≈ −$2.3, essentially all unrealized
+inventory drawdown** (see PnL audit, Session 2026-05-28 in `01_CURRENT_STATE.md`).
+The per-cycle judgments are individually *correct* (RECENTRE when stranded is the
+right structural call); the **strategy** loses in a one-way market.
 
-Observed: `hard_rule_overrides=[]` and `applied_grid_action=NULL` in the
-row.
+**Why the council won't learn this on its own** (the important part):
+- The only outcome signal agents passively see is the shared `recent_outcomes`
+  block (last 6 cycles, read-only — the per-agent "update your self_model" notify
+  was removed for causing corruption). It carries **realized 6h round-trip PnL**,
+  which is individually *positive* (~+$0.005/trip) even while unrealized inventory
+  bleeds. So even with the PnL-signal bug fixed (below), the signal the agents see
+  is "small profit, grid_alive yes" — it structurally **cannot** surface a
+  downtrend bleed that lives in unrealized inventory.
+- Until 2026-05-28 that PnL field was additionally **broken** — every live cycle
+  showed `$0.0000` (the paper-pollution FIFO bug). The `observer.py`
+  `_compute_window_metrics` live-scoping fix (staged for the next restart) makes
+  it real going forward, but per the point above that is necessary-not-sufficient.
+- Regime detection under-calls it: Casper keys TRENDING on `adx >= 20`, but ADX
+  sat 15–17 even with `adx_neg`(22–26) ≫ `adx_pos`(12) and roc_6h −2 to −3.7.
+  Compounded by roc_6h being null ~40% of cycles (root cause: 6h is a separate
+  fragile Kraken fetch; fix staged in `observer._resample_6h_from_1h`).
 
-Two leading hypotheses (without diving in yet):
-- Tag write-back path inside `enforce_hard_rules` doesn't persist the new
-  rule 0d tags to the debate_record row.
-- Row-write race: the cycle was downgraded correctly in-memory but the
-  `_build_debate_record` write missed the override list (or `_build_debate_record`
-  ran before rule 0d).
+**The fix (do this — it's a deterministic survival condition, the hard-rule/regime
+layer's job, NOT something to wait on the council to learn):** add a rule that
+detects a sustained directional downtrend (e.g. `adx_neg` materially > `adx_pos`
+for N consecutive cycles, OR roc_6h below a floor, AND skew rising on the buy
+side) and forces STAND_DOWN — stop placing new buys / suppress RECENTRE — until
+the trend abates, rather than recentering into the fall. Prefer the deterministic
+layer over a persona edit (prompt edits don't reliably move behavior, esp.
+GPT-4o; and the loss is unrealized, which the council's signal can't see). If
+implemented as a persona/regime-threshold change instead, it MUST go through
+`evals/run_all.sh` before `provision_agents`. Sequencing: land the roc_6h +
+PnL-signal fixes first (this restart), observe a few cycles with *real* PnL in
+`recent_outcomes`, then implement the stand-down rule.
 
-Engine should still have caught it via the defensive cross-check in
-`apply_magi_decision` (logs warning + coerces to MAINTAIN), so live
-behaviour is likely safe — but the visibility chain is broken until this
-is fixed. Investigate at the start of next session.
+### 0. [HIGHEST PRIORITY — COST] Council spend ~$5–6/day on a $67 book
 
-Done when: a cycle with non-default `regime_action` + RECENTRE/TIGHTEN/WIDEN
-shows the expected `[REGIME_*]` tag(s) in `hard_rule_overrides`, AND
-`applied_grid_action='MAINTAIN'` in the same row.
+Discovered 2026-05-27 auditing spend since the 2026-05-26 re-enable. It is
+**not** gate-wakes (zero since resume) and **not** evals (zero since resume) —
+it is the plain scheduled council. Real spend since resume (~12h, 6 cycles):
+**$4.97** (`token_usage`), corroborated by Letta's own billing screen.
+Steady-state on the 4h scheduled cadence ≈ **$5–6/day** — i.e. the entire $67
+book consumed in ~12 days on LLM fees before a single fill. Not tenable. The
+`~$0.30/cycle` figure in CLAUDE.md §4 is wrong by ~3×; real per-cycle cost is
+**~$0.80–1.00**.
+
+Call accounting (since resume): **50 LLM calls / 6 cycles = ~8.3 calls/cycle.**
+Per agent over 6 cycles — Casper 18, Melchior 17, Balthasar 15. Decomposes into:
+- **18 R0 votes** — 1/agent/cycle. Baseline.
+- **18 R1 synthesis calls** — 1/agent/cycle. R1 has been **unconditional**
+  ("always-fires") since the 2026-05-22 restructure (`council.py:run_round_1`).
+  Every cycle is **2 calls/agent by design** (R0 + R1), not 1. `debate_triggered`
+  (true 3/6) only records whether synthesis *shifted* a position — it does NOT
+  gate the R1 call.
+- **14 R0 freshness retries** — the avoidable bucket. When R0 cites stale numbers
+  the orchestrator re-issues a full ~80–90k-token R0 call. Casper retried 6/6
+  cycles, Melchior 5/6, Balthasar 3/6 (18 baseline R0 + 14 retries = 32 observed).
+
+Measured cost structure (since resume):
+- **Melchior / gpt-4o = 65% of spend** ($3.24 of $4.97). Most expensive model,
+  ~75–87k-token inputs, inconsistent prompt caching (some R0 calls show no `ci`
+  cache marker and pay full freight). Also the model the docs say is least
+  responsive to prompts.
+- **R1 synthesis = $1.78 (36% of spend), and it fires every cycle by design.**
+  Not a debate-gated cost — it is the unconditional second pass. Cutting it means
+  making R1 conditional again (P5), an architectural change, not a knob.
+- **Freshness retries ≈ doubling of R0.** `debate_records.freshness_retries`
+  shows `casper:true` 6/6, `melchior:true` 5/6. Each `true` is a second full
+  ~80–90k-token re-call. This is the cheapest waste to remove if the retry
+  isn't actually changing the vote (P3).
+- **Context bloat underneath all of it:** 74–114k input tokens/call (Casper
+  avg 93k). Letta threads are never trimmed, so every cycle costs more over time.
+- **Worst part: all of this is spent while the bot is parked in HALT / not
+  trading.** Full-price council deliberation, zero trading benefit.
+
+Levers, in priority order (P1 highest):
+
+- **P1 — Make council cadence a function of trading state.** A parked
+  (HALT / PAUSE_INVALID / non-trading) bot does not need a ~$1/cycle council
+  every 4h. Drop to 12h or event-only while parked; resume 4h only when the grid
+  is actually allowed to trade. Biggest, simplest win — could cut steady-state
+  cost ~3×. Lives in the scheduler / observer cycle gating. (Related: the
+  "Reconsider startup-cycle behavior in scheduler" engineering item below.)
+- **P2 — Question gpt-4o for Melchior.** 65% of cost, weakest responder. Either
+  swap to a cheaper model or aggressively trim his thread — largest single
+  line-item win. NOTE this collides with the "do not engineer away GPT-4o
+  anchoring" entry under *Explicitly NOT on the roadmap*: that entry is about
+  not fighting his bias for behavioral reasons; this is a **cost** decision.
+  Revisit that boundary with the operator before acting.
+- **P3 — Fix freshness retries. [FIX 1 DEPLOYED 11:28 UTC; FIX 2 DEPLOYED 16:09 UTC, 2026-05-27].**
+  Diagnosis confirmed via 7 days of `[FRESHNESS_FAIL]` logs: ~67/69 retries fired
+  on cosmetic precision drift (e.g. 39.41 vs 39.39, a static reference stat cited
+  at slightly wrong precision), NOT staleness — pure burn. **Fix 1 (materiality
+  band):** added to `council.py:_validate_r0_freshness` (`_within_freshness_tolerance`,
+  `max(5% relative, 0.02 absolute)`); only flags as stale when a cited value
+  diverges from its closest world_state candidate beyond tolerance. Validated:
+  16/18 sampled real mismatches now skip the retry; the genuine catch (autocorr
+  cited ~10x off) still fires. **Fix 1 was INCOMPLETE — `casper:true` still fired
+  EVERY cycle.** Root cause was upstream, in `_find_closest_fresh`: Casper's lead
+  evidence derives the price-vs-EMA200 % distance ("-22.41% from EMA200"), which has
+  no literal world_state field; the old absolute match window (`±max(|stale|,1.0)`)
+  matched -22.41 to the unrelated `drawdown_median=-2.45` (~9x smaller) → retry every
+  cycle. **Fix 2 (matching gate):** (a) relative-capped plausibility gate
+  `max(0.5*max(|stale|,|cand|), 1.0)` rejects large-magnitude cross-quantity matches,
+  small-magnitude matching byte-identical; (b) no-analog now treated as FRESH, not
+  stale (both required). Verified offline on live ws `cyc_1779891312`: Casper's
+  -22.41 line → stale=False. Confirm in prod after the 20:00 UTC cycle via the
+  query below — `casper` should flip to `false`.
+- **P4 — Trim Letta threads. [PARTIALLY DEPLOYED 2026-05-27, restarted 12:44 UTC].**
+  Shipped the highest-value piece (= item 2's L1): the 6h outcome-backfill no
+  longer posts a per-agent thread message (`messages.create`) — it writes a
+  rolling 6-cycle log to a new shared read-only `recent_outcomes` block
+  (`observer._record_outcome_to_block`, attached to all 3 agents, in
+  `provision_agents` shared-block list). Removes a billable inference per agent
+  per cycle, removes the dominant removable thread-growth source, AND removes the
+  "update your self_model" prompt that fed the Casper/Balthasar self_model
+  corruption (self_model now evolves only via the 30-cycle rotation). Agents
+  still see outcomes as fresh in-context block content. Removed the council-
+  degradation backfill-notify hook (see CLAUDE.md §4 item 2 — now caught on the R0
+  path instead). STILL OPEN (lower value now): L2 per-cycle compaction, shrinking
+  the ~3.4k-token world_state block, and shortening the 30-cycle rotation cadence.
+- **P5 — Make R1 conditional. [DEPLOYED 2026-05-27, restarted 11:28 UTC; confirmed firing/skipping in logs].**
+  R1 was unconditional (always-fires for all 3 agents). A pure conflict-gate was
+  found insufficient: Casper's `regime_action` is `STAND_DOWN` in 45/46 live
+  cycles, so a chronic RECENTRE-vs-STAND_DOWN standoff makes "fire on conflict"
+  fire ~65% of cycles. Implemented the **novelty-aware** gate instead
+  (`council.py:should_run_r1` + `_r0_conflict` + `r0_position_signature`, wired in
+  `orchestrator.run_cycle` via `_prior_r0_signature`): R1 fires only when a genuine
+  position/lever conflict exists AND the R0 position triple differs from the prior
+  cycle. Frozen standoffs (identical to last cycle) and aligned cycles skip — the
+  hard-rule layer resolves both regardless. Deliberately excludes grid-state
+  conflicts (handled by hard rules). Simulated over 46 live cycles: R1 fires 11/46
+  (23%), ~76% fewer R1 calls. Skip path verified safe (resolve_consensus falls back
+  to R0 finals incl. R0 regime_action/geometry_veto; debate_record writes NULL R1
+  columns). NOT eval-covered (pipeline change, not a persona edit) — validate by
+  watching `[Round 1: firing/skipped]` log lines + `council_r1` call rate post-restart.
+
+Done when: steady-state council spend is bounded to a level the operator accepts
+for a $67 book (target to be set with operator), AND the bot is not paying
+trading-cadence council cost while parked in a non-trading state.
+
+Evidence queries (`observer.db`, reproducible anytime; `<resume>` =
+`2026-05-26T19:49`):
+- spend by agent/source: `SELECT agent, source, COUNT(*), SUM(estimated_cost_usd)
+  FROM token_usage WHERE timestamp >= '<resume>' GROUP BY agent, source;`
+- retries + debate per cycle: `SELECT timestamp, trigger, debate_triggered,
+  freshness_retries FROM debate_records WHERE timestamp >= '<resume>';`
+
+**Casper chronic STAND_DOWN — diagnosed + fixed 2026-05-27 (the grid-parking
+root cause, separate from cost).** Decision-tree replay over 38 cycles: all 38
+fired TRENDING only via condition 4(b) (`adx_neg > adx_pos`) with ADX 14.6-15.4
+(never >=20) — weak-ADX directional bias mislabeled as a trend, parking a
+grid-favourable low-vol range. Fixed: ADX>=20 floor on persona condition 4(b) +
+tightened STAND_DOWN + curated Casper self_model (which had hardened the bug into
+doctrine, incl. "grid death = successful survival"). Deployed live, no evals
+(operator declined). Full writeup in "Session 2026-05-27" of `01_CURRENT_STATE.md`.
+Watch next scheduled cycle: Casper should flip to RANGING/EXECUTE → grid un-parks
+→ first real orders.
+
+### 0a. [RESOLVED 2026-05-26] standdown loop fixed + bot re-enabled live
+
+magi.service re-enabled ~19:49 UTC 2026-05-26. Standdown loop root cause
+(stranded grid + corrupted judgment, not a hard-rule bug) diagnosed and fixed —
+full writeup in "Session 2026-05-26" of `01_CURRENT_STATE.md`. Fix added
+`world_state.grid_position` + reframed Balthasar/Casper to treat a RECENTRE on a
+stranded grid as corrective; eval-gated (Casper 0.875, Balthasar 0.778);
+Balthasar's runaway "STAND_DOWN→HALT" self_model corruption curated + thread reset.
+
+Live follow-ups still open:
+1. **Model discrepancy (⚠):** live Balthasar runs `claude-haiku-4-5` but
+   CLAUDE.md §1 and the eval factory build him on `sonnet-4-6` — the eval
+   validates a stronger model than production. Decide downgrade-vs-drift.
+   **Now also interacts with P2 (item 0):** model choice is a cost lever, so
+   resolve these together.
+2. **Memory hygiene vs cycle bursts:** 30-cycle rotation cadence couldn't keep
+   pace when the T2 burn generated ~30 extra cycles/day. Consider size-triggered
+   rotation, not just cycle-count. Overlaps P4 (item 0).
+3. **Melchior (GPT-4o) mild anchoring** (sticky verbatim self_model lead line) —
+   not currently harmful; thread compact/reset is the hygiene lever. Covered by
+   item 2 below. Casper (Gemini) does NOT anchor — leave alone.
+
+To revert to paper: `rm /root/xrp_grid/CONFIRM_LIVE` + restart (restore with
+`touch`). To stop: `systemctl stop magi.service && systemctl disable magi.service`.
+
+### 1. Rule 0d tag-emission / engine downgrade — RESOLVED 2026-05-27
+
+Original 2026-05-22 report: `cyc_1779480012` showed `hard_rule_overrides=[]`
+AND `applied_grid_action=NULL` on a cycle where Melchior=RECENTRE + peers veto,
+where rule 0d should have tagged `[REGIME_STANDDOWN]`/`[BALTHASAR_RISK_BLOCK]`.
+
+Audited 2026-05-27 — this was actually **two separate issues, both now closed**:
+
+1. **Rule-0d tag recording: NOT a bug (already fixed, stale report).** Verified
+   over 48 live cycles: when Melchior genuinely HOLDS a structural vote into the
+   hard rules (`melchior_r1_held=1`, grid_action structural at function entry) with
+   a council veto, rule 0d records the tag every time — e.g. cycles 05-25
+   13:00/11:02/10:02/09:01 all show `["[REGIME_STANDDOWN]"]`. The empty-overrides
+   cycles in the original report were correct: R1 synthesis had already shifted
+   Melchior to MAINTAIN, so `_original_grid_action` was MAINTAIN and rule 0d had
+   nothing to veto. The Invariant-1 icontract work (2026-05-24) plus the
+   `_original_grid_action`-at-entry capture closed the original race. No code change.
+
+2. **`applied_grid_action`/`applied_spacing`/`engine_clamped`/`clamp_reason` never
+   written: real gap, now FIXED.** The orchestrator comment said these were
+   "filled in later by the engine," but no write path existed — NULL in 0/48 rows.
+   Fix: `grid/engine.py:apply_magi_decision` now records what it actually applies
+   into `self.last_applied` (pure additive side-effect, no control-flow change),
+   capturing engine-level divergence — council-veto cross-check coercion,
+   empty-book-guard skips, null-geometry refusals, and spacing clamps. The
+   scheduler writes it back via new `database.update_debate_applied(cycle_id, …)`
+   after `apply_magi_decision`. Verified: compiles, DB round-trip works; populated
+   from the next live cycle onward. This is genuine engine-vs-council divergence
+   visibility (it was redundant-with-final_grid_action ONLY when the engine doesn't
+   diverge — which is exactly when there's nothing to see).
 
 ### 2. Melchior conversation-history anchoring — structural fix
 
@@ -120,10 +319,11 @@ agents over the next 10–20 cycles whether anchoring re-emerges in the
 new threads.
 
 If it does:
-- **(L1) Route observer outcome-backfill out of the message thread**
-  into a dedicated `recent_outcomes` memory block via `blocks.update()`.
-  `observer.py` currently calls `messages.create()` per outcome window
-  (1h/6h/24h × 3 agents). Halves thread-growth rate without losing context.
+- **(L1) Route observer outcome-backfill out of the message thread —
+  DONE 2026-05-27 (as P4 in item 0).** The 6h backfill now writes to the shared
+  `recent_outcomes` block (`observer._record_outcome_to_block`) instead of
+  `messages.create`. (Note: only the 6h window ever notified, not 1h/6h/24h.)
+  Removed thread growth + per-agent inference + the self_model-write prompt.
 - **(L2) Per-cycle compact for Melchior** —
   `messages.compact(mode='self_compact_sliding_window',
   sliding_window_percentage=0.5)` before each R0 call. Bounds anchoring
@@ -231,6 +431,112 @@ worth exploring after live trading is stable.
 ### 11. CHANGELOG.md
 Long deferred. Re-evaluate when there's a stable cadence of changes
 worth logging separately from the handoff docs.
+
+## Engineering / non-blocking (added 2026-05-24)
+
+Low priority. Do not promote above Highest Priority. All deferred.
+
+### Measure cold startup time
+Restart of `magi.service` has crept to ~60s. Add timing markers around the
+major startup sections (imports done, Kraken balance fetched, WS connected,
+Letta config validator done, world_state built, scheduler ready) and log the
+deltas at INFO. Establish a baseline; revisit only if it crosses ~90s.
+
+### Rename `MAGI_HOURS_EST` → `MAGI_HOURS_UTC`
+(and any related EST-labeled variables). Misleading since inception — the
+droplet runs UTC and the hours are UTC hours. Cosmetic; defer until
+`scheduler.py` is being edited for another reason.
+
+### Expand icontract invariant coverage
+First pass (`enforce_hard_rules`, 2 invariants) landed 2026-05-24. Watch for
+≥30 days. If the invariants prove their worth with no false positives, expand
+to `apply_magi_decision` and `_build_debate_record` — but only with invariants
+grounded in observed or specifically anticipated bug patterns, never
+architectural intuition.
+
+### Lore-relevant module/concept naming pass
+Operator wants a finishing pass applying Judeo-Christian / Kabbalah-derived
+names (mostly Tree-of-Life Sefirot) to architectural layers — e.g. Gevurah for
+the hard-rules layer, Yesod for the orchestrator concept, Metatron for the
+observer/scribe layer, Tikkun for memory rotation. Selective, not a full theme
+— only where the metaphor genuinely clarifies the layer's function. Naming
+table to be approved before any rename touches code.
+
+### Sefirot-themed module renames (deferred from 2026-05-24)
+
+Operator wants Kabbalah-derived names applied at the .py file level
+for layers where the metaphor genuinely clarifies the layer's function.
+Deferred because file renames require careful grep-driven import-site
+updates across the codebase, atomic commit, and a verified service
+restart — not session-end work.
+
+Strong candidates (metaphor clearly earns it):
+
+- observer.py → metatron.py — Metatron is the scribe of heaven in
+  Jewish mysticism; observer.py records every cycle's outcomes to
+  debate_records, computes 1h/6h/24h backfills, sends outcomes to
+  agent threads. Direct functional fit.
+- magi/memory_lifecycle.py → magi/tikkun.py — Tikkun olam is the
+  Lurianic concept of ongoing repair/restoration by gathering
+  scattered divine sparks. memory_lifecycle distills 30 cycles of
+  agent thread chaos into permanent self_model patterns, evicting
+  weak ones, preserving wisdom. Genuinely matches.
+
+Lower-priority companion (internal constants in orchestrator.py):
+- HARD_RULES → GEVURAH_RULES (the rule dict)
+- _CANONICAL_OVERRIDE_TAGS → _GEVURAH_TAGS (the icontract canonical set)
+  Gevurah is the Sefirah of restriction/judgment — the "no, hold back"
+  force. Matches what enforce_hard_rules does (restrict the council's
+  expansive will when survival or precedence requires).
+
+Docs-only references (no code rename, conceptual commentary in
+CLAUDE.md only):
+- Yesod for orchestrator (channel/foundation that gathers and transmits)
+- Raziel for the freshness validator (guardian of true record)
+
+Execution plan when picked up:
+1. Single Claude Code session.
+2. Per file rename: git grep for every reference to old name, present
+   full list for operator approval, atomic edit + git mv (preserves
+   history).
+3. Restart magi.service + magi-dashboard.service, verify clean startup
+   and ADAM init lines for the new module name.
+4. Land each file rename as a separate commit so a single revert is
+   targeted if anything goes wrong.
+5. Constant renames (GEVURAH_RULES, _GEVURAH_TAGS) ride along with the
+   icontract orchestrator.py work or land as their own small commit.
+6. Update CLAUDE.md with a "Conceptual layer naming" subsection
+   documenting the full Sefirot mapping including the docs-only ones.
+7. Sync to magi-docs.
+
+Prerequisite: at least 24h of clean live operation since the most
+recent code change, to ensure the renames aren't bundling onto a
+not-yet-stabilized state.
+
+### Reconsider startup-cycle behavior in scheduler
+
+scheduler.run_magi_cycle fires on every startup (per design:
+"cycles run every 4h plus startup and manual triggers"). This made
+sense early in development when restarts were rare deploys, but
+during iteration-heavy sessions it can add $3-5 of unnecessary
+Letta cost per day (each restart = ~$0.30 cycle). Open question:
+should startup just resume the existing schedule (next cycle at
+the next 4h slot) rather than firing immediately?
+
+Arguments for current behavior: catches state drift after
+downtime; provides immediate signal that scheduler is healthy
+end-to-end; the first cycle is the one most likely to surface
+restart-related bugs.
+
+Arguments for change: cost discipline during dev iteration;
+restarts on a stable system aren't carrying new information;
+ADAM/icontract already surface startup health without needing a
+cycle to fire.
+
+Possible middle ground: env-flag opt-out for development
+restarts (e.g. MAGI_SKIP_STARTUP_CYCLE=1 in .env when iterating,
+removed for production). Defer until restart-cost has bitten in
+a way that justifies the design change.
 
 ## Done 2026-05-22 (do not re-do)
 

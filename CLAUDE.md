@@ -22,7 +22,12 @@ in `.env` plus the `CONFIRM_LIVE` gate file; remove either + restart to
 revert to paper) — with a three-agent LLM council on Letta Cloud advising
 structural decisions. The
 council is Casper (Gemini-3-flash-preview, regime), Melchior (GPT-4o, grid
-microstructure), Balthasar (claude-sonnet-4-6, risk/survival). Current
+microstructure), Balthasar (risk/survival). NOTE (2026-05-26): live Balthasar
+runs `claude-haiku-4-5`, not the `claude-sonnet-4-6` this line long stated —
+and the eval factory still builds him on sonnet, so evals validate a stronger
+model than production. Unresolved: intended downgrade or drift? See
+`01_CURRENT_STATE.md` Session 2026-05-26 and `02_NEXT_BUILD_TASKS.md` item 0.
+Current
 capital under management is ~$67 (≈14 XRP + ~$47 USD). The goal is a
 profitable adaptive grid: net-positive PnL after Kraken tier-0 fees
 (maker 0.25%, taker 0.40%) with >50% directional accuracy on the bot's
@@ -40,13 +45,18 @@ stated goal.
 Three layers, complementary by design.
 
 **Layer 1 — Council judgment.** Three Letta Cloud agents vote
-independently each cycle (Round 0). When the `CONFLICT_MATRIX` in
-`magi/council.py` flags an action incompatibility, Round 1 fires and the
-two named agents challenge each other. The council exists for cases
-where multiple defensible answers exist — regime classification, when to
-recentre vs. tighten, when concentration risk has crossed a judgment
-threshold. Judgment is delegated here precisely because it cannot be
-encoded as a rule without losing nuance.
+independently each cycle (Round 0). Round 1 is a synthesis pass where each
+agent revises after seeing peers' R0; it is CONDITIONAL (2026-05-27) —
+`magi/council.py:should_run_r1` fires it only when a genuine position/lever
+conflict exists AND that conflict is new vs. the prior cycle. Aligned cycles
+and frozen standoffs skip R1 (the hard-rule layer resolves both regardless),
+which bounds council cost. (History: R1 was conflict-gated → "always-fires"
+2026-05-22 → novelty-gated 2026-05-27. The old `CONFLICT_MATRIX`/`detect_conflict`
+remain in `council.py` but are not the gate; `_r0_conflict` is.) The council
+exists for cases where multiple defensible answers exist — regime
+classification, when to recentre vs. tighten, when concentration risk has
+crossed a judgment threshold. Judgment is delegated here precisely because it
+cannot be encoded as a rule without losing nuance.
 
 **Layer 2 — Hard rules.** `magi/orchestrator.py:enforce_hard_rules`
 applies Python-enforced overrides on top of council consensus. These
@@ -172,6 +182,16 @@ re-derive these.
   `get_closed_orders` (ClosedOrders) and marks fills with Kraken's real
   price/fee. Inventory is always truth-of-record via `get_balances()`,
   never recomputed from the fee constants.
+- **Restart cost.** Each magi.service restart triggers a startup MAGI
+  cycle, which costs roughly $0.30 in Letta credits (Casper ~$0.05 +
+  Melchior ~$0.13 + Balthasar ~$0.10 at current cadence). Restarts are
+  not free. During iteration-heavy sessions, bundle code changes and
+  restart once at the end rather than restarting after each surgical
+  edit. If verification only requires confirming a code-path change
+  loaded (e.g. ADAM init lines, new log severity), the journal at
+  startup is sufficient — no need to wait for or trigger a cycle.
+  Reserve restart-then-cycle verification for changes that actually
+  need to exercise the council pipeline.
 - **Dashboard auth** is app-side: a Flask signed-cookie session in
   `dashboard.py` (`/login`, `/logout`, `before_request` gate; password in
   `.env:DASHBOARD_PASSWORD`, `SECRET_KEY` in `.env`; 365-day cookie).
@@ -208,14 +228,17 @@ re-derive these.
      trustworthy geometry. Edge-triggered alerts fire only on
      tier-up transitions; tier persisted in
      `system_state['last_degraded_tier']` (values `"0"` / `"1"` / `"2"`).
-  2. **Observer backfill-notify alerting**: `_backfill_failure_streak`
-     in `observer.py` (module-level dict) counts consecutive
-     `client.agents.messages.create` failures per agent. Threshold = 3
-     — only the 3rd consecutive failure fires `insert_alert` with
-     `severity='warn'`, `category='backfill_notify_failed'`. Resets to 0
-     on any success (silent — no "recovered" ping). Process restart
-     resets counters to {} (acceptable; streak rebuilds on real
-     failure patterns).
+  2. **Observer backfill-notify alerting — REMOVED 2026-05-27 (P4).** This
+     hook counted consecutive `client.agents.messages.create` failures from
+     the 6h outcome-notify. That notify was retired: the 6h outcome now writes
+     to the shared read-only `recent_outcomes` block
+     (`observer._record_outcome_to_block`) instead of posting a per-agent
+     thread message — no inference cost, no thread bloat, no "update your
+     self_model" prompt (which had fed self_model corruption). With no
+     `messages.create` in the backfill path there is no streak to count;
+     `_backfill_failure_streak` and `category='backfill_notify_failed'` are
+     gone. Agent unreachability is still caught on the R0 path
+     (`_check_steps_for_alerts` / `_alert_exception` in `council.send_round_0`).
   3. **Memory-rotation pre-gate**: in
      `magi/memory_lifecycle.py:rotate_agent_memory`, step 0 (before
      snapshot) counts SAFE_DEFAULTS in the last 30 R0 rows for the
@@ -271,6 +294,17 @@ re-derive these.
   `debate_records`, where degraded = `conviction=0.0 AND crux LIKE
   '(no response)%'` (same SAFE_DEFAULTS fingerprint as `council.py`).
   API: `/api/agent_health`.
+- **Hard-rule precedence ladder** (added 2026-05-24).
+  `enforce_hard_rules` runs its rules in a fixed order, and a LATER rule may
+  overwrite an EARLIER rule's `grid_action` — survival/integrity rules outrank
+  council judgment, by design, not a bug. Order: council-degradation freeze →
+  RECENTRE block (0a–0c) → council veto (0d → MAINTAIN) → kill switch /
+  daily-loss / alloc-skew (→ HALT) → USD/XRP buffer floors → grid-degenerate
+  (→ RECENTRE) → PAUSE_INVALID → geometry-injection / no-acceptable-variant
+  (→ GRID_PAUSE). Canonical detail lives in the precedence-ladder paragraph in
+  the `enforce_hard_rules` docstring (`magi/orchestrator.py`). This is the
+  relationship icontract Invariant 1 models via `_RULE_0D_SUPERSEDING_TAGS`
+  (see Session 2026-05-24 in `01_CURRENT_STATE.md`).
 
 ## 5. Operating discipline
 

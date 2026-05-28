@@ -341,6 +341,17 @@ def run_magi_cycle(trigger='scheduled'):
                     log.error(f"Shadow eval error: {e}")
 
             engine.apply_magi_decision(consensus)
+            # Record what the engine actually applied back onto the debate_records
+            # row (distinct from final_grid_action — captures engine-level
+            # divergence: cross-check coercion, empty-book skips, spacing clamps).
+            cyc_id = consensus.get('cycle_id')
+            applied = getattr(engine, 'last_applied', None)
+            if cyc_id and applied:
+                try:
+                    from database import update_debate_applied
+                    update_debate_applied(cyc_id, **applied)
+                except Exception as e:
+                    log.warning(f"applied-action write-back failed for {cyc_id}: {e}")
             from database import mark_magi_decision_applied
             did = result.get('decision_id') if result else None
             if did is not None:

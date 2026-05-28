@@ -1146,6 +1146,17 @@ class GridEngine:
         regime_action = consensus.get('regime_action') or 'EXECUTE'
         geometry_veto = consensus.get('geometry_veto') or 'PROCEED'
 
+        # What the engine ACTUALLY applies, recorded back to debate_records by
+        # the scheduler (database.update_debate_applied). Defaults to the council
+        # decision; the divergence points below override it. Pure side-effect —
+        # no control-flow change.
+        self.last_applied = {
+            'applied_grid_action': grid_action,
+            'applied_spacing': None,
+            'engine_clamped': 0,
+            'clamp_reason': None,
+        }
+
         if grid_action in ('RECENTRE', 'TIGHTEN', 'WIDEN'):
             engine_council_tags = []
             if regime_action == 'DEFER_STRUCTURAL':
@@ -1164,6 +1175,8 @@ class GridEngine:
                     engine_council_tags, grid_action,
                 )
                 grid_action = 'MAINTAIN'
+                self.last_applied['applied_grid_action'] = 'MAINTAIN'
+                self.last_applied['clamp_reason'] = 'engine_council_veto_crosscheck'
 
         if grid_action == 'HALT' or risk_action == 'HALT':
             log.warning("MAGI HALT — cancelling all orders")
@@ -1239,6 +1252,11 @@ class GridEngine:
                           f"risk={risk_action} applied"
                 )
                 guard_tripped = True
+
+        if guard_tripped:
+            # Rebuild skipped by the empty-book guard — grid left as-is.
+            self.last_applied['applied_grid_action'] = 'MAINTAIN'
+            self.last_applied['clamp_reason'] = 'empty_book_guard'
 
         if not guard_tripped:
             if grid_action in ('RECENTRE', 'TIGHTEN', 'WIDEN'):
@@ -1333,6 +1351,10 @@ class GridEngine:
                             f"{clamped}"
                         )
                     new_spacing = clamped
+                    self.last_applied['applied_spacing'] = clamped
+                    if abs(clamped - geom_spacing) > 1e-9:
+                        self.last_applied['engine_clamped'] = 1
+                        self.last_applied['clamp_reason'] = 'spacing_bounds'
                 else:
                     log.error(
                         "MAGI %s reached engine with null geometry "
@@ -1342,6 +1364,8 @@ class GridEngine:
                         "grid intact this cycle.",
                         grid_action, geom_spacing,
                     )
+                    self.last_applied['applied_grid_action'] = 'MAINTAIN'
+                    self.last_applied['clamp_reason'] = 'null_geometry_refused'
                     return  # exit apply_magi_decision without touching the book
 
                 # Ensure centre is not so far below market that all sells will be rejected.

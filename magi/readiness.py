@@ -33,7 +33,7 @@ from datetime import date, datetime, timezone
 from typing import Optional
 
 from database import get_conn
-from grid.pnl import _fifo_match
+from grid.pnl import _fifo_match, _is_live_order_id
 
 
 # ── Constants ────────────────────────────────────────────────────────
@@ -57,8 +57,11 @@ def _utc_now() -> datetime:
 
 
 def _all_fills(conn, ts_floor: Optional[str] = None) -> list:
-    """Time-ordered list of filled grid_orders. Optional floor on
-    COALESCE(filled_at, timestamp) so we can scope to a window."""
+    """Time-ordered list of filled LIVE grid_orders. Optional floor on
+    COALESCE(filled_at, timestamp) so we can scope to a window. Pre-live paper
+    fills are excluded — the live-readiness gates judge real-capital
+    performance, and including paper inflates volume gates and flips the net-PnL
+    gate green on paper profit."""
     where = "WHERE status='filled'"
     params: tuple = ()
     if ts_floor:
@@ -71,7 +74,7 @@ def _all_fills(conn, ts_floor: Optional[str] = None) -> list:
         f"ORDER BY COALESCE(filled_at, timestamp) ASC",
         params,
     ).fetchall()
-    return [dict(r) for r in rows]
+    return [dict(r) for r in rows if _is_live_order_id(dict(r).get('order_id'))]
 
 
 def _trip_sell_ts(trip: dict, fills_by_id: dict) -> Optional[datetime]:

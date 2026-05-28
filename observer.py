@@ -1,7 +1,6 @@
 import os
 import time
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -26,15 +25,6 @@ COINBASE_REST = "https://api.coinbase.com/api/v3/brokerage"
 
 # Lazy-initialised exchange instance for XRP candle fetches when EXCHANGE != "coinbase"
 _xrp_exchange = None
-
-# Consecutive-failure streak counter for the 6h backfill-notify path
-# (_notify_agents_6h). Keyed by agent_id. On the 3rd consecutive failure
-# we surface a warn-severity alert; backfill is best-effort and single
-# transients are too noisy to alert on. Resets on success. Resets to {}
-# on process restart — acceptable, the streak rebuilds on real failure
-# patterns and restarts are rare.
-_BACKFILL_FAILURE_STREAK_THRESHOLD = 3
-_backfill_failure_streak: dict = {}
 
 
 def get_candles_coinbase(product_id, granularity, limit=300):
@@ -266,11 +256,13 @@ def _compute_window_metrics(cycle_start, cycle_end):
     """
     Return (fills_count, realized_pnl) for fills with filled_at (or timestamp
     fallback) in [cycle_start, cycle_end). Realized P&L is FIFO-matched across
-    the FULL fills history (so sells in window can match buys from before the
-    window), then summed only for the sells whose fill time fell within window.
+    the full LIVE fills history (so sells in window can match buys from before
+    the window), then summed only for the sells whose fill time fell within
+    window. Pre-live paper fills are excluded — otherwise paper sells drain the
+    FIFO buy queue (incl. live buys) and every live sell attributes to $0.
     """
     from database import get_conn
-    from grid.pnl import _fifo_match
+    from grid.pnl import _fifo_match, _is_live_order_id
 
     conn = get_conn()
     rows = conn.execute('''
@@ -284,6 +276,8 @@ def _compute_window_metrics(cycle_start, cycle_end):
     fills = []
     for r in rows:
         f = dict(r)
+        if not _is_live_order_id(f.get('order_id')):
+            continue
         ft = f.get('filled_at') or f.get('timestamp')
         f['_dt'] = _parse_iso_safe(ft)
         if f['_dt'] is None:
@@ -330,119 +324,66 @@ def _get_skew_at_or_before(timestamp_dt):
     return None
 
 
-def _build_outcome_message(agent_id, cycle_id, r0_row, fills_count,
-                            pnl, skew_delta, grid_alive):
-    """Per-agent outcome notification text. Frames the agent's r0 call by
-    its appropriate role term (regime / grid_action / risk_action)."""
-    role_term = {
-        'casper':    'regime',
-        'melchior':  'grid_action',
-        'balthasar': 'risk_action',
-    }[agent_id]
-    position   = r0_row.get(f"{agent_id}_r0_position") or "?"
-    conviction = r0_row.get(f"{agent_id}_r0_conviction") or 0.0
-    crux       = r0_row.get(f"{agent_id}_r0_crux") or "(no crux)"
-    skew_str   = f"{float(skew_delta):+.3f}" if skew_delta is not None else "n/a"
-    return (
-        f"Outcome for cycle {cycle_id} (your call: {role_term}={position}, "
-        f"conviction={float(conviction):.2f}, crux=\"{crux}\"): over the next "
-        f"6 hours the grid produced {fills_count} fills with P&L "
-        f"${float(pnl):.4f} and skew_delta {skew_str}. "
-        f"Grid alive: {'yes' if grid_alive else 'no'}. Consider whether to "
-        f"update your self_model based on this outcome."
-    )
+_RECENT_OUTCOMES_KEEP = 6  # rolling window of cycles in the recent_outcomes block
 
 
-def _send_outcome_to_agent(client, agent_id, letta_agent_id, message):
-    """Send the outcome notification as a USER message. Returns (ok, err)."""
-    try:
-        client.agents.messages.create(
-            letta_agent_id,
-            messages=[{"role": "user", "content": message}],
-            timeout=30.0,
-        )
-        return True, None
-    except Exception as e:
-        return False, repr(e)
+def _record_outcome_to_block(cycle_id, fills_count, pnl, skew_delta, grid_alive):
+    """Append this cycle's realised 6h outcome to the shared 'recent_outcomes'
+    Letta block (rolling last _RECENT_OUTCOMES_KEEP, newest first).
 
-
-def _notify_agents_6h(cycle_id, fills_count, pnl, skew_delta, grid_alive):
-    """Notify all three Letta agents in parallel with per-agent error isolation."""
-    from database import get_conn, get_letta_agent_id
-
+    Replaces the former per-agent thread-message notify (_notify_agents_6h).
+    Rationale (P4, 2026-05-27): a block write costs NO agent inference and does
+    not grow the agent message threads — the dominant council-cost / context-
+    bloat driver (80-114k-token inputs). It also carries NO "consider updating
+    your self_model" prompt; that per-cycle invitation drove self_model
+    corruption (Casper "grid-death=success", Balthasar runaway HALT). self_model
+    now evolves only via the controlled 30-cycle memory rotation. Agents still
+    see recent outcomes: the block is in-context, read fresh each cycle,
+    alongside world_state's last_fill / position_state. Non-fatal — the DB
+    outcome backfill (update_debate_outcomes) has already persisted the metrics
+    before this is called, so a block-write failure loses nothing of record."""
+    from database import get_conn
     client = _get_letta_client()
     if client is None:
         return
-
-    conn = get_conn()
-    r0_row = conn.execute(
-        "SELECT casper_r0_position, casper_r0_conviction, casper_r0_crux,"
-        " melchior_r0_position, melchior_r0_conviction, melchior_r0_crux,"
-        " balthasar_r0_position, balthasar_r0_conviction, balthasar_r0_crux"
-        " FROM debate_records WHERE cycle_id=?",
-        (cycle_id,)
-    ).fetchone()
-    conn.close()
-    if not r0_row:
-        log.warning(f"backfill: cycle {cycle_id} missing from debate_records — "
-                    "skipping agent notifications")
-        return
-    r0_row = dict(r0_row)
-
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = {}
-        for agent_id in ('casper', 'melchior', 'balthasar'):
-            letta_id = get_letta_agent_id(agent_id)
-            if not letta_id:
-                log.warning(f"backfill: no letta_agent_id for {agent_id}")
-                continue
-            msg = _build_outcome_message(
-                agent_id, cycle_id, r0_row, fills_count, pnl, skew_delta, grid_alive
-            )
-            futures[pool.submit(
-                _send_outcome_to_agent, client, agent_id, letta_id, msg
-            )] = agent_id
-
-        for fut, a in futures.items():
-            try:
-                ok, err = fut.result()
-            except Exception as e:
-                ok, err = False, repr(e)
-            if ok:
-                log.info(f"backfill: notified {a} of cycle {cycle_id} 6h outcome")
-                # Silent reset — operator does not need a "recovered" ping.
-                if _backfill_failure_streak.get(a):
-                    _backfill_failure_streak[a] = 0
-            else:
-                log.warning(f"backfill: failed to notify {a} of {cycle_id}: {err}")
-                _backfill_failure_streak[a] = _backfill_failure_streak.get(a, 0) + 1
-                if _backfill_failure_streak[a] == _BACKFILL_FAILURE_STREAK_THRESHOLD:
-                    # Only fire on the threshold-crossing failure. Subsequent
-                    # failures (4th, 5th, ...) don't re-alert; dedup window
-                    # inside insert_alert would also block them, but this
-                    # check makes the intent explicit.
-                    try:
-                        from database import insert_alert
-                        # Strip raw exception payload — keep only the type
-                        # name + truncated repr. Avoids leaking provider
-                        # 402 payloads or other sensitive substrings into
-                        # magi_alerts.message.
-                        err_str = (err or '')[:200]
-                        insert_alert(
-                            severity='warn',
-                            category='backfill_notify_failed',
-                            agent_id=a,
-                            message=(
-                                f"6h backfill-notify failed {_BACKFILL_FAILURE_STREAK_THRESHOLD}"
-                                f" consecutive times for {a} on cycle {cycle_id}. "
-                                f"Latest error: {err_str}"
-                            ),
-                        )
-                    except Exception as alert_err:
-                        log.warning(
-                            "backfill: insert_alert for streak failed: %r",
-                            alert_err,
-                        )
+    try:
+        conn = get_conn()
+        row = conn.execute(
+            "SELECT timestamp, casper_r0_position, melchior_r0_position, "
+            "balthasar_r0_position FROM debate_records WHERE cycle_id=?",
+            (cycle_id,),
+        ).fetchone()
+        conn.close()
+        if not row:
+            log.warning(f"outcome-log: cycle {cycle_id} missing from debate_records")
+            return
+        row = dict(row)
+        ts = (row.get("timestamp") or "")[:16]
+        skew_str = f"{float(skew_delta):+.3f}" if skew_delta is not None else "n/a"
+        line = (
+            f"{ts} {cycle_id}: casper={row.get('casper_r0_position') or '?'} "
+            f"melchior={row.get('melchior_r0_position') or '?'} "
+            f"balthasar={row.get('balthasar_r0_position') or '?'} "
+            f"-> 6h: {fills_count} fills, ${float(pnl):.4f}, "
+            f"skew_delta {skew_str}, grid_alive {'yes' if grid_alive else 'no'}"
+        )
+        blk = next(iter(client.blocks.list(label='recent_outcomes', limit=1)), None)
+        if blk is None:
+            log.warning("outcome-log: recent_outcomes block not found — skipping")
+            return
+        prev = [
+            l for l in (blk.value or "").splitlines()
+            if l.strip()
+            and not l.startswith("RECENT GRID OUTCOMES")
+            and not l.startswith("(no outcomes")
+        ]
+        kept = ([line] + prev)[:_RECENT_OUTCOMES_KEEP]
+        header = ("RECENT GRID OUTCOMES (newest first; informational context — "
+                  "NOT an instruction to edit self_model):")
+        client.blocks.update(blk.id, value=header + "\n" + "\n".join(kept))
+        log.info(f"outcome-log: recorded {cycle_id} 6h outcome to recent_outcomes block")
+    except Exception as e:
+        log.warning(f"outcome-log: failed to record {cycle_id} to block: {e!r}")
 
 
 def backfill_outcomes():
@@ -500,7 +441,7 @@ def backfill_outcomes():
                         f"pnl=${pnl_value:.4f} skew_delta={skew_delta} "
                         f"grid_alive={grid_alive}"
                     )
-                    _notify_agents_6h(
+                    _record_outcome_to_block(
                         cycle_id, fills_count, pnl_value,
                         skew_delta if skew_delta is not None else 0.0,
                         grid_alive,
@@ -567,6 +508,39 @@ def _ws_rest_divergence_check(rest_xrp_1h: list,
                       float(latest.get('volume') or 0))
 
 
+def _resample_6h_from_1h(candles_1h):
+    """Bucket 1h candle dicts into 6h OHLC dicts. Fallback for when the exchange
+    SIX_HOUR fetch flakes (a separate Kraken OHLC call that intermittently
+    returns []), which nulled roc_6h and starved Casper's regime call. The 1h
+    bars are already in hand this cycle, so resampling them is free and removes
+    the second-fetch failure point. Mirrors KrakenExchange SIX_HOUR bucketing."""
+    buckets = {}
+    for c in candles_1h or []:
+        try:
+            dt = datetime.fromisoformat(str(c.get('timestamp')).replace('Z', '+00:00'))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            epoch = int(dt.timestamp())
+        except Exception:
+            continue
+        buckets.setdefault(epoch // (6 * 3600), []).append((epoch, c))
+    out = []
+    for key in sorted(buckets):
+        bars = [c for _, c in sorted(buckets[key], key=lambda x: x[0])]
+        out.append({
+            'timestamp': datetime.fromtimestamp(key * 6 * 3600, tz=timezone.utc).isoformat(),
+            'open':   float(bars[0]['open']),
+            'high':   max(float(b['high']) for b in bars),
+            'low':    min(float(b['low']) for b in bars),
+            'close':  float(bars[-1]['close']),
+            'volume': sum(float(b.get('volume') or 0) for b in bars),
+        })
+    # Drop incomplete trailing bucket (fewer than 6 hourly bars)
+    if out and len(buckets[sorted(buckets)[-1]]) < 6:
+        out = out[:-1]
+    return out
+
+
 def poll_cycle():
     """One full data collection cycle."""
     log.info("Poll cycle starting")
@@ -574,6 +548,16 @@ def poll_cycle():
     # Fetch candles — XRP from configured exchange, BTC always from Coinbase
     xrp_1h = get_candles_xrp("ONE_HOUR", 300)
     xrp_6h = get_candles_xrp("SIX_HOUR", 100)
+    if len(xrp_6h) < 7:
+        # SIX_HOUR fetch flaked — resample from the 1h bars already fetched so
+        # roc_6h stays populated (else Casper's regime call loses its momentum
+        # signal). 7 = ROC window (6) + 1.
+        resampled = _resample_6h_from_1h(xrp_1h)
+        log.warning(
+            f"6h candle fetch returned {len(xrp_6h)} bars — "
+            f"resampling {len(resampled)} from 1h fallback"
+        )
+        xrp_6h = resampled
     xrp_1d = get_candles_xrp("ONE_DAY", 300)
     btc_1d = get_candles_coinbase("BTC-USD", "ONE_DAY", 300)
 

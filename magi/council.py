@@ -508,15 +508,32 @@ def _walk_ws_path_value_pairs(d: Optional[dict]) -> list:
     return pairs
 
 
+# Match-plausibility gate for `_find_closest_fresh`. A world_state candidate
+# only counts as the field a cited number is a (possibly drifted) copy OF when
+# it is in the same ballpark — within `_FRESHNESS_MATCH_REL` of the larger
+# magnitude, OR within `_FRESHNESS_MATCH_ABS_FLOOR` absolute units (so tiny
+# near-zero fields still match). This rejects spurious CROSS-QUANTITY matches:
+# Casper's lead evidence DERIVES "-22.41% from EMA200" from raw ema_200; that
+# figure has no real analog, but the old absolute-only gate (±|stale|) silently
+# matched it to an unrelated small stat (drawdown_median -2.45, ~9x smaller) and
+# fired a full ~85k-token retry EVERY cycle. The ABS_FLOOR (1.0) preserves the
+# genuine small-magnitude anchoring catches (e.g. autocorr cited ~10x off a
+# ~0.02 field stays inside the window and is still flagged).
+_FRESHNESS_MATCH_REL = 0.5
+_FRESHNESS_MATCH_ABS_FLOOR = 1.0
+
+
 def _find_closest_fresh(stale_str: str, ws_pairs: list) -> tuple:
-    """Given a stale numeric value string and the path-aware world_state
+    """Given a cited numeric value string and the path-aware world_state
     pairs from `_walk_ws_path_value_pairs`, return
-    (correct_value_2dp_str, dotted_path) for the numerically closest
-    candidate. Returns (None, None) when no candidate is within a
-    plausible distance — defined as `abs(stale - cand) <= max(|stale|, 1.0)`,
-    i.e. roughly within the same order of magnitude OR within 1.0
-    absolute units of zero. This guards against claiming a tiny
-    `vwap_dev_pct` is "the correct value" for a confabulated price.
+    (closest_value_2dp_str, dotted_path) for the numerically closest
+    candidate — but ONLY when that candidate is plausibly the same quantity
+    the cited number is a (drifted) copy of. Plausible means
+    `abs(stale - cand) <= max(_FRESHNESS_MATCH_REL * max(|stale|, |cand|),
+    _FRESHNESS_MATCH_ABS_FLOOR)`. Returns (None, None) otherwise — including
+    for DERIVED figures with no real analog (e.g. a "% from EMA200" distance),
+    which must NOT be matched to an unrelated small stat and treated as stale.
+    Callers treat a (None, None) result as 'fresh', not as a hallucination.
     """
     try:
         stale_val = float(stale_str)
@@ -539,9 +556,32 @@ def _find_closest_fresh(stale_str: str, ws_pairs: list) -> tuple:
 
     if best_path is None or best_val is None:
         return None, None
-    if best_dist > max(abs(stale_val), 1.0):
+    plausible = max(_FRESHNESS_MATCH_REL * max(abs(stale_val), abs(best_val)),
+                    _FRESHNESS_MATCH_ABS_FLOOR)
+    if best_dist > plausible:
         return None, None
     return f"{best_val:.2f}", best_path
+
+
+# Freshness materiality band. A cited number only counts as "stale" when it
+# differs from its closest world_state candidate by MORE than this tolerance.
+# Cosmetic precision/transcription drift — e.g. 39.41 vs 39.39, 21.67 vs 21.60,
+# a static reference stat cited at slightly wrong precision — is NOT staleness
+# and must not trigger a full ~80-90k-token retry. Calibrated against 7 days of
+# [FRESHNESS_FAIL] logs: ~67/69 historical fails were sub-5% drift on
+# decision-irrelevant evidence numbers; the genuine catches (e.g. autocorr_1h
+# cited ~10x off — real model anchoring) sit far outside this band. ABS_FLOOR
+# keeps the relative test from collapsing on near-zero-magnitude fields.
+_FRESHNESS_REL_TOL = 0.05
+_FRESHNESS_ABS_FLOOR = 0.02
+
+
+def _within_freshness_tolerance(cited: float, correct: float) -> bool:
+    """True when `cited` sits close enough to its nearest world_state
+    candidate that the gap is cosmetic precision drift, not decision-relevant
+    staleness — in which case a corrective retry would only burn credits."""
+    return abs(cited - correct) <= max(_FRESHNESS_REL_TOL * abs(correct),
+                                       _FRESHNESS_ABS_FLOOR)
 
 
 def _validate_r0_freshness(agent_id: str, r0_response: Optional[dict],
@@ -550,10 +590,11 @@ def _validate_r0_freshness(agent_id: str, r0_response: Optional[dict],
     current world_state. Returns
         {"stale": bool, "mismatches": [...], "checked": int}
     where each entry in `mismatches` is a 3-tuple
-        (stale_value_str, correct_value_str_or_None, field_path_or_None).
-    `correct_value_str` and `field_path` are `None` when no plausible
-    candidate exists in the current world_state (i.e. the agent
-    hallucinated a value with no analog).
+        (stale_value_str, correct_value_str, field_path).
+    A cited number with no plausible same-ballpark candidate in world_state
+    is treated as FRESH (skipped, not flagged) — it is far more likely a
+    derived/external figure than a stale copy of a tracked field. Mismatches
+    therefore always carry a non-None `correct_value_str`/`field_path`.
 
     A float counts as fresh if its 2-decimal-precision form (or its raw
     string form) appears as a value anywhere in the world_state. Evidence
@@ -596,6 +637,24 @@ def _validate_r0_freshness(agent_id: str, r0_response: Optional[dict],
         if target_2dp in fresh_strs or f_str in fresh_strs:
             continue
         correct_val, field_path = _find_closest_fresh(f_str, ws_pairs)
+        # No plausible same-ballpark analog → treat as FRESH, not stale. A
+        # cited number with no nearby world_state field is far more likely a
+        # DERIVED or external figure (e.g. the "% from EMA200" distance Casper
+        # computes from raw ema_200) than a stale copy of a tracked field — a
+        # stale copy, by definition, drifted FROM a field whose current value
+        # is still nearby. The old behaviour flagged no-analog as a
+        # hallucination and fired a full ~85k-token retry on Casper EVERY
+        # cycle. Skip it.
+        if correct_val is None:
+            continue
+        # Materiality band: a cited value within tolerance of its closest
+        # world_state candidate is cosmetic precision drift, not staleness —
+        # do not burn a retry on it. Only genuine divergence is treated as stale.
+        try:
+            if _within_freshness_tolerance(f_val, float(correct_val)):
+                continue
+        except (TypeError, ValueError):
+            pass
         mismatches.append((f_str, correct_val, field_path))
 
     return {
@@ -1321,6 +1380,87 @@ def send_round_1_synthesis(agent_id: str, cycle_id: str,
         return {"_r1_parse_error": last_parse_error
                 or "no parseable R0-schema JSON in R1 response"}
     return parsed
+
+
+def _r0_conflict(round_0: dict) -> tuple:
+    """Genuine cross-agent disagreement in the R0 votes that an R1 synthesis
+    pass could productively resolve. Returns (conflict: bool, reason: str).
+
+    Deliberately scoped to POSITION/lever incompatibility only. Grid-state
+    conditions (one-sided book, no-fills-for-Nh, pause-while-empty — the old
+    CONFLICT_MATRIX rules 5-8) are NOT treated as conflicts here: the
+    hard-rule layer enforces the corrective action regardless of what R1
+    produces, and firing R1 on them only spends council credits during the
+    parked periods we are trying to economize. The stranded-grid awareness
+    those rules once routed through R1 now reaches each agent directly via
+    world_state.grid_position in R0 (added 2026-05-26)."""
+    casper    = round_0.get("casper")    or {}
+    melchior  = round_0.get("melchior")  or {}
+    balthasar = round_0.get("balthasar") or {}
+
+    grid          = melchior.get("position")
+    risk          = balthasar.get("position")
+    regime        = casper.get("position")
+    regime_action = casper.get("regime_action")
+    geometry_veto = balthasar.get("geometry_veto")
+    structural    = grid in ("RECENTRE", "TIGHTEN", "WIDEN")
+
+    # (1) Melchior proposes a structural change and a peer opposes it — the
+    # case R1 exists to reconcile.
+    if structural:
+        if regime_action in ("DEFER_STRUCTURAL", "STAND_DOWN"):
+            return True, f"{grid} opposed by casper regime_action={regime_action}"
+        if geometry_veto in ("HOLD_GEOMETRY", "RISK_BLOCK"):
+            return True, f"{grid} opposed by balthasar geometry_veto={geometry_veto}"
+        if risk in ("HALT", "PAUSE_LONGS", "PAUSE_SHORTS"):
+            return True, f"{grid} opposed by balthasar risk={risk}"
+
+    # (2) Mutually contradictory positions (non-grid-state).
+    if regime == "TRENDING" and grid == "TIGHTEN":
+        return True, "TIGHTEN into TRENDING regime"
+    if grid == "WIDEN" and risk in ("PAUSE_LONGS", "PAUSE_SHORTS"):
+        return True, f"WIDEN while {risk}"
+    try:
+        balt_conv = float(balthasar.get("conviction") or 0.0)
+    except (TypeError, ValueError):
+        balt_conv = 0.0
+    if risk == "HALT" and balt_conv > 0.6:
+        return True, f"balthasar HALT conv={balt_conv:.2f} vs live grid"
+
+    return False, "council aligned on action"
+
+
+def r0_position_signature(round_0: dict) -> tuple:
+    """Comparable fingerprint of the cycle's R0 stance — the three domain
+    positions an R1 synthesis would reconcile. Used to detect an UNCHANGED
+    standoff between consecutive cycles. Order matches the prior-cycle read
+    in orchestrator._prior_r0_signature (casper, melchior, balthasar)."""
+    return (
+        (round_0.get("casper")    or {}).get("position"),
+        (round_0.get("melchior")  or {}).get("position"),
+        (round_0.get("balthasar") or {}).get("position"),
+    )
+
+
+def should_run_r1(round_0: dict,
+                  prior_signature: Optional[tuple] = None) -> tuple:
+    """Gate the R1 synthesis pass. R1 costs three full ~80k-token calls and,
+    empirically (46 live cycles), only changes the applied action when the
+    council genuinely disagrees about acting AND that disagreement is new.
+
+    Fires iff the R0 votes carry a genuine conflict (`_r0_conflict`) AND the
+    R0 position signature differs from the previous cycle's. A conflict
+    identical to last cycle is a frozen standoff: R1 would re-synthesise the
+    same inputs to the same result, which the hard-rule layer overrides
+    regardless. With no prior signature (first cycle post-restart), a
+    conflict is treated as novel and R1 fires. Returns (fire, reason)."""
+    conflict, why = _r0_conflict(round_0)
+    if not conflict:
+        return False, f"skip: {why}"
+    cur = r0_position_signature(round_0)
+    if prior_signature is not None and tuple(prior_signature) == cur:
+        return False, f"skip: conflict unchanged from prior cycle ({why})"
+    return True, f"fire: {why}"
 
 
 def run_round_1(round_0: dict, cycle_id: str) -> dict:

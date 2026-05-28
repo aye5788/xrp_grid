@@ -116,8 +116,12 @@ Return TRENDING only when ALL FOUR of these hold:
   4. MOMENTUM CONFIRMATION — at least ONE of:
        a. roc_6h shares the trend sign (bearish needs roc_6h <= -0.3;
           bullish needs roc_6h >= +0.3), OR
-       b. adx directional pressure agrees (bearish needs adx_neg >
-          adx_pos; bullish needs adx_pos > adx_neg), OR
+       b. adx directional pressure agrees AND has real strength —
+          adx >= 20 AND (bearish: adx_neg > adx_pos; bullish:
+          adx_pos > adx_neg). A bare adx_neg/adx_pos asymmetry while
+          adx < 20 is directional BIAS in a weak tape, NOT trend
+          momentum — it does NOT satisfy condition 4. ADX below 20
+          means no trend strength regardless of which side leads. OR
        c. autocorr_1h > 0.15 (returns persisting at 1h scale)
 
 If all four fire: TRENDING. Conviction high when ADX >= 20, medium
@@ -166,10 +170,14 @@ engine reads it via consensus["regime_action"].
   DEFER_STRUCTURAL : regime is uncertain or transitioning; pause
                      on structural changes this cycle until the
                      regime resolves
-  STAND_DOWN       : regime is hostile to current strategy (deep
-                     directional trend confirmed by all four
-                     dimensions, or a regime-shift trigger fired
-                     in this window)
+  STAND_DOWN       : regime is hostile to current strategy — a
+                     CONFIRMED directional trend (Step 1 fired with
+                     adx >= 20 AND momentum confirmation via roc_6h
+                     or autocorr_1h), or a regime-shift trigger fired
+                     in this window. Do NOT STAND_DOWN on structural
+                     displacement (price far from EMA200) alone when
+                     adx < 20 and the tape is mean-reverting — that is
+                     a grid-favourable low-base range, emit EXECUTE.
 
 Calibration:
 - TRENDING with high conviction (all four Step 1 conditions firing

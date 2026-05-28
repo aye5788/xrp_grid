@@ -17,6 +17,112 @@ from config import KILL_SWITCH_FILE, MAX_INVENTORY_USD
 
 log = logging.getLogger('dashboard')
 app = Flask(__name__)
+
+# All stored timestamps are naive UTC. Display-only conversion to US Eastern —
+# internals stay UTC. America/New_York handles EST/EDT automatically, so the
+# wall-clock time always matches the operator's local clock and the %Z label
+# (EST in winter, EDT in summer) is always correct.
+from zoneinfo import ZoneInfo
+_ET_ZONE = ZoneInfo('America/New_York')
+
+
+def _to_et(value, fmt='%Y-%m-%d %H:%M'):
+    """Convert a naive-UTC ISO string (or datetime) to an Eastern display
+    string with a zone label. Returns '' for empty and the original value if
+    it can't be parsed as a timestamp."""
+    if value is None or value == '':
+        return ''
+    dt = value
+    if isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value.strip().replace('Z', '+00:00'))
+        except ValueError:
+            return value
+    try:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        et = dt.astimezone(_ET_ZONE)
+        return f"{et.strftime(fmt)} {et.strftime('%Z')}"
+    except Exception:
+        return str(value)
+
+
+app.jinja_env.filters['et'] = _to_et
+
+
+def _read_env_file_var(key, path='/root/xrp_grid/.env'):
+    """Read KEY=VALUE from the .env file on disk. The dashboard's systemd unit
+    does not source .env, so the file is the authoritative cross-process source
+    for the configured trading mode (the live bot reads the same file)."""
+    try:
+        with open(path) as f:
+            for line in f:
+                s = line.strip()
+                if s.startswith(key + '='):
+                    return s.split('=', 1)[1].strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return None
+
+
+def _configured_live():
+    """True iff the live bot's three-factor gate is satisfied on disk (env var
+    in .env + CONFIRM_LIVE file + matching token). Mirrors grid/engine.py's gate
+    without touching the dashboard's own (paper) engine."""
+    try:
+        from config import (LIVE_CONFIRMATION_FILE, LIVE_CONFIRMATION_TOKEN,
+                            LIVE_CONFIRMATION_ENV_VAR, LIVE_CONFIRMATION_ENV_VALUE)
+        env_val = (os.environ.get(LIVE_CONFIRMATION_ENV_VAR)
+                   or _read_env_file_var(LIVE_CONFIRMATION_ENV_VAR))
+        gate1 = env_val == LIVE_CONFIRMATION_ENV_VALUE
+        gate2 = os.path.isfile(LIVE_CONFIRMATION_FILE)
+        gate3 = gate2 and open(LIVE_CONFIRMATION_FILE).read() == LIVE_CONFIRMATION_TOKEN
+        return bool(gate1 and gate2 and gate3)
+    except Exception:
+        return False
+
+
+def _grid_status(last_grid_action, scheduler_alive, ks_active):
+    """Runtime status of the trading grid for the GRID STATUS box. Sourced from
+    the shared DB (open resting orders) + the on-disk live gate, so it reflects
+    the live bot (magi.service), not the dashboard's own paper engine."""
+    open_buys = open_sells = 0
+    try:
+        from database import get_conn
+        conn = get_conn()
+        rows = conn.execute(
+            "SELECT side FROM grid_orders WHERE status='open'"
+        ).fetchall()
+        conn.close()
+        open_buys = sum(1 for r in rows if r['side'] == 'buy')
+        open_sells = sum(1 for r in rows if r['side'] == 'sell')
+    except Exception as e:
+        log.warning("grid_status open-order read failed: %r", e)
+    open_total = open_buys + open_sells
+
+    live = _configured_live()
+    action = (last_grid_action or '').upper()
+    if ks_active:
+        label, color, active, detail = 'HALTED', '#ff4444', False, 'kill switch active'
+    elif not scheduler_alive:
+        label, color, active, detail = 'DOWN', '#ff4444', False, 'scheduler not running'
+    elif action == 'HALT':
+        label, color, active, detail = 'HALTED', '#ff4444', False, 'council/rule HALT'
+    elif open_total == 0:
+        label, color, active, detail = 'NO ORDERS', '#ffaa00', False, 'nothing resting on book'
+    elif action in ('GRID_PAUSE', 'PAUSE'):
+        label, color, active, detail = 'PAUSED', '#ffaa00', False, 'council PAUSE — orders still resting'
+    else:
+        label, color, active, detail = 'ACTIVE', '#00ff88', True, 'orders resting on book'
+
+    return {
+        'label': label, 'color': color, 'active': active, 'detail': detail,
+        'mode': 'LIVE' if live else 'PAPER',
+        'mode_color': '#ff4444' if live else '#ffaa00',
+        'open_buys': open_buys, 'open_sells': open_sells, 'open_total': open_total,
+    }
+
+
 _LIVE = os.environ.get("MAGI_LIVE_CONFIRM") == "YES"
 engine = GridEngine(paper=not _LIVE)
 engine.load_state()
@@ -170,7 +276,7 @@ HTML_TEMPLATE = """
         padding-left: 10px;
       }
 
-      /* Generic cards (Market, Grid State, Paper P&L, Inventory, Costs) */
+      /* Generic cards (Market, Grid State, Live P&L, Inventory, Costs) */
       .card {
         background: var(--panel-bg);
         border: 2px solid var(--magi-orange);
@@ -902,7 +1008,7 @@ HTML_TEMPLATE = """
        font-family:monospace; font-size:0.8em; text-decoration:none; border-radius:4px;">⎋ Logout</a>
     <h1>⬡ MAGI — XRP Grid Bot</h1>
     <div class="header-row" style="color: var(--magi-text-dim); font-size:0.8em; margin-bottom:20px; letter-spacing: 1px;">
-        {{ now }} EST &nbsp;|&nbsp; Auto-refresh 30s &nbsp;|&nbsp;
+        {{ now }} &nbsp;|&nbsp; Auto-refresh 30s &nbsp;|&nbsp;
         <span class="{{ 'status-ok' if scheduler_alive else 'status-err' }}">
             {{ '● SCHEDULER RUNNING' if scheduler_alive else '● SCHEDULER DOWN' }}
         </span>
@@ -1031,7 +1137,7 @@ HTML_TEMPLATE = """
         {% for a in open_alerts %}
         <div style="margin-top:6px; font-family:'Courier New',monospace; font-size:12px;">
             <span style="font-weight:bold;">[{{ a.severity|upper }}]</span>
-            {{ a.timestamp }} —
+            {{ a.timestamp | et }} —
             <span style="color:#ffcc66;">{{ a.category }}</span>
             {% if a.agent_id %}<span style="color:#66ccff;">({{ a.agent_id }})</span>{% endif %}
             {% if a.provider_name %}
@@ -1088,17 +1194,21 @@ HTML_TEMPLATE = """
         </div>
       </div>
       <div class="magi-codebox">
-        <div class="codebox-header">CODE · STATUS</div>
+        <div class="codebox-header">GRID STATUS</div>
         <div class="codebox-body">
-          {% if next_magi %}
-          <div class="row"><span class="label">Next</span><span class="value">{{ next_magi.label }}</span></div>
-          {% endif %}
+          <div class="row"><span class="label">Grid Active?</span><span class="value" style="color:{{ grid_status.color }}; font-weight:bold;">{{ 'YES' if grid_status.active else 'NO' }} · {{ grid_status.label }}</span></div>
+          <div class="row" style="margin-top:-4px;"><span class="label" style="font-size:9px;">&nbsp;</span><span class="value" style="font-family:inherit; font-size:10px; color:#999; text-transform:none;">{{ grid_status.detail }}</span></div>
+          <div class="row"><span class="label">Mode</span><span class="value" style="color:{{ grid_status.mode_color }};">{{ grid_status.mode }}{{ ' (real money)' if grid_status.mode == 'LIVE' else '' }}</span></div>
+          <div class="row"><span class="label">Resting</span><span class="value" style="color:{{ '#00ff88' if grid_status.open_total else '#ff4444' }};">{{ grid_status.open_buys }} buy / {{ grid_status.open_sells }} sell</span></div>
+          <div class="row"><span class="label">Last fill</span><span class="value" style="color:{{ fill_age_color }};">{{ fill_age_label }}</span></div>
           <div class="row"><span class="label">Centre</span><span class="value">${{ grid_centre }}</span></div>
           <div class="row"><span class="label">Spacing</span><span class="value">{{ grid_spacing }}%</span></div>
           <div class="row"><span class="label">Levels</span><span class="value">{{ grid_levels }}</span></div>
-          <div class="row"><span class="label">Mode</span><span class="value" style="color:{{ '#ffaa00' if paper_mode else '#ff4444' }};">{{ 'PAPER' if paper_mode else 'LIVE' }}</span></div>
           <div class="row"><span class="label">Action</span><span class="value">{{ latest_debate.final_grid_action or '—' }}</span></div>
           <div class="row"><span class="label">Risk</span><span class="value">{{ latest_debate.final_risk_action or '—' }}</span></div>
+          {% if next_magi %}
+          <div class="row"><span class="label">Next cycle</span><span class="value">{{ next_magi.label }}</span></div>
+          {% endif %}
         </div>
       </div>
     </div>
@@ -1117,7 +1227,7 @@ HTML_TEMPLATE = """
     {% if latest_debate %}
     <div style="color:#666; font-size:0.78em; margin-bottom:6px;">
         cycle <span style="color:#88aaff;">{{ latest_debate.cycle_id }}</span>
-        &nbsp;|&nbsp; {{ latest_debate.timestamp }}
+        &nbsp;|&nbsp; {{ latest_debate.timestamp | et }}
         {% if latest_debate_age_label %}
         &nbsp;<span style="color:{{ latest_debate_age_color }};">({{ latest_debate_age_label }})</span>
         {% endif %}
@@ -1184,9 +1294,10 @@ HTML_TEMPLATE = """
     </div>
         </div>
         <div class="dash-cell">
-    <h2>Paper P&amp;L</h2>
+    <h2>Live P&amp;L</h2>
     <div style="font-size:0.85em; color:#666; margin-bottom:8px;">
         Last fill: <span style="color:{{ fill_age_color }};">{{ fill_age_label }}</span>
+        &nbsp;|&nbsp; live fills only (paper history excluded)
         {% if fill_stale %}
         <span style="color:#ff4444; margin-left:12px;">
             ⚠ No fills in 24h+ — metrics below describe historical activity, not current operation.
@@ -1197,17 +1308,17 @@ HTML_TEMPLATE = """
         <div class="card">
             <div class="label">Realized P&amp;L</div>
             <div class="value {{ 'pnl-pos' if pnl_realized >= 0 else 'pnl-neg' }}">${{ pnl_realized_fmt }}</div>
-            <div class="sub">{{ pnl_fill_count }} total fills &nbsp;|&nbsp; {{ pnl_matched_trips }} round trips</div>
+            <div class="sub">{{ pnl_fill_count }} live fills &nbsp;|&nbsp; {{ pnl_matched_trips }} round trips</div>
         </div>
         <div class="card">
             <div class="label">Unrealized P&amp;L</div>
             <div class="value {{ 'pnl-pos' if pnl_unrealized >= 0 else 'pnl-neg' }}">${{ pnl_unrealized_fmt }}</div>
-            <div class="sub">{{ pnl_unmatched_buys }} open buy position{{ 's' if pnl_unmatched_buys != 1 else '' }}</div>
+            <div class="sub">mark-to-market on held inventory</div>
         </div>
         <div class="card">
             <div class="label">Total P&amp;L</div>
             <div class="value {{ 'pnl-pos' if pnl_total >= 0 else 'pnl-neg' }}">${{ pnl_total_fmt }}</div>
-            <div class="sub">Fees paid: ${{ pnl_fees_fmt }}</div>
+            <div class="sub">equity ${{ pnl_baseline_equity_fmt }} &rarr; ${{ pnl_current_equity_fmt }} &nbsp;|&nbsp; fees ${{ pnl_fees_fmt }}</div>
         </div>
         <div class="card">
             <div class="label">vs Best Shadow</div>
@@ -1402,7 +1513,7 @@ HTML_TEMPLATE = """
             {% for o in recent_orders %}
             {% set order_pnl = order_pnl_map.get(o.order_id) %}
             <tr>
-                <td style="color:#666;">{{ (o.filled_at or o.timestamp or '')[:16] }}</td>
+                <td style="color:#666;">{{ (o.filled_at or o.timestamp) | et }}</td>
                 <td class="side-{{ o.side }}">{{ o.side }}</td>
                 <td>${{ '%.4f'|format(o.price or 0) }}</td>
                 <td>{{ '%.2f'|format(o.size or 0) }}</td>
@@ -1648,7 +1759,7 @@ HTML_TEMPLATE = """
                 <tr><th>Time</th><th>Grid</th><th>C/M/B r0</th><th>Fills 24h</th><th>P&amp;L 24h</th></tr>
                 {% for r in attribution_best %}
                 <tr>
-                    <td style="color:#888;">{{ r.timestamp[:16] }}</td>
+                    <td style="color:#888;">{{ r.timestamp | et }}</td>
                     <td class="{{ r.final_grid_action }}">{{ r.final_grid_action }}</td>
                     <td style="font-size:0.78em;">{{ r.casper_r0_position }} / {{ r.melchior_r0_position }} / {{ r.balthasar_r0_position }}</td>
                     <td>{{ r.fills_24h }}</td>
@@ -1667,7 +1778,7 @@ HTML_TEMPLATE = """
                 <tr><th>Time</th><th>Grid</th><th>C/M/B r0</th><th>Fills 24h</th><th>P&amp;L 24h</th></tr>
                 {% for r in attribution_worst %}
                 <tr>
-                    <td style="color:#888;">{{ r.timestamp[:16] }}</td>
+                    <td style="color:#888;">{{ r.timestamp | et }}</td>
                     <td class="{{ r.final_grid_action }}">{{ r.final_grid_action }}</td>
                     <td style="font-size:0.78em;">{{ r.casper_r0_position }} / {{ r.melchior_r0_position }} / {{ r.balthasar_r0_position }}</td>
                     <td>{{ r.fills_24h }}</td>
@@ -1727,7 +1838,7 @@ HTML_TEMPLATE = """
                 <details class="debate-row">
                     <summary>
                         <table style="margin:0;"><tr>
-                            <td style="width:14%; color:#888;">{{ d.timestamp[:19] }}</td>
+                            <td style="width:14%; color:#888;">{{ d.timestamp | et }}</td>
                             <td style="width:14%; color:#ffaa00;">{{ d.conflict_pair or '—' }}</td>
                             <td style="width:9%;">{% if d.casper_r1_held    is none %}—{% elif d.casper_r1_held    %}HELD{% else %}revised{% endif %}</td>
                             <td style="width:9%;">{% if d.melchior_r1_held  is none %}—{% elif d.melchior_r1_held  %}HELD{% else %}revised{% endif %}</td>
@@ -1849,7 +1960,7 @@ HTML_TEMPLATE = """
         '.header-row',          // top status bar (time / scheduler / age / next)
         '.agent-health-panel',  // BYOK contingency Dim 1 — degradation chips + GATE MON + COUNCIL LEVERS
         '.magi-hero',           // hero (agent triangle + CODE box)
-        '.inv-pnl-row',         // Inventory + Paper P&L pair
+        '.inv-pnl-row',         // Inventory + Live P&L pair
         '.readiness-panel',     // Live readiness gates
         // Other panels (Recent Orders, Market, LETTA AGENTS, Shadow,
         // collapsed analytics) update infrequently or only on user
@@ -2290,10 +2401,11 @@ def _next_magi_eta():
             hour=slots[0], minute=0, second=0, microsecond=0)
     delta_min = int((next_dt - now_est).total_seconds() / 60)
     hh, mm = divmod(delta_min, 60)
+    zone = next_dt.strftime('%Z')
     if hh > 0:
-        label = f"{next_dt.hour:02d}:00 EST · in {hh}h {mm:02d}m"
+        label = f"{next_dt.hour:02d}:00 {zone} · in {hh}h {mm:02d}m"
     else:
-        label = f"{next_dt.hour:02d}:00 EST · in {mm}m"
+        label = f"{next_dt.hour:02d}:00 {zone} · in {mm}m"
     return {'label': label, 'countdown_min': delta_min}
 
 
@@ -2679,9 +2791,7 @@ def get_do_billing():
 
 @app.route('/')
 def index():
-    from zoneinfo import ZoneInfo
-    EST = ZoneInfo('America/New_York')
-    now = datetime.now(timezone.utc).astimezone(EST).strftime('%Y-%m-%d %H:%M EST')
+    now = _to_et(datetime.now(timezone.utc))
 
     indicators = get_latest_indicators('1h') or {}
     grid = get_current_grid_state() or {}
@@ -2744,7 +2854,9 @@ def index():
     # P&L snapshot
     snap = get_pnl_snapshot(price)
     best_shadow_level, best_shadow_spacing, best_shadow_pnl = get_best_shadow_from_db()
-    live_pnl_pct = round(snap['total'] / MAX_INVENTORY_USD * 100, 4) if MAX_INVENTORY_USD > 0 else 0.0
+    # Return % against capital actually at risk (go-live equity), not MAX_INVENTORY_USD.
+    pnl_denom = snap.get('baseline_equity') or MAX_INVENTORY_USD
+    live_pnl_pct = round(snap['total'] / pnl_denom * 100, 4) if pnl_denom and pnl_denom > 0 else 0.0
     best_shadow_pnl = best_shadow_pnl or 0.0
     live_vs_shadow = round(live_pnl_pct - best_shadow_pnl, 4)
 
@@ -2778,6 +2890,14 @@ def index():
             fill_age_label = f"{hours/24:.1f} d ago"
         fill_age_color = "#ff4444" if hours > 24 else "#00ff88" if hours < 2 else "#ffaa00"
         fill_stale = hours > 24
+
+    council_data = _fetch_council_data()
+    _latest_debate = council_data.get('latest_debate') or {}
+    grid_status = _grid_status(
+        _latest_debate.get('final_grid_action'),
+        check_scheduler_alive(),
+        ks_active,
+    )
 
     return render_template_string(HTML_TEMPLATE,
         now=now,
@@ -2825,6 +2945,10 @@ def index():
         pnl_fill_count=snap['fill_count'],
         pnl_matched_trips=snap['matched_round_trips'],
         pnl_unmatched_buys=snap['unmatched_buys'],
+        pnl_baseline_equity=snap['baseline_equity'],
+        pnl_current_equity=snap['current_equity'],
+        pnl_baseline_equity_fmt=(f"{snap['baseline_equity']:.2f}" if snap['baseline_equity'] is not None else "—"),
+        pnl_current_equity_fmt=(f"{snap['current_equity']:.2f}" if snap['current_equity'] is not None else "—"),
         pnl_win_rate=snap['win_rate'],
         pnl_avg_per_trip=snap['avg_pnl_per_round_trip'],
         pnl_fills_today=snap['fills_today'],
@@ -2850,8 +2974,9 @@ def index():
         gate_monitor=_fetch_gate_monitor_safe(),
         readiness=_fetch_readiness_safe(),
         gate_activity=_fetch_gate_activity_safe(),
+        grid_status=grid_status,
         # Phase 5: agent council panels (single splat from helper)
-        **_fetch_council_data(),
+        **council_data,
     )
 
 
@@ -3054,7 +3179,8 @@ def api_pnl():
     price = engine.get_current_price() or 0.0
     snap = get_pnl_snapshot(price)
     best_lc, _best_sp, best_shadow_pnl = get_best_shadow_from_db()
-    live_pnl_pct = round(snap['total'] / MAX_INVENTORY_USD * 100, 4) if MAX_INVENTORY_USD > 0 else 0.0
+    pnl_denom = snap.get('baseline_equity') or MAX_INVENTORY_USD
+    live_pnl_pct = round(snap['total'] / pnl_denom * 100, 4) if pnl_denom and pnl_denom > 0 else 0.0
     live_minus_shadow = round(live_pnl_pct - (best_shadow_pnl or 0.0), 4)
     return jsonify({
         **snap,
@@ -3232,7 +3358,7 @@ EVAL_DETAIL_TEMPLATE = """
 <a href="/">← dashboard</a>
 <h2>{{ agent_id|upper }} — most recent eval run</h2>
 <p>
-  ts: <b>{{ latest.timestamp }}</b> ·
+  ts: <b>{{ latest.timestamp | et }}</b> ·
   suite: <code>{{ latest.suite_name }}</code> ·
   accuracy: <b style="color:{{ '#00ff88' if latest.gate_passed else '#ff4444' }};">
     {{ '%.3f' % latest.accuracy }}</b>
@@ -3265,7 +3391,7 @@ EVAL_DETAIL_TEMPLATE = """
   <tr><th>ts</th><th>accuracy</th><th>pass/total</th><th>gate</th><th>cost</th></tr>
   {% for r in rows %}
   <tr class="{{ 'pass' if r.gate_passed else 'fail' }}">
-    <td>{{ r.timestamp }}</td>
+    <td>{{ r.timestamp | et }}</td>
     <td>{{ '%.3f' % r.accuracy }}</td>
     <td>{{ r.passed_samples }}/{{ r.total_samples }}</td>
     <td>{{ 'PASS' if r.gate_passed else 'FAIL' }}</td>

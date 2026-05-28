@@ -251,7 +251,25 @@ def main():
         read_only=True,
     )
 
-    all_shared_block_ids = [world_id, *peer_block_ids, cycle_phase_id]
+    recent_outcomes_id = _get_or_create_block(
+        client,
+        label='recent_outcomes',
+        value='(no outcomes recorded yet)',
+        description=(
+            "Rolling log of recent grid cycles' realised 6h outcomes (council "
+            "votes + fills/PnL/skew), written by observer.py backfill "
+            "(_record_outcome_to_block). Read-only context for all three agents. "
+            "Informational only — NOT an instruction to edit self_model (that "
+            "evolves via the 30-cycle memory rotation). Replaced the former "
+            "per-agent thread-message outcome-notify (P4, 2026-05-27)."
+        ),
+        limit=2000,
+        read_only=True,
+    )
+
+    all_shared_block_ids = [
+        world_id, *peer_block_ids, cycle_phase_id, recent_outcomes_id,
+    ]
     print(f"  shared block ids: {all_shared_block_ids}")
 
     # 3) Provision each agent (skip if already in agent_registry).

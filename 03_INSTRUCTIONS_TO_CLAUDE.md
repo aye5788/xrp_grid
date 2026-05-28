@@ -34,6 +34,15 @@ source for tone/workflow.
 - **Never use third-party Kraken wrappers.** No krakenex, no
   python-kraken-sdk, no anything. Direct REST + Python stdlib only.
   Operator has declined this multiple times.
+- **Restart discipline.** Each magi.service restart fires a startup
+  MAGI cycle costing ~$0.30 in Letta credits. Bundle code changes
+  for a single end-of-session restart rather than restarting between
+  each surgical edit. When proposing a verification plan, default to
+  "restart once at the end" unless intermediate verification truly
+  requires the council to run. ADAM init lines, log severity changes,
+  file existence, and import-graph correctness are all visible at
+  startup without a cycle firing — don't wait for a cycle to confirm
+  them.
 
 ### When the operator pushes back
 - **Engage seriously. Do not capitulate.** When the operator says "this is

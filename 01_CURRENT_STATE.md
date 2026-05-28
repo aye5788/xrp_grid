@@ -1,10 +1,426 @@
 # MAGI — Current State
 
-Last updated: 2026-05-24 (**order size fixed at 1.65 XRP/order** —
+Last updated: 2026-05-28 (**PnL-tracking overhaul + dashboard fixes + audit of
+the post-restart council; two observer fixes STAGED for the next magi.service
+restart**. PnL tracking is now live-scoped (Kraken-txid discriminator) +
+equity-based from the go-live baseline — the old all-fills FIFO overstated by
+~$10 (paper pollution + hidden inventory drawdown); real live PnL ≈ −$2.3.
+Dashboard: all times now display US Eastern; the "CODE · STATUS" box became
+"GRID STATUS" with a Grid Active? Y/N + real LIVE/PAPER mode (the old Mode row
+read the dashboard's own paper engine) + resting-order counts. observer +
+readiness scoped to live fills; `pnl_24h` history backfilled (26 rows). Audit
+of the 9 cycles since the 16:09 restart: council judgments healthy (no
+degradation, varied votes, RECENTRE fired correctly on the one-sided book);
+gate healthy (T14 caught the stranded grid, WS self-recovered after an 11:42
+blip, no bleed). Found `roc_6h` null ~40% of cycles (fix STAGED) and the
+capital-preservation issue now logged as **NEXT_BUILD item 0★** (grid bleeds in
+downtrends; council can't learn it from a realized-PnL signal). See Session
+2026-05-28 below.). Prior: 2026-05-27 (**council cost-reduction deployed** — restarted
+~11:28 UTC. Two pipeline changes to cut the ~$5-6/day council spend: (1) the
+freshness validator got a materiality band so it no longer fires full ~90k-token
+retries on cosmetic precision drift (~67/69 historical retries were cosmetic;
+~96% reduction), and (2) R1 synthesis is now CONDITIONAL via a novelty-aware gate
+(`council.should_run_r1`) — fires only on a genuine conflict that is new vs the
+prior cycle, ~76% fewer R1 calls (was unconditional always-fires). Both are
+pipeline changes, not persona edits → not eval-covered. Side-finding: Casper
+`regime_action`=STAND_DOWN in 45/46 cycles, the likely reason the grid stays
+parked. See "Session 2026-05-27" below). Prior: 2026-05-26 (**BOT IS LIVE AGAIN** — magi.service re-enabled
+~19:49 UTC; stranded-grid judgment fix shipped + provisioned (grid_position
+signal + Balthasar/Casper persona reframes); Balthasar self_model curated +
+conversation thread reset after a runaway-HALT corruption was found; gate-wake
+guards generalized to T2/T11/T14 + persistence dwell added. See "Session
+2026-05-26" below). Prior: 2026-05-25 (**magi.service halted + T2
+credit-burn guard shipped** — see Session 2026-05-25 below. Prior: 2026-05-24 — **order size fixed at 1.65 XRP/order** —
 `compute_order_size` rewritten from holdings-division to a flat
 `ORDER_SIZE_XRP` constant; live service restarted 12:37 UTC, live mode
 confirmed preserved. See Session 2026-05-24 below. Prior: 2026-05-23 —
 **BOT IS LIVE** — flipped paper→live, live order + fill-reconcile path shipped, fee constants corrected to tier-0 0.25%/0.40%, dashboard auth moved to Flask cookie, renewal READINESS panel removed — see Session 2026-05-23 below. Prior: 2026-05-22 — council restructured to R1-always-fires + two new structural vote fields the engine reads; gate layer with calibrated triggers + Kraken WebSocket v2 substrate shipped; agent state wiped + recreated; freshness validator + retry + warn-alert shipped. See "Session 2026-05-22" entries below).
+
+## Session 2026-05-28 changes
+
+### PnL tracking overhaul — live-scoped + equity-based (dashboard)
+
+The dashboard "Live P&L" panel (was mislabeled "Paper P&L") was reporting a
+headline that was ~106% paper-trading history. Two root causes, both fixed in
+`grid/pnl.py:get_pnl_snapshot`:
+- **Paper/live commingled.** `grid_orders` has no paper flag; the snapshot
+  counted all 68 filled rows. 50 were pre-live paper (hex order_ids, 7–24 XRP);
+  18 are live Kraken fills (txid `O…-…-…`, 1.65 XRP). Now scoped to live via
+  `grid/pnl.py:_is_live_order_id` (Kraken-txid shape).
+- **Held inventory invisible.** Cumulative sells ≥ buys, so the FIFO buy-queue
+  always drained → `unmatched_buys=0`, unrealized always $0, hiding the held
+  ~31-XRP bag's drawdown. Total is now **equity-based**:
+  `total = current_equity − baseline_equity`, baseline = inventory at the first
+  live fill marked at that fill's price (≈$68.44); realized = FIFO on live
+  round trips; `unrealized = total − realized`. Real live PnL ≈ **−$2.3**
+  (was shown as +$7.46). `live_pnl_pct` denominator switched to baseline equity.
+
+### Dashboard — Eastern time + GRID STATUS panel
+
+- **All displayed times now US Eastern** via `_to_et()` registered as Jinja
+  filter `et`; internals stay naive UTC. Uses America/New_York so the label
+  auto-switches EST/EDT. Fixed a pre-existing double-"EST EST" header.
+- **"CODE · STATUS" box → "GRID STATUS"**: added **Grid Active? Y/N** with a
+  status word (ACTIVE/PAUSED/HALTED/NO ORDERS/DOWN), real **LIVE/PAPER mode**,
+  and resting buy/sell counts. The old Mode row read `engine.paper` — but the
+  dashboard's own engine runs PAPER (its systemd unit doesn't source `.env`), so
+  it was wrong. Real mode now read from the on-disk 3-factor gate via
+  `_configured_live()`; Grid-Active from `grid_orders` status='open' + kill
+  switch + scheduler + last council action.
+
+### observer + readiness scoped to live fills; pnl_24h backfilled
+
+- The all-fills FIFO let the 29 paper sells (259 XRP) drain the entire buy queue
+  (incl. all live buys) before any live sell, so **every live cycle's `pnl_24h`
+  was 0.0** and readiness L4 was a FALSE GREEN on +$7.46 paper. Scoped
+  `observer._compute_window_metrics` and `readiness._all_fills` to live fills.
+  Readiness verdict now truthfully **RED** (L4 = −$0.17, L1 = 17 live trips).
+  `observer` runs in magi.service → takes effect on the next restart.
+- Backfilled 26 live-era `pnl_24h` rows with the corrected logic
+  (`scratch/backfill_pnl24h.py`; snapshot in `/tmp`). Attribution panel can now
+  distinguish actions (RECENTRE +$0.0075 avg vs MAINTAIN −$0.0089 avg).
+
+### Post-restart council audit (9 cycles since 2026-05-27 16:09) + roc_6h fix
+
+- **Judgments healthy:** no degradation, varied positions/convictions, no
+  SAFE_DEFAULTS. The two RECENTRE cycles were correct (book genuinely one-sided).
+- **Gate healthy:** wake-class triggers fired right (T14 caught the stranded grid
+  at 22:17 + 03:24; T11 on vol-regime flips; T13/T2 logged without waking). The
+  11:42 `gate_ws_down` was a transient WS blip that self-recovered. No bleed.
+- **`roc_6h` null on 4/9 cycles** — 6h candles are a separate fragile Kraken
+  fetch (no native 6h interval) returning [] on flake. Fix STAGED:
+  `observer._resample_6h_from_1h` falls back to resampling the 1h bars already
+  fetched that cycle (verified byte-identical to the direct fetch). Starved
+  Casper's regime call.
+- **Capital-preservation finding → NEXT_BUILD item 0★** (grid bleeds in
+  downtrends; the council can't learn it because its only outcome signal is
+  realized round-trip PnL, which stays positive while inventory bleeds
+  unrealized). Deterministic stand-down rule recommended; deferred past this
+  restart.
+
+**Staged for the next magi.service restart (~$0.30 startup cycle):**
+`observer.py` roc_6h fallback + `_compute_window_metrics` live-scoping. Dashboard
+changes are already live (magi-dashboard.service is separate; reloading it is
+free). Files touched: `grid/pnl.py`, `dashboard.py`, `observer.py`,
+`magi/readiness.py`, `scratch/backfill_pnl24h.py`.
+
+## Session 2026-05-27 changes
+
+### Council cost-reduction — freshness materiality band + conditional R1
+
+Audited council spend since the 2026-05-26 re-enable: ~$4.97 over 6 cycles
+(~12h) ≈ $5-6/day steady-state on a ~$67 book. Not gate-wakes (zero since
+resume) and not evals (zero) — the plain scheduled council. Real per-cycle cost
+~$0.80-1.00 (~8.3 LLM calls/cycle, not 1): 3 R0 + 3 R1 (R1 was unconditional
+always-fires) + ~2.3 freshness-retry R0 calls. Melchior/gpt-4o = 65% of spend.
+
+**(1) Freshness materiality band** (`magi/council.py`). 7 days of
+`[FRESHNESS_FAIL]` logs showed ~67/69 retries fired on cosmetic precision drift
+(e.g. 39.41 vs 39.39, a static reference stat cited at slightly wrong precision),
+not staleness — each a wasted ~90k-token re-call. Added `_within_freshness_tolerance`
+(`max(5% relative, 0.02 absolute)`) + constants `_FRESHNESS_REL_TOL`/`_FRESHNESS_ABS_FLOOR`;
+`_validate_r0_freshness` only flags a cited value as stale when it diverges from
+its closest world_state candidate beyond tolerance. Validated: 16/18 sampled real
+mismatches now skip; the genuine catch (autocorr cited ~10x off — model anchoring)
+still fires. ~96% retry reduction.
+
+**(1b) Freshness matching-gate fix** (`magi/council.py`, restarted 16:09 UTC).
+The band in (1) was INCOMPLETE: `debate_records.freshness_retries` showed
+`casper:true` EVERY cycle post-deploy. Root cause sits upstream of the band, in
+`_find_closest_fresh`'s plausibility gate. Casper's lead evidence always DERIVES
+the price-vs-EMA200 % distance ("Price -22.41% from EMA200") — a figure with NO
+literal world_state field (only raw `ema_200`/`ema_50` exist). The old absolute
+gate (`abs(stale-cand) <= max(|stale|,1.0)`, a ±22.41 window) matched -22.41 to the
+unrelated `bullish_trend.drawdown_median=-2.45` (~9x smaller) and fired a full
+~85k-token retry every cycle. Two coupled fixes: **(a)** relative-capped gate
+`max(_FRESHNESS_MATCH_REL(0.5)*max(|stale|,|cand|), _FRESHNESS_MATCH_ABS_FLOOR(1.0))`
+rejects large-magnitude cross-quantity matches while keeping small-magnitude
+matching BYTE-IDENTICAL to before (ABS_FLOOR=1.0 == old floor; proven: of 6 probes
+only -22.41 changed); **(b)** `_validate_r0_freshness` now treats no-analog
+(`correct_val is None`) as FRESH/skip, not as a hallucination → stale — required,
+since (a) alone just moves -22.41 from "matched-stale" to "no-analog-stale" (still
+retries). Verified offline on live ws `cyc_1779891312`: Casper's -22.41 line →
+stale=False. Tradeoff (operator priority = stop the credit bleed): a confabulated
+value with no nearby field now passes unflagged; genuine stale-recitation is still
+caught because a drifted copy keeps a close analog (the field's current value) and
+trips the materiality band. NOT eval-covered (pipeline change). Production
+confirmation pends the next scheduled cycle (16:00 EST / 20:00 UTC): `casper`
+should read `false` on cycles where his lead evidence is the EMA200 distance.
+
+**(2) Conditional R1 via novelty-aware gate** (`magi/council.py` +
+`magi/orchestrator.py`). R1 was unconditional since 2026-05-22. A pure conflict
+gate was insufficient — Casper `regime_action`=STAND_DOWN in 45/46 live cycles,
+so a chronic RECENTRE-vs-STAND_DOWN standoff makes "fire on conflict" fire ~65%.
+Added `should_run_r1` + `_r0_conflict` + `r0_position_signature` (council) and
+`_prior_r0_signature` + a conditional block in `run_cycle` (orchestrator): R1
+fires only when a genuine position/lever conflict exists AND the R0 position
+triple differs from the prior cycle. Aligned cycles and frozen standoffs skip
+(the hard-rule layer resolves both regardless). Grid-state conflicts deliberately
+excluded (hard rules own them). Simulated over 46 cycles: R1 fires 11/46 (23%),
+~76% fewer R1 calls. Skip path verified: `resolve_consensus` falls back to R0
+finals (incl. R0 regime_action/geometry_veto); `insert_debate_record` writes NULL
+R1 columns (dynamic INSERT from present keys — no crash). Over 46 cycles R1's
+position shifts never once changed the applied action (hard rules + Melchior R0
+decided everything).
+
+**Verification:** `py_compile` clean; `should_run_r1` exercised on 5 synthetic
+cases; restarted ~11:28 UTC. NOT eval-covered (pipeline change). Validate live via
+`journalctl -u magi.service | grep "Round 1:"` (firing/skipped lines) + the
+`council_r1` call rate in `token_usage`.
+
+**Remaining cost levers** (`02_NEXT_BUILD_TASKS.md` item 0): P1 (council cadence
+as a function of trading state — biggest, still unbuilt), P2 (gpt-4o for Melchior),
+P4 (trim Letta threads).
+
+### Casper STAND_DOWN mis-calibration — diagnosed + fixed (the grid-parking root cause)
+
+Audited why the grid stays parked: Casper's `regime_action`=STAND_DOWN in 45/46
+cycles. Mechanical decision-tree replay over 38 cycles showed ALL 38 fired
+TRENDING solely via STEP-1 condition 4(b) (`adx_neg > adx_pos`) with **ADX
+14.6-15.4 the whole window — never >= 20**. That is directional bias in a weak,
+low-vol (atr_pct ~17), mean-reverting (autocorr_1h negative) tape ~22% below
+EMA200 — exactly the "stale structural base = RANGING with a low base" Casper's
+own Example A describes, i.e. grid-FAVOURABLE. Root cause: condition 4(b) had no
+ADX strength floor. Compounding it, Casper's self_model had hardened the bug into
+doctrine: Pattern 2 codified "adx asymmetry overrides missing momentum →
+TRENDING", and Patterns 7/8 rationalized fills as an "Activity Trap" and grid
+death (0 orders) as a "successful survival outcome" — a corruption of the same
+shape as the Balthasar runaway-HALT.
+
+**Fix (deployed live, provisioned, schema PASS):**
+- `magi/prompts/casper_prompt.txt`: condition 4(b) now requires `adx >= 20` for
+  the directional-asymmetry branch to count as momentum (roc_6h 4a and autocorr
+  4c paths unchanged, so real trends still register); STAND_DOWN definition
+  tightened to a CONFIRMED trend (Step 1 + adx>=20 + roc/autocorr) or a fired
+  regime-shift trigger.
+- Casper self_model curated via Letta API: removed the no-floor-asymmetry,
+  activity-trap, and grid-death-is-success patterns; replaced with corrected
+  reflections (weak ADX ≠ trend; low-vol mean-reversion is grid-favourable;
+  parked grid is a cost not a survival win). Casper is Gemini → reads blocks
+  fresh each cycle, so no thread reset needed (unlike Balthasar/Haiku).
+- Snapshots: `/tmp/casper_{persona,self_model}_2026-05-27_pre-adx-floor.json`.
+- **NO evals run** — operator declined (expensive). Validation was the 38-cycle
+  counterfactual: 31/38 → RANGING/EXECUTE with the floor; the 4 roc-confirmed
+  cycles stay TRENDING. Regression risk low (the change only adds an ADX floor to
+  one of three momentum paths).
+
+**Verification (12:44 + 12:01 cycles post-fix):** Casper's REASONING changed as
+intended — it now cites `roc_6h` momentum and reads the curated self_model
+("Pattern 4 validates STAND_DOWN as roc_6h confirms a persistent trend"), not the
+bare weak-ADX asymmetry. It is still STAND_DOWN right now, but legitimately:
+`roc_6h=-1.60` is a genuine momentum-confirmed downtrend, so condition 4(a) fires
+and standing down is correct. The fix's effect shows when the downtrend exhausts
+(roc moderates → weak-ADX range): Casper will now flip to RANGING/EXECUTE instead
+of staying stuck on the asymmetry. Watch for that transition.
+
+### Bug fixes + P4 (later 2026-05-27)
+
+- **`applied_grid_action` write-back — FIXED.** The column (+ `applied_spacing`,
+  `engine_clamped`, `clamp_reason`) was documented "filled in later by the engine"
+  but never written (NULL in 0/48 rows). `grid/engine.py:apply_magi_decision` now
+  records what it applies into `self.last_applied` (additive side-effect, no
+  control-flow change — captures cross-check coercion, empty-book-guard skips,
+  null-geometry refusals, spacing clamps); scheduler writes it back via new
+  `database.update_debate_applied`. Verified live: 12:44 cycle wrote
+  `applied_grid_action=MAINTAIN`, `engine_clamped=0`. The OTHER half of the old
+  "Rule 0d" bug (tag recording) was already fixed — verified working over 48
+  cycles; the doc was stale. See `02_NEXT_BUILD_TASKS.md` item 1.
+- **P4 — observer outcome-backfill routed out of the agent threads.** The 6h
+  backfill used to POST a user message to each agent (`_notify_agents_6h` →
+  `messages.create`) — a billable inference per agent per cycle, thread-bloat (the
+  dominant 80-114k-token context driver), AND the "consider updating your
+  self_model" prompt that drove the Casper/Balthasar self_model corruption. Now
+  `observer._record_outcome_to_block` writes a rolling 6-cycle log to a new shared
+  read-only `recent_outcomes` block (created + attached to all 3 agents; added to
+  `provision_agents` shared-block list). Agents still see outcomes (in-context,
+  fresh each cycle) but with no inference cost, no thread growth, and no
+  self_model-write invitation — self_model now evolves ONLY via the 30-cycle
+  rotation. This also completes item 2's L1 lever. Removed the now-dead
+  `_send_outcome_to_agent`/`_build_outcome_message`/`_backfill_failure_streak`
+  machinery + unused import. **Contingency note:** the council-degradation hook
+  "backfill-notify alerting" (CLAUDE.md §4 item 2) is GONE — agent unreachability
+  is still caught on the R0 path (`_check_steps_for_alerts`/`_alert_exception`).
+  Restarted 12:44 UTC; clean startup, both write-back paths exercised.
+
+## Session 2026-05-26 changes
+
+### BOT IS LIVE AGAIN
+- **magi.service re-enabled and started ~19:49 UTC 2026-05-26** by the
+  operator. Startup confirmed all three live gates PASS → "LIVE MODE ACTIVE —
+  real orders will be placed." (Note: the recurring "Paper mode active" log
+  lines are the throwaway `GridEngine(paper=True)` price-fetch helpers in
+  `build_world_state`, NOT the trading engine.)
+- Capital intact (~$67: ~30.8 XRP + ~$26 USD). On restart the grid was **dark
+  (0 open orders)** — see the standdown/HALT history below; not a loss event.
+
+### Stranded-grid judgment fix (Layer 1, NOT a new hard rule)
+Root problem behind the long standdown: the council reads "price trended out of
+the grid band" as "hostile regime, stand down," when the correct response to a
+*stranded* grid (stale centre, price outside the band, can't fill) is to
+RECENTRE and follow price. Agents had **no signal** for whether the grid was
+stranded. Fix = one new input + two persona reframes (deliberately judgment-layer,
+not another override — see operator directive to stop diluting hard rules):
+- **`world_state.grid_position`** — new field, `{side: inside|above|below,
+  pct_outside_band, fillable}`, computed in `orchestrator._grid_position` from
+  the same centre ± n_pairs·spacing envelope T2 uses. Declared in
+  `world_state_schema.FIELDS` (consumers: casper, balthasar). `fillable=False`
+  = stranded.
+- **Balthasar persona** (`balthasar_prompt.txt`): stranded-grid carve-out in
+  the geometry_veto calibration + R1 escalation — when `grid_position.fillable`
+  is false, a RECENTRE is risk-REDUCING; do not RISK_BLOCK it on regime alone.
+- **Casper persona** (`casper_prompt.txt`): stranded-grid carve-out in the
+  regime_action calibration — STAND_DOWN blocks *trend-chasing* rebuilds, not a
+  *corrective* RECENTRE on a stranded grid; emit DEFER_STRUCTURAL/EXECUTE there.
+- **Eval gate passed** (regression): Casper 7/8 (0.875), Balthasar 7/9 (0.778),
+  both > 0.70. **Caveat:** the suite grades `position` (risk_action/regime), NOT
+  the `geometry_veto`/`regime_action` the fix targets — so the eval confirms
+  no-regression, not the fix's live effect. Provisioned to live agents
+  (casper +1543 chars, balthasar +1704 chars; melchior unchanged → skipped).
+
+### Balthasar self_model corruption found + curated
+- Live cycle after restart showed Balthasar voting **HALT @ 0.95 conviction on
+  a healthy book** (buffers fine, skew 0.11). Cause: his self_model had a
+  **runaway** — ~16 logged "consecutive grid deaths under STAND_DOWN" that
+  misattributed *idle/stranded-grid cycles* (every one was **0 fills, $0 P&L**,
+  i.e. not filling — not losing) to the STAND_DOWN regime, concluding "only
+  remedy is HALT." Self_model had ballooned 3.7KB→31.5KB during the 5-25
+  standdown.
+- **Curated** the self_model block: kept the ~13 sound reflections (incl. the
+  correct "regime signals are Casper's context, not my survival gates" and the
+  healthy-buffers→CLEAR→fills validation series), removed the runaway, appended
+  a dated retraction tying the real cause (stranded grid) to `grid_position`.
+  31.5KB → 13KB. PRE/POST snapshots in `/tmp/magi_persona_snapshot_20260526/`.
+- **Block curation alone did NOT change behavior** (cycle 249 still cited "16
+  grid deaths") — because the narrative also lives in the agent's **Letta
+  conversation thread** (stateful `messages.create`; 40 of 299 messages carried
+  it). This is the documented conversation-history-persistence failure mode.
+  **Reset Balthasar's in-context thread** (`agents.messages.reset`); archive
+  persists by design (messages.list still shows 299 — that's Letta's permanent
+  store, harmless). Next scheduled cycle is the definitive test.
+
+### Anchoring is model-specific (verified, supports the council-diversity premise)
+Checked R0 evidence repetition across cycles: **Melchior (GPT-4o)** anchors
+mildly (sticky verbatim self_model lead line, rest updates, vote still moves);
+**Balthasar (Haiku)** anchored severely (full narrative replay); **Casper
+(Gemini)** does NOT anchor (evidence tracks live numbers; its STAND_DOWN is a
+correct read of a –22% EMA200 deviation, not replay). So Casper needs no thread
+reset; Melchior's mild anchor isn't the current blocker.
+
+### ⚠ Model discrepancy to reconcile
+Live **Balthasar runs on `anthropic/claude-haiku-4-5`** (per `token_usage` and
+the provision summary), but CLAUDE.md §1 says claude-sonnet-4-6, and the eval
+factory builds Balthasar on **sonnet-4-6**. So the eval validates a *stronger*
+model than production uses — a real validation gap, and haiku is less steerable
+(it's why the persona/self_model edits needed the thread reset to take). Open
+question: intended cost-downgrade or config drift? `AGENT_CONFIG` in
+`provision_agents.py` sets no model handle, so provisioning won't change it.
+Tracked in `02_NEXT_BUILD_TASKS.md`.
+
+### Current live state (as of ~20:17 UTC) — what to watch
+Grid dark (0 orders), price ~1.332 **inside** the band (so grid_position
+fillable=true; the stranded carve-out is dormant — not the active lever right
+now). Council still in HALT/STAND_DOWN from pre-reset cycles. **The next
+scheduled cycle** (post-reset) is the test: Balthasar should vote CLEAR/PROCEED
+and the grid can rebuild. Gate wakes in the interim are suppressed by
+`WAKE_REQUIRES_ACTIVE_GRID` (last cycle was non-trading), so nothing fires
+off-schedule. Money safe throughout.
+
+## Session 2026-05-25 changes
+
+### magi.service halted — Letta credit burn (T2 over-firing)
+
+- **magi.service stopped and disabled 2026-05-25 ~20:25 UTC.** Letta plan
+  balance burned from ~$20 to ~$1.93 in roughly 24h (expected ~$1.80/day
+  at 6 cycles/day, actual ~$18/day = 5× budget). magi-dashboard.service
+  left running. Grid stays paused. No code or DB modified during halt.
+
+- **Root cause (diagnosed, not yet resolved):** T2 (`gate.py:t2_grid_breach`)
+  is a *level-triggered* predicate — it fires whenever 2+ consecutive 1h
+  closes are outside the grid's outermost level. The grid centre is 1.33618
+  with 0.75% spacing and 5 levels: upper bound = 1.35622. Current XRP price
+  ~1.357 has been consistently above 1.35622, so T2 fires at every 1h candle
+  close. The scheduler's `WAKE_MIN_INTERVAL_MIN = 60` throttle is satisfied
+  each time because T2 fires exactly once per hour. Result: 30 cycles in 24h
+  instead of the documented 6 (5× overage). At ~$0.60/cycle (R1 synthesis
+  firing plus grown context windows) the math is $18/day. The bot has also
+  been stuck in `PAUSE_INVALID + geometry_veto=RISK_BLOCK` since ~14:00 UTC,
+  so every one of those cycles produced `MAINTAIN / CLEAR` and zero action —
+  pure credit burn.
+
+### Gate-wake precondition guards shipped (2026-05-26: generalized + dwell)
+
+Implemented in `scheduler.py` and `config.py`. `gate.py` *detection* is
+unchanged — it still evaluates and writes events on the 1h close. Only the
+*wake decision* (whether an event triggers an off-schedule council cycle) is
+guarded. Two stages, in order, applied to ALL wake-class triggers
+(`WAKE_CLASS_TRIGGERS = ("T14","T2","T11")`):
+
+**Stage 1 — non-trading suppression.** Originally T2-only (the May-25 bleed
+was T2 re-firing hourly for 12h during a PAUSE_INVALID/REGIME_STANDDOWN
+standdown → 10 useless wakes, ~$6 credits). Generalized 2026-05-26: T11/T14
+share the shape (a wake the standing-down council can't act on), so the guard
+is now trigger-agnostic.
+- **`config.py:WAKE_REQUIRES_ACTIVE_GRID = True`** (renamed from
+  `T2_REQUIRES_ACTIVE_GRID`) — master switch; False disables.
+- **`scheduler._WAKE_BLOCKING_OVERRIDE_PREFIXES`** — tuple of non-trading
+  override prefixes: `[PAUSE_INVALID]`, `[REGIME_STANDDOWN]`, `[HALT]`,
+  `[GRID_DEGENERATE]`, `[COUNCIL_COLLAPSED]`, `[GRID_PAUSE]`, `[KILL_SWITCH]`,
+  `[DAILY_LOSS_LIMIT]`, `[ALLOC_SKEW_CEILING]`, `[AGENT_DEGRADED` (prefix).
+- **`scheduler._is_wake_suppressed_nontrading() → (bool, str)`** (renamed
+  from `_is_t2_wake_suppressed`) — queries DB on every call (no caching);
+  `(True, reason)` when the latest `debate_records` row has any blocking tag
+  OR `geometry_veto='RISK_BLOCK'`, or `grid_state.halt=1`. DB failure →
+  `(False, '')` so errors never permanently suppress.
+
+**Stage 2 — persistence dwell (new 2026-05-26).** A wake-class condition
+must PERSIST before spending a cycle, so a transient breach/flip/one-sided
+blip that has resolved by council-time doesn't wake.
+- **`config.py:WAKE_DWELL_MINUTES = 15`** — required persistence. 0 disables.
+  Short vs the 1/hr throttle + 4h scheduled cadence, so low added latency.
+- **`scheduler._wake_dwell_status(trigger_id) → (status, reason)`** where
+  status ∈ {`wake`, `defer`, `drop`}. `defer` = live but not yet dwelled →
+  re-checked next 60s loop, NOT consumed, NO spend. `drop` = condition
+  cleared → event consumed, no wake. Per-trigger liveness:
+  - **T2** (`_dwell_t2`): all 1m closes over the last `WAKE_DWELL_MINUTES`
+    must be beyond the SAME grid boundary (true continuous dwell on 1m
+    candles). Falls back to event-age + latest 1h close when 1m history is
+    short (startup / REST-fallback path).
+  - **T14** (`_dwell_t14`): book must STILL be one-sided now AND event age ≥
+    dwell; a refilled/emptied book → `drop`.
+  - **T11** (`_dwell_t11`): live `vol_regime` must NOT have reverted to the
+    pre-flip value AND event age ≥ dwell; reverted → `drop`.
+
+- **`scheduler._consume_wake_gate_event(trigger_id, sentinel)`** (renamed +
+  generalized from `_consume_t2_gate_event`) — marks ALL unconsumed fired
+  events for the trigger consumed (not just newest) so deferred/cleared rows
+  don't accumulate. Sentinels: `wake_suppressed_nontrading`,
+  `wake_breach_cleared`.
+
+- **Guard placement** in `scheduler.main()` loop: after
+  `pending = _pending_wake_class_trigger()`, before `run_magi_cycle()`.
+  Logs `gate_wake_suppressed` / `gate_wake_dropped` / `gate_wake_deferred` /
+  `Gate wake:` per branch.
+
+- **Verified** by `wake_guard_sim.py` at repo root (supersedes
+  `t2_guard_sim.py`, deleted; delete this one after review). Imports the REAL
+  scheduler functions: Stage-1 suppression against the live DB (current
+  PAUSE_INVALID state → suppressed ✓), and wake/defer/drop dwell assertions
+  for T2/T11/T14 against in-memory DBs — all pass.
+
+- **Note:** T11/T14 are edge-triggered (regime flip; bilateral→one-sided
+  book transition), so they don't re-fire hourly on a standing condition the
+  way level-triggered T2 does — they were not the May-25 bleed. The guards
+  now cover them anyway as defense-in-depth + transient filtering, at no cost
+  when they aren't firing.
+
+- **What remains (Problem 2, separate session):** why is the grid stuck in
+  `PAUSE_INVALID + geometry_veto=RISK_BLOCK` since ~14:00 UTC 2026-05-25?
+  The council votes `PAUSE_LONGS` every cycle; `enforce_hard_rules` vetoes it
+  (`PAUSE_LONGS` with only 2 open buys and no justified order skew fails the
+  PAUSE_INVALID precondition). Until that is diagnosed and resolved, the grid
+  is not trading even after magi.service is re-enabled. `02_NEXT_BUILD_TASKS.md`
+  item 0 tracks this. magi.service must stay disabled until Problem 2 is
+  understood.
 
 ## Session 2026-05-24 changes
 
@@ -123,7 +539,15 @@ confirmed preserved. See Session 2026-05-24 below. Prior: 2026-05-23 —
     `WAKE_MIN_INTERVAL_MIN=60` since ANY cycle (`_last_magi_cycle_at` set in
     `run_magi_cycle`). Edge-triggered functions + `consumed_in_cycle` marking
     prevent re-waking on a standing condition. Cost: ~$0 extra in calm markets,
-    one prompt per event, ≤~24/day worst case.
+    one prompt per event. **Correction (2026-05-25):** the ≤~24/day estimate
+    assumed T2 was edge-triggered — it is not. T2 is level-triggered (fires
+    whenever price stays outside the grid boundary) and produced ~30 cycles/day
+    during a standdown period, burning ~$18 over 24h. A precondition guard
+    (Session 2026-05-25) suppresses these wakes while the grid is in a
+    non-trading state. **2026-05-26:** generalized to T2/T11/T14 and renamed
+    `T2_REQUIRES_ACTIVE_GRID` → `WAKE_REQUIRES_ACTIVE_GRID`, plus a
+    `WAKE_DWELL_MINUTES` persistence dwell — see "Gate-wake precondition
+    guards" under Session 2026-05-25.
 - **Two new book-composition gate triggers** (`magi/gate.py`), the gate's first
   eyes on "trending market drains one side of the grid" (the market-movement
   triggers T1–T3/T11–T13 and the 24h drought T4 never saw it):
@@ -160,6 +584,52 @@ confirmed preserved. See Session 2026-05-24 below. Prior: 2026-05-23 —
   book gets the council involved best-case ~10 min, worst-case ~1h (throttle),
   vs. up to 4h before. See `02_NEXT_BUILD_TASKS.md` for the deferred real-time
   fill path.
+
+### ADAM error tracking + log-severity audits + icontract invariants (later 2026-05-24)
+
+- **ADAM shipped (`magi/adam.py`).** Sentry error-only tracking (no perf /
+  tracing / profiling / replay; `send_default_pii=False`). `SENTRY_DSN` in
+  `.env`. Two entry points: `adam.init("<service>")` for the three long-running
+  services (scheduler, observer [module-top], dashboard) and
+  `adam.init_oneshot("<name>")` (adds an `atexit` flush) for the seven one-off
+  `__main__` scripts (database, config_validator, learning, orchestrator,
+  provision_agents, readiness, validate_schema). `before_send` drops
+  KeyboardInterrupt / SystemExit; adam loads dotenv at import so it resolves
+  `SENTRY_DSN` standalone. Operational alerting (ntfy + magi_alerts + dashboard
+  panels) is unchanged and independent — ADAM only catches unhandled
+  exceptions / crashes.
+- **Log-severity audits** (driven by ADAM's `LoggingIntegration`, which turns
+  every `logger.error/.exception/.critical` into a Sentry issue — so ERROR-level
+  severity now has a Sentry cost):
+  - `grid/engine.py`: 8 lines re-leveled — 60/61/62 (`Live gate — gate_X: PASS`,
+    the recurring false-positive source, fired at every engine init) and
+    1376/1415 (PAUSE no-op) → INFO; 173/443/447 (zero-balance fallback,
+    price-sanity order refusals) ERROR → warning.
+  - `magi/orchestrator.py`: already well-classified, 0 changes.
+  - `magi/council.py`: 1 line — `1156` (R0-failed-after-retry → SAFE_DEFAULTS)
+    ERROR → warning, since agent degradation is already alerted via the
+    edge-triggered ntfy path and was otherwise spamming Sentry every cycle
+    during sustained degradation.
+- **`scheduler.py:341`**: `log.error(f"MAGI cycle error: {e}")` →
+  `log.exception("MAGI cycle error: %s", e)` so Sentry attaches the full Python
+  traceback alongside the exception's message text.
+- **icontract installed (2.7.3); first two postcondition invariants on
+  `enforce_hard_rules`** (`@icontract.snapshot` captures the input
+  regime_action / geometry_veto / grid_action). Invariant 1 — rule-0d coverage
+  (regression guard for `cyc_1779480012`): when the council vetoes a structural
+  action, rule 0d must record a coverage tag AND grid_action must be MAINTAIN
+  unless a higher-precedence rule superseded it. Invariant 2 — override-tag
+  integrity: every tag in `hard_rule_overrides` must be canonical. New module
+  constants in `orchestrator.py`: `_CANONICAL_OVERRIDE_TAGS` (20 — the 17
+  distinct literal tags + the three `[AGENT_DEGRADED:<agent>]` forms) and
+  `_RULE_0D_SUPERSEDING_TAGS` (5). A precedence-ladder paragraph was added to the
+  `enforce_hard_rules` docstring documenting the implicit rule order (later rules
+  override earlier rules' grid_action — by design).
+- **icontract violations surface via the Sentry path, not a crash.** A
+  `ViolationError` propagates out of `run_cycle`, is caught by the existing
+  `try/except` in `scheduler.py`, logged via `log.exception` → ADAM → Sentry
+  (now with traceback + icontract's value dump). The cycle fails (no decision
+  applied) and the scheduler loop continues — no crash-loop.
 
 ## Session 2026-05-23 changes
 
@@ -1109,12 +1579,12 @@ Hard caps in `config.py`: `MAX_GRID_SPACING_PCT = 0.025`, `MIN_GRID_SPACING_PCT 
 ## Services
 | Service | State |
 |---|---|
-| magi.service | active |
+| magi.service | **inactive + disabled** (halted 2026-05-25 ~20:25 UTC — T2 credit burn; do not re-enable until Problem 2 resolved) |
 | magi-dashboard.service | active |
 | letta.service | inactive + disabled (intentional) |
 | docker.service | active (no MAGI containers; engine doesn't use Docker) |
 
-Restart pattern: `systemctl restart magi.service magi-dashboard.service`
+Restart pattern: `systemctl enable magi.service && systemctl restart magi.service magi-dashboard.service`
 
 ## Live state (verified 2026-05-22 ~20:00 UTC)
 

@@ -1401,6 +1401,25 @@ def update_debate_outcomes(cycle_id, window, fills, pnl,
     conn.close()
 
 
+def update_debate_applied(cycle_id, applied_grid_action, applied_spacing=None,
+                          engine_clamped=0, clamp_reason=None):
+    """Record what the ENGINE actually applied this cycle onto its
+    debate_records row. Distinct from final_grid_action (the post-hard-rule
+    council decision): this captures ENGINE-level divergence — the council-veto
+    cross-check coercion, empty-book-guard skips, null-geometry refusals, and
+    spacing clamps. Keyed by cycle_id (the row is already inserted by run_cycle
+    before the engine applies). Non-fatal at the call site."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE debate_records SET applied_grid_action=?, applied_spacing=?, "
+        "engine_clamped=?, clamp_reason=? WHERE cycle_id=?",
+        (applied_grid_action, applied_spacing,
+         int(bool(engine_clamped)), clamp_reason, cycle_id),
+    )
+    conn.commit()
+    conn.close()
+
+
 def get_pending_outcome_backfills(window):
     """
     Return list of {cycle_id, timestamp} for debate_records whose

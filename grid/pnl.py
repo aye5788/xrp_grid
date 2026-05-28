@@ -1,8 +1,19 @@
 import logging
+import re
 from collections import deque
 from datetime import datetime, date, timezone
 
 log = logging.getLogger('grid.pnl')
+
+# Kraken order txids look like O5SRYD-UASK7-EA4OTU; pre-live paper fills use
+# internal hex UUIDs with no dashes. grid_orders has no paper flag, so the txid
+# shape is the only available discriminator. PnL is scoped to live fills only —
+# commingling paper history overstated the headline number ~$10.
+_KRAKEN_TXID = re.compile(r'^O[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{6}$')
+
+
+def _is_live_order_id(order_id) -> bool:
+    return bool(_KRAKEN_TXID.match(str(order_id or '')))
 
 
 def _fifo_match(fills: list) -> tuple:
@@ -64,12 +75,28 @@ def _fifo_match(fills: list) -> tuple:
 
 def get_pnl_snapshot(current_price: float) -> dict:
     """
-    Compute realized, unrealized, and total P&L from all filled grid_orders.
+    Compute live-only P&L from filled grid_orders, reconciled against account
+    equity.
+
+    Scope: only Kraken live fills (txid-shaped order_id, see _is_live_order_id)
+    are counted. Pre-live paper fills are excluded — they were inflating the
+    headline by ~$10.
+
+    Total P&L is equity-based and marked to current_price:
+        total = current_equity - baseline_equity
+    where baseline_equity is the account value at the first live fill (held XRP
+    marked at that fill's price, plus USD) and current_equity is the latest
+    inventory snapshot marked at current_price. This is robust to selling seed
+    inventory that has no recorded buy — a pure buy/sell FIFO reports those held
+    lots as $0 unrealized, which hid the inventory drawdown.
+
+    realized   = FIFO-matched profit from closed live round trips (net of fees).
+    unrealized = total - realized (mark-to-market on the net open position).
 
     Returns a dict with:
       realized, unrealized, total, fees, fill_count, fills_today,
       win_rate, avg_pnl_per_round_trip, time_since_last_fill_minutes,
-      matched_round_trips, unmatched_buys,
+      matched_round_trips, unmatched_buys, baseline_equity, current_equity,
       order_pnl_map  — {sell_order_id: contribution} for matched sells
     """
     from database import get_conn
@@ -80,17 +107,18 @@ def get_pnl_snapshot(current_price: float) -> dict:
         WHERE status='filled'
         ORDER BY COALESCE(filled_at, timestamp) ASC
     ''').fetchall()
-    conn.close()
 
-    fills = [dict(r) for r in rows]
+    fills = [dict(r) for r in rows if _is_live_order_id(dict(r).get('order_id'))]
 
     if not fills:
+        conn.close()
         return {
             'realized': 0.0, 'unrealized': 0.0, 'total': 0.0,
             'fees': 0.0, 'fill_count': 0, 'fills_today': 0,
             'win_rate': 0.0, 'avg_pnl_per_round_trip': None,
             'time_since_last_fill_minutes': None,
             'matched_round_trips': 0, 'unmatched_buys': 0,
+            'baseline_equity': None, 'current_equity': None,
             'order_pnl_map': {}
         }
 
@@ -98,10 +126,31 @@ def get_pnl_snapshot(current_price: float) -> dict:
 
     realized = sum(t['contribution'] for t in matched_trips)
 
-    unrealized = sum(
-        (current_price - float(b.get('fill_price') or 0)) * b['size'] - b['fee']
-        for b in unmatched_buys
-    )
+    # Equity-based total. Baseline = inventory at the first live fill, marked at
+    # that fill's price; current = latest inventory marked at current_price.
+    first_live_ts = fills[0].get('filled_at') or fills[0].get('timestamp')
+    first_live_px = float(fills[0].get('fill_price') or fills[0].get('price') or 0)
+    base_row = conn.execute('''
+        SELECT xrp_held, usd_held FROM inventory
+        WHERE timestamp >= ? ORDER BY timestamp ASC LIMIT 1
+    ''', (first_live_ts,)).fetchone()
+    cur_row = conn.execute('''
+        SELECT xrp_held, usd_held FROM inventory
+        ORDER BY timestamp DESC LIMIT 1
+    ''').fetchone()
+    conn.close()
+
+    baseline_equity = current_equity = None
+    if base_row and cur_row and first_live_px > 0:
+        baseline_equity = float(base_row['xrp_held']) * first_live_px + float(base_row['usd_held'])
+        current_equity = float(cur_row['xrp_held']) * current_price + float(cur_row['usd_held'])
+        total = current_equity - baseline_equity
+        unrealized = total - realized
+    else:
+        # No inventory baseline available — fall back to FIFO realized only.
+        log.warning('pnl: no inventory baseline for equity total; using FIFO realized only')
+        total = realized
+        unrealized = 0.0
 
     fees = sum(float(f.get('fee') or 0) for f in fills)
 
@@ -141,7 +190,7 @@ def get_pnl_snapshot(current_price: float) -> dict:
     return {
         'realized': round(realized, 4),
         'unrealized': round(unrealized, 4),
-        'total': round(realized + unrealized, 4),
+        'total': round(total, 4),
         'fees': round(fees, 4),
         'fill_count': len(fills),
         'fills_today': fills_today,
@@ -150,5 +199,7 @@ def get_pnl_snapshot(current_price: float) -> dict:
         'time_since_last_fill_minutes': time_since_minutes,
         'matched_round_trips': n_trips,
         'unmatched_buys': len(unmatched_buys),
+        'baseline_equity': round(baseline_equity, 4) if baseline_equity is not None else None,
+        'current_equity': round(current_equity, 4) if current_equity is not None else None,
         'order_pnl_map': order_pnl_map,
     }

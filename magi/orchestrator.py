@@ -60,6 +60,7 @@ from magi.council import (
     resolve_consensus,
     run_round_0_parallel,
     run_round_1,
+    should_run_r1,
     update_world_state,
 )
 
@@ -1805,6 +1806,29 @@ def _early_halt_return(trigger: str, cycle_id: str, failures: list) -> dict:
 
 # --- Main cycle ---
 
+def _prior_r0_signature():
+    """Read the previous cycle's R0 position triple from debate_records for
+    the R1 novelty gate (council.should_run_r1). Order matches
+    council.r0_position_signature: (casper, melchior, balthasar). Returns
+    None when no prior row exists or on any DB error — the caller treats
+    None as 'novel', so R1 fires (fail-open, never silently suppressed)."""
+    try:
+        conn = get_conn()
+        row = conn.execute(
+            "SELECT casper_r0_position, melchior_r0_position, "
+            "balthasar_r0_position "
+            "FROM debate_records ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+    except Exception as e:
+        log.warning("R1 gate: prior-signature DB read failed: %s", e)
+        return None
+    if not row:
+        return None
+    return (row["casper_r0_position"], row["melchior_r0_position"],
+            row["balthasar_r0_position"])
+
+
 def run_cycle(trigger: str = "manual", force: bool = False) -> dict:
     log.info("MAGI cycle starting — trigger=%s force=%s", trigger, force)
     cycle_id = f"cyc_{int(time.time())}"
@@ -1841,24 +1865,34 @@ def run_cycle(trigger: str = "manual", force: bool = False) -> dict:
         float(round_0['balthasar'].get('conviction') or 0.0),
     )
 
-    # 6. Round 1 — ALWAYS fires as synthesis. Each agent's R1 prompt
-    # explicitly pastes peers' R0 outputs and asks for revision/hold
-    # in light of the integrated view. Replaces the prior
-    # conflict-triggered debate; CONFLICT_MATRIX retired.
-    log.info("Round 1: firing synthesis for all three agents")
-    round_1 = run_round_1(round_0, cycle_id)
-    for agent in ("casper", "melchior", "balthasar"):
-        r1 = round_1.get(agent) or {}
-        if r1.get("_r1_parse_error"):
-            log.warning(
-                "Round 1 [%s] parse error: %s — falling back to R0",
-                agent, r1.get("_r1_parse_error"),
-            )
-            continue
-        r0_pos = (round_0.get(agent) or {}).get("position")
-        r1_pos = r1.get("position")
-        if r1_pos and r0_pos and r1_pos != r0_pos:
-            log.info("Round 1 [%s] shifted %s -> %s", agent, r0_pos, r1_pos)
+    # 6. Round 1 — CONDITIONAL synthesis. R1 lets each agent revise after
+    # seeing peers' R0, but it costs three full ~80k-token calls and, over 46
+    # live cycles, only ever changed the applied action when the council
+    # genuinely disagreed about acting AND that disagreement was new. We skip
+    # it on aligned cycles and on frozen standoffs (same R0 positions as the
+    # prior cycle), both of which the hard-rule layer resolves regardless.
+    # See council.should_run_r1. When skipped, round_1={} and resolve_consensus
+    # falls back to each agent's R0 (incl. R0 regime_action/geometry_veto).
+    prior_sig = _prior_r0_signature()
+    fire_r1, r1_reason = should_run_r1(round_0, prior_sig)
+    if fire_r1:
+        log.info("Round 1: firing synthesis — %s", r1_reason)
+        round_1 = run_round_1(round_0, cycle_id)
+        for agent in ("casper", "melchior", "balthasar"):
+            r1 = round_1.get(agent) or {}
+            if r1.get("_r1_parse_error"):
+                log.warning(
+                    "Round 1 [%s] parse error: %s — falling back to R0",
+                    agent, r1.get("_r1_parse_error"),
+                )
+                continue
+            r0_pos = (round_0.get(agent) or {}).get("position")
+            r1_pos = r1.get("position")
+            if r1_pos and r0_pos and r1_pos != r0_pos:
+                log.info("Round 1 [%s] shifted %s -> %s", agent, r0_pos, r1_pos)
+    else:
+        log.info("Round 1: skipped — %s", r1_reason)
+        round_1 = {}
     conflict = None  # retained for downstream signatures expecting it
 
     # 9. Resolve consensus from the synthesised votes
