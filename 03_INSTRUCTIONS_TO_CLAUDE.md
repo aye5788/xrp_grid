@@ -2,15 +2,19 @@ These are explicit operating instructions for Claude in this project.
 Read them at the start of every session. They override generic helpfulness
 defaults where they conflict.
 
-> **STATUS — SHUT DOWN (2026-05-28). Migrating off Letta.** MAGI is stopped:
-> services disabled, live orders cancelled, state snapshotted to
-> `snapshots/letta_shutdown_2026-05-28/`, Letta agents preserved (not deleted).
-> The "vital signs at session start" / audit / engine-vs-council guidance below
-> assumes a *running* system — it does not apply while shut down. Do NOT restart
-> services, call the Letta agents, or cancel the Letta subscription without
-> explicit operator direction. The pending direction is a native (OpenAI /
-> Anthropic / Google) rebuild, which is a separate decision — do not start it
-> from these docs.
+> **STATUS — AGENT LAYER MIGRATED TO GOOGLE ADK (in code, 2026-05-31); NOT RUN LIVE.**
+> MAGI is still shut down at the service level. The council's agent-call layer has
+> been rebuilt off Letta onto Google ADK (`magi/council.py` + `magi/agents/`;
+> stateless per cycle; Melchior emits an economic verdict). Offline-validated; no
+> model invoked, nothing deployed. The live queue is `02_NEXT_BUILD_TASKS.md`
+> "Post-migration work queue". **This SUPERSEDES the 2026-05-29 vendor-stateful plan
+> in two ways:** agents are now STATELESS (not vendor-stateful), and cadence is
+> gate-driven. The "Migration target architecture" section just below and the
+> "Framing native vendor APIs as stateless" forbidden move are HISTORICAL — see the
+> corrections inline. The "vital signs at session start" / audit / engine-vs-council
+> guidance assumes a *running* system — it does not apply while shut down. Do NOT
+> restart services, deploy, or cancel the Letta subscription without explicit
+> operator direction.
 
 ## Read first, every session
 
@@ -32,6 +36,38 @@ covers operating discipline and architecture intent. The two are
 complementary; do not duplicate. When they overlap, `CLAUDE.md` is the
 canonical source for architecture/intent and this file is the canonical
 source for tone/workflow.
+
+## Architecture as built (2026-05-31 ADK migration — supersedes the 2026-05-29 target below)
+
+What was actually built (authoritative: `01_CURRENT_STATE.md` Session 2026-05-31
+(later)):
+- **Purpose = adaptiveness, not cost** (unchanged). MAGI is an adaptive grid bot
+  solving the static-grid weakness (regime-blindness in directional markets). Cost
+  was the trigger, not the goal.
+- **Platform:** native **Google ADK `LlmAgent`s** in `magi/council.py` —
+  Casper `gemini-2.5-flash` (native), Melchior `LiteLlm("openai/gpt-4o")`,
+  Balthasar `LiteLlm("anthropic/claude-sonnet-4-6")`. NOT Agent Studio / Responses
+  API / Managed Agents.
+- **State ownership:** agents are **STATELESS per cycle** (`include_contents=
+  "none"`). Vendors own NOTHING persistent. SQLite owns all memory; a controlled
+  per-agent recall layer (deterministic SQLite→prompt-injection) is scoped, not
+  built. Statelessness is deliberate — Letta vendor-statefulness caused the
+  anchoring / self_model-corruption failures.
+- **Call model:** gate-driven (free gate decides whether the paid council wakes;
+  floor ≈ 1 call/day; ceiling = breach frequency). 4h timer is a backstop. Cost is
+  tuned via gate breach sensitivity, not cadence constants.
+
+### Migration target architecture [HISTORICAL — the 2026-05-29 plan, NOT what was built]
+
+> Kept for provenance. The build went stateless ADK instead of this vendor-stateful
+> design. Do not action this as the plan.
+
+- **Vendor mapping (was locked):** Casper→Google (Gemini Agent Platform; Memory
+  Bank + Sessions), Melchior→OpenAI (Responses + Conversations), Balthasar→Anthropic
+  (Claude Managed Agents). — NOT used; all three are ADK `LlmAgent`s now.
+- **State ownership (REVERSED):** the plan was STATEFUL vendor-side (vendor owns
+  each agent's memory/self_model/thread history). The build is stateless; agent
+  memory is SQLite-sourced and prompt-injected.
 
 ## Hard rules — do not violate
 
@@ -180,12 +216,40 @@ Signs: caps lock, short messages, "WTF," "OMG," "JUST DO IT."
   than the others.** Symmetric work gets symmetric attention. The
   operator notices and will check.
 
+Migration-specific (updated 2026-05-31 — agents are now stateless ADK):
+- **Bringing up cadence (4h scheduled cycles, etc.) as a cost-optimization dial.**
+  Already engineered hard — the architecture is gate-driven (the free gate decides
+  whether the paid council wakes; 4h is a backstop). Cost is tuned via gate breach
+  sensitivity, not the cadence constant. Do not re-derive it from the cost history.
+- **Treating MAGI as a cost-optimization project.** It is an adaptive-grid project;
+  cost reduction is a consequence, not the purpose.
+- **Re-introducing vendor-owned agent memory / self_model / persistent threads, or
+  `VertexAiMemoryBankService`.** REVERSED 2026-05-31: agents are stateless per
+  cycle; per-agent memory is deterministic SQLite→prompt-injection (read-only to the
+  agent, bounded). Vendor-side statefulness caused the anchoring + self_model
+  corruption we migrated away from — do not reintroduce it.
+- **Re-deriving the vendor mapping as Agent Studio / Responses API / Managed
+  Agents.** The build is native ADK `LlmAgent`s (Casper Gemini-native, Melchior +
+  Balthasar via LiteLlm). The 2026-05-29 platform mapping is historical.
+- **Reintroducing the retired Melchior action vocabulary** (MAINTAIN/RECENTRE/
+  TIGHTEN/WIDEN as his vote). Melchior emits a verdict (THESIS_HOLDS / RECONFIGURE /
+  NO_PROFITABLE_GRID); the orchestrator maps it to the engine action.
+
 ## Memory and context discipline
 - The repo at `aye5788/xrp_grid` is the source of truth for code.
 - The handoff docs (00, 01, 02, this file) are the source of truth for state and plans.
 - Publish the handoff docs by running `bash /root/magi_docs/sync.sh`, which
   pushes them to the private repo `aye5788/magi-docs`. That is the definitive
   doc-publish path; `aye5788/xrp_grid` is code only — never push docs there.
+- **MANDATORY — publish docs at end of any session that edits them.** Editing a
+  handoff doc on the droplet does NOT publish it; the edit only reaches GitHub
+  (and therefore the claude.ai-connected `magi-docs` project) when `sync.sh`
+  runs. Any session that changes `CLAUDE.md` / `00`–`03` MUST run
+  `bash /root/magi_docs/sync.sh` before ending. A `post-commit` git hook in
+  `/root/xrp_grid` auto-runs it on doc-touching commits as a safety net, but do
+  not rely on the hook — run it explicitly. Symptom of skipping this: the
+  connected docs read stale even though you "synced" in claude.ai (claude.ai
+  pulls from GitHub; if `sync.sh` never ran, GitHub never changed).
 - If user memory and a doc disagree, the doc wins.
 - If a doc and the live code disagree, the live code wins (and update the doc).
 - Don't trust training data on Kraken or Letta specifics — both have changed.

@@ -4,14 +4,9 @@ council.py — Round 0 / Round 1 debate engine for the MAGI council (ADK build).
 The agent-call layer was migrated off Letta Cloud onto the Google Agent
 Development Kit (ADK). Each council member is a native ADK `LlmAgent` with a
 locked `output_schema` (structured JSON) and `include_contents="none"` (stateless
-per cycle); council.py runs them and translates their structured output into the
-parsed-vote dict shapes orchestrator.py consumes.
-
-Melchior's economic VERDICT is passed through UNFLATTENED. council.py no longer
-maps the verdict onto the old grid_action enum — the orchestrator
-(enforce_hard_rules) owns the deterministic verdict -> grid_action translation, so
-NO_PROFITABLE_GRID can resolve to a stand-down (GRID_PAUSE) instead of being
-neutered into MAINTAIN.
+per cycle); council.py runs them and TRANSLATES their structured output back into
+the exact parsed-vote dict shapes orchestrator.py already consumes, so the
+boundary is unchanged.
 
 Boundary preserved — orchestrator.py imports and calls, unchanged:
   update_world_state(world_state)
@@ -21,32 +16,33 @@ Boundary preserved — orchestrator.py imports and calls, unchanged:
   resolve_consensus(round_0, round_1, conflict=None) -> consensus dict
   emit_human_alert(cycle_id, reason)
 
-Parsed-vote dict shape returned per agent:
+Parsed-vote dict shape returned for each agent (UNCHANGED from the Letta build —
+this is the contract resolve_consensus / enforce_hard_rules / _build_debate_record
+read):
   casper:    {position(regime), conviction(float), key_evidence[list], crux,
               regime_action, freshness_retry, _raw}
-  melchior:  {verdict(THESIS_HOLDS|RECONFIGURE|NO_PROFITABLE_GRID),
-              conviction(float), key_evidence[list], crux,
+  melchior:  {position(grid_action), conviction(float), key_evidence[list], crux,
               geometry({target_spacing_pct,target_levels} | None),
-              freshness_retry, _raw}     # NOTE: no 'position' — Melchior's primary
-                                         # judgment is 'verdict'
+              freshness_retry, _raw}
   balthasar: {position(risk_action), conviction(float), key_evidence[list], crux,
               geometry_veto, freshness_retry, _raw}
 
-`_raw` carries the un-translated native vote so Round 1 can paste peers' votes in
-their native vocabulary. Downstream consumers read only the documented keys.
+`_raw` carries the un-translated native vote (RegimeVote/GridVote/RiskVote dump)
+so Round 1 can paste peers' votes in their NATIVE vocabulary. Downstream consumers
+read only the documented keys; `_raw` is ignored by them.
 
-resolve_consensus emits `grid_verdict` (Melchior's verdict) rather than a
-grid_action; enforce_hard_rules translates it:
-  THESIS_HOLDS       -> MAINTAIN    (hold the current grid)
-  RECONFIGURE        -> RECENTRE    (rebuild to Melchior's geometry; engine path)
-  NO_PROFITABLE_GRID -> GRID_PAUSE  (stand down: cancel orders and idle)
-The regime_action / geometry_veto veto ladder still gates RECONFIGURE exactly as
-before (a RECONFIGURE maps to RECENTRE, so rule 0d vetoes it under
-DEFER_STRUCTURAL / STAND_DOWN / HOLD_GEOMETRY / RISK_BLOCK).
+VERDICT -> grid_action mapping (Melchior). The new GridVote emits an economic
+verdict, not the old action vocabulary; orchestrator/engine still consume
+grid_action ∈ {MAINTAIN, RECENTRE, TIGHTEN, WIDEN}. council.py maps:
+  THESIS_HOLDS       -> MAINTAIN   (no geometry)
+  RECONFIGURE        -> RECENTRE   (geometry = chosen variant; engine rebuilds to it)
+  NO_PROFITABLE_GRID -> MAINTAIN   (no geometry)
+This is lossy by design (TIGHTEN/WIDEN are not emitted; NO_PROFITABLE_GRID does
+not actively tear down a live grid — it holds). See the migration report.
 
-Action / verdict vocabularies (downstream contract):
+Action vocabularies after translation (unchanged downstream contract):
   - casper.position    ("regime")      : RANGING | TRENDING | UNCERTAIN
-  - melchior.verdict   ("grid_verdict"): THESIS_HOLDS | RECONFIGURE | NO_PROFITABLE_GRID
+  - melchior.position  ("grid_action") : MAINTAIN | RECENTRE | TIGHTEN | WIDEN
   - balthasar.position ("risk_action") : CLEAR | PAUSE_LONGS | PAUSE_SHORTS | HALT
 
 NOTE: model invocation requires google-adk + litellm installed and the provider
@@ -78,6 +74,8 @@ log = logging.getLogger(__name__)
 
 
 # --- Model wiring (handles only; no keys) ---
+# Casper: native Gemini (plain string handle). Melchior/Balthasar: LiteLlm
+# connector, "<provider>/<model>". Pin/confirm handles before any deploy.
 _CASPER_MODEL = "gemini-2.5-flash"
 _MELCHIOR_MODEL = "openai/gpt-4o"
 _BALTHASAR_MODEL = "anthropic/claude-sonnet-4-6"
@@ -97,11 +95,18 @@ _MODEL_LABELS = {
     "balthasar": _BALTHASAR_MODEL,
 }
 
+# Melchior verdict -> legacy grid_action (the vocabulary orchestrator/engine read)
+_MELCHIOR_VERDICT_TO_ACTION = {
+    "THESIS_HOLDS": "MAINTAIN",
+    "RECONFIGURE": "RECENTRE",
+    "NO_PROFITABLE_GRID": "MAINTAIN",
+}
 
-# --- Constants (downstream contract) ---
+
+# --- Constants (unchanged contract) ---
 
 VALID_REGIMES      = ("RANGING", "TRENDING", "UNCERTAIN")
-VALID_GRID_VERDICTS = ("THESIS_HOLDS", "RECONFIGURE", "NO_PROFITABLE_GRID")
+VALID_GRID_ACTIONS = ("MAINTAIN", "RECENTRE", "TIGHTEN", "WIDEN")
 VALID_RISK_ACTIONS = ("CLEAR", "PAUSE_LONGS", "PAUSE_SHORTS", "HALT")
 
 # Per-agent extension field vocabularies (consumed by resolve_consensus).
@@ -112,12 +117,11 @@ GEOMETRY_VETOS = ("PROCEED", "HOLD_GEOMETRY", "RISK_BLOCK")
 # conviction == 0.0 AND crux == "(no response)" fingerprint is the
 # council-degradation marker orchestrator._check_council_degradation keys on —
 # preserved so a native agent failure still trips the degradation freeze.
-# Melchior's safe default is the THESIS_HOLDS verdict (-> MAINTAIN; a safe hold).
 SAFE_DEFAULTS = {
     "casper":    {"position": "UNCERTAIN", "conviction": 0.0,
                   "key_evidence": [], "crux": "(no response)"},
-    "melchior":  {"verdict": "THESIS_HOLDS", "conviction": 0.0,
-                  "key_evidence": [], "crux": "(no response)", "geometry": None},
+    "melchior":  {"position": "MAINTAIN",  "conviction": 0.0,
+                  "key_evidence": [], "crux": "(no response)"},
     "balthasar": {"position": "CLEAR",     "conviction": 0.0,
                   "key_evidence": [], "crux": "(no response)"},
 }
@@ -132,12 +136,7 @@ _RISK_CONSERVATISM_ORDER = {
 }
 
 
-# --- Legacy CONFLICT_MATRIX (retained for compat; NOT on the live R1 path) ---
-# NOTE: these grid rules use the retired action vocabulary (TIGHTEN/WIDEN/MAINTAIN)
-# that Melchior no longer emits under the verdict model, so detect_conflict no
-# longer fires on Melchior's grid leg. The live R1 gate is should_run_r1 ->
-# _r0_conflict (verdict-aware). Kept only so any external importer of
-# detect_conflict / CONFLICT_MATRIX does not break.
+# --- CONFLICT_MATRIX (retained; pure logic, used by detect_conflict) ---
 
 def _buy_count(world_state):
     return int(((world_state or {}).get("open_orders") or {}).get("buy_count") or 0)
@@ -167,6 +166,31 @@ CONFLICT_MATRIX = [
      ["melchior", "balthasar"],
      "Balthasar recommends HALT with conviction > 0.6; this conflicts with any "
      "continued-grid recommendation from Melchior."),
+
+    ("*", "MAINTAIN", "*",
+     lambda r0, ws: _buy_count(ws) == 0 or _sell_count(ws) == 0,
+     ["melchior", "balthasar"],
+     "Grid is one-sided (zero orders on one side) — MAINTAIN would leave it "
+     "degenerate. Council must justify or revise."),
+
+    ("*", "MAINTAIN", "*",
+     lambda r0, ws: (_hours_since_fill(ws) is not None
+                     and _hours_since_fill(ws) > 12),
+     ["casper", "melchior"],
+     "No fills for >12h — MAINTAIN preserves an inactive grid. Council must "
+     "justify or revise."),
+
+    ("*", "*", "PAUSE_LONGS",
+     lambda r0, ws: _buy_count(ws) == 0,
+     ["melchior", "balthasar"],
+     "PAUSE_LONGS while buy_count=0 cancels nothing and prevents rebuild on "
+     "the empty side. Council must justify or revise."),
+
+    ("*", "*", "PAUSE_SHORTS",
+     lambda r0, ws: _sell_count(ws) == 0,
+     ["melchior", "balthasar"],
+     "PAUSE_SHORTS while sell_count=0 cancels nothing and prevents rebuild on "
+     "the empty side. Council must justify or revise."),
 ]
 
 
@@ -200,7 +224,11 @@ def _parse_json_strict(text: str) -> Optional[dict]:
 
 def _alert_exception(agent_id: str, exc: BaseException, phase: str = "R0") -> None:
     """Record a magi_alerts row for an exception raised by the model call.
-    Best-effort — never raises."""
+
+    Classifies common provider failures (auth / credit / rate limit) from the
+    exception's status_code/text; defaults to provider_error/warn. Best-effort —
+    never raises.
+    """
     status = getattr(exc, "status_code", None)
     text = (str(exc) or "").lower()
     if status == 401 or "unauthorized" in text or "authentication" in text \
@@ -224,15 +252,18 @@ def _alert_exception(agent_id: str, exc: BaseException, phase: str = "R0") -> No
         log.error("insert_alert failed: %r", alert_err)
 
 
-# --- ADK agent construction (lazy; per-agent) ---
+# --- ADK agent construction (lazy; per-agent so one bad persona can't kill all) ---
 
 _AGENTS: dict = {}
 
 
 def _get_agent(agent_id: str):
-    """Build (and cache) one ADK LlmAgent. Imports ADK lazily. Raises on
-    persona-load failure or missing ADK — the caller converts that into the
-    agent's SAFE_DEFAULTS so a single bad agent degrades rather than crashing."""
+    """Build (and cache) one ADK LlmAgent. Imports ADK lazily.
+
+    Raises on persona-load failure or missing ADK — the caller converts that into
+    the agent's SAFE_DEFAULTS so a single bad agent degrades rather than crashing
+    the cycle.
+    """
     cached = _AGENTS.get(agent_id)
     if cached is not None:
         return cached
@@ -282,8 +313,12 @@ def _get_agent(agent_id: str):
 async def _invoke_agent_async(agent_id: str, message_text: str,
                               session_suffix: str):
     """Run one ADK agent over a fresh in-memory session and return
-    (raw_state_value, final_response_text). Uses Runner + InMemorySessionService
-    per the ADK runtime docs."""
+    (raw_state_value, final_response_text).
+
+    Uses Runner + InMemorySessionService per the ADK runtime docs. The agent's
+    structured vote lands in session.state under its output_key (raw); the final
+    event text is captured as a fallback.
+    """
     from google.adk.runners import Runner
     from google.adk.sessions import InMemorySessionService
     from google.genai import types
@@ -316,7 +351,7 @@ async def _invoke_agent_async(agent_id: str, message_text: str,
     return raw, final_text
 
 
-# --- Native-vote parsing + translation to the parsed-vote shapes ---
+# --- Native-vote parsing + translation to the legacy parsed-vote shapes ---
 
 def _parse_native_vote(agent_id: str, raw, final_text) -> Optional[dict]:
     """Validate the agent's structured output against its Pydantic schema and
@@ -343,9 +378,9 @@ def _parse_native_vote(agent_id: str, raw, final_text) -> Optional[dict]:
 
 
 def _translate(agent_id: str, native: dict) -> dict:
-    """Translate a validated native vote into the parsed-vote dict shape
-    orchestrator.py consumes. Melchior's verdict is passed through UNFLATTENED.
-    Carries `_raw` for R1 peer summaries."""
+    """Translate a validated native vote into the legacy parsed-vote dict shape
+    orchestrator.py consumes. Carries `_raw` (the native dump) for R1 peer
+    summaries."""
     base = {
         "conviction":     float(native.get("conviction") or 0.0),
         "key_evidence":   native.get("key_evidence") or [],
@@ -362,7 +397,7 @@ def _translate(agent_id: str, native: dict) -> dict:
         base["geometry_veto"] = native.get("geometry_veto")
     elif agent_id == "melchior":
         verdict = native.get("verdict")
-        base["verdict"] = verdict           # pass-through, NOT flattened
+        base["position"] = _MELCHIOR_VERDICT_TO_ACTION.get(verdict, "MAINTAIN")
         geom = native.get("geometry")
         if verdict == "RECONFIGURE" and isinstance(geom, dict):
             base["geometry"] = {
@@ -390,8 +425,12 @@ _CURRENT_WORLD_STATE: Optional[dict] = None
 
 
 def update_world_state(world_state: dict) -> None:
-    """Cache the cycle's world_state for the stateless ADK agents. Replaces the
-    Letta shared-block write. Non-fatal."""
+    """Cache the cycle's world_state for the stateless ADK agents.
+
+    Replaces the Letta shared-block write. orchestrator calls this once per cycle;
+    run_round_0_parallel (when given world_state) and run_round_1 read the cache so
+    both rounds inject the same world_state into each agent's prompt. Non-fatal.
+    """
     global _CURRENT_WORLD_STATE
     _CURRENT_WORLD_STATE = world_state
     try:
@@ -404,7 +443,8 @@ def update_world_state(world_state: dict) -> None:
 # --- Prompt/message construction (stateless; world_state injected in-message) ---
 
 def _format_triggers_section(triggers: Optional[list]) -> str:
-    """Render the TRIGGERS section that precedes the rest of the R0 message."""
+    """Render the TRIGGERS section that precedes the rest of the R0 message.
+    Identical text for all three agents."""
     if not triggers:
         return (
             "=== NO TRIGGERS IN CURRENT WINDOW ===\n"
@@ -438,7 +478,8 @@ def _format_triggers_section(triggers: Optional[list]) -> str:
 
 
 def _r0_message(cycle_id: str, world_state: Optional[dict]) -> str:
-    """Round-0 user message: triggers + the full world_state JSON."""
+    """Round-0 user message: triggers + the full world_state JSON. The agent's
+    persona (its instruction) plus its output_schema define the response."""
     triggers = (world_state or {}).get("triggers_since_last_cycle") or []
     ws_json = json.dumps(world_state or {}, indent=2, default=str)
     return (
@@ -464,7 +505,7 @@ def _peer_summary(peer_id: str, peer_vote: dict) -> str:
                 f"geometry_veto={raw.get('geometry_veto')}")
     elif peer_id == "melchior":
         geom = raw.get("geometry") or {}
-        head = (f"verdict={raw.get('verdict', (peer_vote or {}).get('verdict', '?'))} "
+        head = (f"verdict={raw.get('verdict', '?')} "
                 f"geometry=spacing:{geom.get('target_spacing_pct')},"
                 f"levels:{geom.get('target_levels')}")
     else:
@@ -539,7 +580,11 @@ def run_round_0_parallel(cycle_id: str,
                          world_state: Optional[dict] = None) -> dict:
     """Fan out Round-0 to all three agents concurrently. Returns
     {agent: parsed_vote_dict}. Each slot is a translated native vote or that
-    agent's SAFE_DEFAULTS (carrying an 'error' key). Signature unchanged."""
+    agent's SAFE_DEFAULTS (carrying an 'error' key).
+
+    When `world_state` is supplied it is also cached (update_world_state) so
+    Round 1 can reuse it. Signature unchanged from the Letta build.
+    """
     if world_state is not None:
         update_world_state(world_state)
     ws = world_state if world_state is not None else _CURRENT_WORLD_STATE
@@ -548,7 +593,8 @@ def run_round_0_parallel(cycle_id: str,
 
 def send_round_0(agent_id: str, cycle_id: str,
                  world_state: Optional[dict] = None) -> dict:
-    """Single-agent Round-0 convenience wrapper (compat)."""
+    """Single-agent Round-0 convenience wrapper (compat). Returns the translated
+    vote or SAFE_DEFAULTS."""
     if world_state is not None:
         update_world_state(world_state)
     ws = world_state if world_state is not None else _CURRENT_WORLD_STATE
@@ -556,13 +602,11 @@ def send_round_0(agent_id: str, cycle_id: str,
                                            _r0_message(cycle_id, ws)))
 
 
-# --- Conflict detection (legacy; pure logic; NOT on the live R1 path) ---
+# --- Conflict detection (pure logic; unchanged) ---
 
 def detect_conflict(round_0: dict, world_state: Optional[dict] = None) -> Optional[dict]:
-    """LEGACY. Walk CONFLICT_MATRIX against the round_0 positions and
-    world_state. Under the verdict model Melchior emits no grid 'position', so
-    this no longer fires on Melchior's grid leg; the live R1 gate is
-    should_run_r1 -> _r0_conflict. Retained for compat only."""
+    """Walk CONFLICT_MATRIX against the round_0 positions and world_state.
+    Returns the highest-combined-conviction matched rule, or None."""
     casper_pos    = round_0.get("casper",    {}).get("position")
     melchior_pos  = round_0.get("melchior",  {}).get("position")
     balthasar_pos = round_0.get("balthasar", {}).get("position")
@@ -642,9 +686,11 @@ async def _round_1_async(round_0: dict, cycle_id: str,
 
 
 def run_round_1(round_0: dict, cycle_id: str) -> dict:
-    """Synthesis round: send R1 to all three agents concurrently. Each R1 message
-    pastes the OTHER two agents' R0 votes (native vocabulary). World_state is read
-    from the per-cycle cache. Signature unchanged."""
+    """Synthesis round: send R1 to all three agents concurrently. Each agent's
+    R1 user message pastes the OTHER two agents' R0 votes (native vocabulary).
+    Returns {agent: parsed_r1_vote | {_r1_parse_error: ...}}. World_state is read
+    from the per-cycle cache (set by update_world_state / run_round_0_parallel).
+    Signature unchanged from the Letta build."""
     return asyncio.run(_round_1_async(round_0, cycle_id, _CURRENT_WORLD_STATE))
 
 
@@ -656,40 +702,34 @@ def send_round_1_synthesis(agent_id: str, cycle_id: str,
                                            self_r0 or {}, peer_r0s or {}))
 
 
-# --- R1 novelty gate (pure logic; verdict-aware) ---
-
-def _primary(agent_id: str, vote: dict) -> Optional[str]:
-    """The agent's primary categorical judgment: Melchior -> verdict, others ->
-    position. Used for the R1 novelty signature and shift detection."""
-    if agent_id == "melchior":
-        return (vote or {}).get("verdict")
-    return (vote or {}).get("position")
-
+# --- R1 novelty gate (pure logic; unchanged) ---
 
 def _r0_conflict(round_0: dict) -> tuple:
     """Genuine cross-agent disagreement in the R0 votes that an R1 synthesis pass
-    could productively resolve. Returns (conflict: bool, reason: str).
-
-    Melchior's structural move under the verdict model is RECONFIGURE; it is the
-    case R1 exists to reconcile when a peer opposes it."""
+    could productively resolve. Returns (conflict: bool, reason: str)."""
     casper    = round_0.get("casper")    or {}
     melchior  = round_0.get("melchior")  or {}
     balthasar = round_0.get("balthasar") or {}
 
-    verdict       = melchior.get("verdict")
+    grid          = melchior.get("position")
     risk          = balthasar.get("position")
+    regime        = casper.get("position")
     regime_action = casper.get("regime_action")
     geometry_veto = balthasar.get("geometry_veto")
-    structural    = (verdict == "RECONFIGURE")
+    structural    = grid in ("RECENTRE", "TIGHTEN", "WIDEN")
 
     if structural:
         if regime_action in ("DEFER_STRUCTURAL", "STAND_DOWN"):
-            return True, f"RECONFIGURE opposed by casper regime_action={regime_action}"
+            return True, f"{grid} opposed by casper regime_action={regime_action}"
         if geometry_veto in ("HOLD_GEOMETRY", "RISK_BLOCK"):
-            return True, f"RECONFIGURE opposed by balthasar geometry_veto={geometry_veto}"
+            return True, f"{grid} opposed by balthasar geometry_veto={geometry_veto}"
         if risk in ("HALT", "PAUSE_LONGS", "PAUSE_SHORTS"):
-            return True, f"RECONFIGURE opposed by balthasar risk={risk}"
+            return True, f"{grid} opposed by balthasar risk={risk}"
 
+    if regime == "TRENDING" and grid == "TIGHTEN":
+        return True, "TIGHTEN into TRENDING regime"
+    if grid == "WIDEN" and risk in ("PAUSE_LONGS", "PAUSE_SHORTS"):
+        return True, f"WIDEN while {risk}"
     try:
         balt_conv = float(balthasar.get("conviction") or 0.0)
     except (TypeError, ValueError):
@@ -701,12 +741,12 @@ def _r0_conflict(round_0: dict) -> tuple:
 
 
 def r0_position_signature(round_0: dict) -> tuple:
-    """Comparable fingerprint of the cycle's R0 stance. Order matches
-    orchestrator._prior_r0_signature (casper, melchior, balthasar); Melchior's
-    slot is its verdict."""
+    """Comparable fingerprint of the cycle's R0 stance — the three domain
+    positions an R1 synthesis would reconcile. Order matches
+    orchestrator._prior_r0_signature (casper, melchior, balthasar)."""
     return (
         (round_0.get("casper")    or {}).get("position"),
-        (round_0.get("melchior")  or {}).get("verdict"),
+        (round_0.get("melchior")  or {}).get("position"),
         (round_0.get("balthasar") or {}).get("position"),
     )
 
@@ -714,7 +754,7 @@ def r0_position_signature(round_0: dict) -> tuple:
 def should_run_r1(round_0: dict,
                   prior_signature: Optional[tuple] = None) -> tuple:
     """Gate the R1 synthesis pass. Fires iff the R0 votes carry a genuine conflict
-    AND the R0 signature differs from the previous cycle's. Returns
+    AND the R0 position signature differs from the previous cycle's. Returns
     (fire, reason)."""
     conflict, why = _r0_conflict(round_0)
     if not conflict:
@@ -725,7 +765,7 @@ def should_run_r1(round_0: dict,
     return True, f"fire: {why}"
 
 
-# --- Revision validity + consensus (pure logic) ---
+# --- Revision validity + consensus (pure logic; unchanged) ---
 
 _NUM_RE  = re.compile(r"\b\d+\.?\d*\b")
 _WORD_RE = re.compile(r"[A-Za-z]+")
@@ -788,16 +828,15 @@ def _safe_extension(agent_final: dict, key: str,
 def resolve_consensus(round_0: dict, round_1: Optional[dict],
                       conflict: Optional[dict] = None) -> dict:
     """Synthesis consensus. Each agent's FINAL vote = its R1 if parseable, else
-    its R0. Emits Melchior's `grid_verdict` UNFLATTENED (the orchestrator
-    translates it into grid_action), plus regime_action (Casper) and geometry_veto
-    (Balthasar), both read by enforce_hard_rules downstream."""
+    its R0. Adds regime_action (Casper) and geometry_veto (Balthasar), both read
+    by enforce_hard_rules downstream. Shape unchanged from the Letta build."""
     casper_final    = _final_per_agent(round_0, round_1 or {}, "casper")
     melchior_final  = _final_per_agent(round_0, round_1 or {}, "melchior")
     balthasar_final = _final_per_agent(round_0, round_1 or {}, "balthasar")
 
-    grid_verdict = melchior_final.get("verdict") or "THESIS_HOLDS"
-    risk_action  = balthasar_final.get("position") or "CLEAR"
-    regime       = casper_final.get("position") or "UNCERTAIN"
+    grid_action = melchior_final.get("position") or "MAINTAIN"
+    risk_action = balthasar_final.get("position") or "CLEAR"
+    regime      = casper_final.get("position") or "UNCERTAIN"
     regime_action = _safe_extension(
         casper_final, "regime_action", REGIME_ACTIONS, "EXECUTE",
     )
@@ -805,13 +844,12 @@ def resolve_consensus(round_0: dict, round_1: Optional[dict],
         balthasar_final, "geometry_veto", GEOMETRY_VETOS, "PROCEED",
     )
 
-    # debate_triggered: did synthesis change anyone's PRIMARY judgment?
     r1_shifts = []
     for a in ("casper", "melchior", "balthasar"):
-        r0_prim = _primary(a, round_0.get(a) or {})
-        r1_prim = _primary(a, (round_1 or {}).get(a) or {})
-        if (r1_prim and r0_prim and r1_prim != r0_prim):
-            r1_shifts.append(f"{a}: {r0_prim}->{r1_prim}")
+        r0_pos = (round_0.get(a) or {}).get("position")
+        r1_pos = ((round_1 or {}).get(a) or {}).get("position")
+        if (r1_pos and r0_pos and r1_pos != r0_pos):
+            r1_shifts.append(f"{a}: {r0_pos}->{r1_pos}")
     debate_triggered = bool(r1_shifts)
 
     r1_errors = {
@@ -829,7 +867,7 @@ def resolve_consensus(round_0: dict, round_1: Optional[dict],
                       f"fell back to R0 for those)")
 
     return {
-        "grid_verdict":     grid_verdict,
+        "grid_action":      grid_action,
         "risk_action":      risk_action,
         "regime":           regime,
         "regime_action":    regime_action,

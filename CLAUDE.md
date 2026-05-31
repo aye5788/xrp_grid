@@ -14,23 +14,39 @@ Handoff docs to read at session start:
 CLAUDE.md is intent and discipline. The handoff docs are state. If they
 disagree, the handoff docs win for state; this file wins for how to work.
 
-> **STATUS — SHUT DOWN (2026-05-28 18:48 UTC). Migrating off Letta.**
-> The running MAGI system was cleanly stopped on 2026-05-28: `magi.service`
-> and `magi-dashboard.service` are **stopped + disabled** (won't restart on
-> reboot), all live Kraken orders were cancelled, and full state was
-> snapshotted to `snapshots/letta_shutdown_2026-05-28/` (Letta agent
-> blocks/threads/config, observer.db, env/config/docs, git record — see that
-> dir's `SHUTDOWN_NOTES.md`). The three Letta Cloud agents were **NOT
-> deleted** — they persist on Letta's servers and remain reachable via the
-> API. The plan is to rebuild the council on each vendor's native platform
-> (OpenAI / Anthropic / Google) with native caching and owned state, dropping
-> the Letta runtime layer. **The rebuild is a separate, not-yet-started
-> decision** — do not begin it from this doc. Until then, treat everything
-> below describing a *running* system as historical: it documents how MAGI
-> operated up to the shutdown, not a live system. Do NOT restart the services
-> or call the Letta agents without explicit operator direction. Do NOT cancel
-> the Letta Cloud subscription until the rebuild is complete and the snapshots
-> are verified usable.
+> **STATUS — AGENT LAYER MIGRATED TO GOOGLE ADK (in code, 2026-05-31); NOT YET RUN LIVE.**
+> MAGI was cleanly shut down 2026-05-28 18:48 UTC: `magi.service` and
+> `magi-dashboard.service` are **stopped + disabled**, all live Kraken orders
+> cancelled, full state snapshotted to `snapshots/letta_shutdown_2026-05-28/`. The
+> services are still stopped.
+>
+> Since then the council's agent-call layer has been **rebuilt off Letta onto
+> Google ADK** (see `01_CURRENT_STATE.md` Session 2026-05-31). `magi/council.py`
+> is rewritten: the three agents are native ADK `LlmAgent`s (Casper→Gemini native,
+> Melchior→GPT-4o via LiteLlm, Balthasar→Claude Sonnet via LiteLlm), **stateless
+> per cycle** (`include_contents="none"`), each emitting a Pydantic `output_schema`
+> vote. Melchior was redesigned from an action-selector into an economic-verdict
+> judge (THESIS_HOLDS / RECONFIGURE / NO_PROFITABLE_GRID). The public boundary is
+> preserved so `orchestrator.py` is unchanged in shape; new agent code lives in
+> `magi/agents/` (schemas + personas).
+>
+> **Two direction changes from the 2026-05-29 scoping, now authoritative:**
+> (1) Agents are **stateless**, NOT vendor-stateful — the "vendor owns memory/
+> self_model/thread history" line is REVERSED. Letta's stateful agent layer caused
+> thread-anchoring, the freshness-retry tax, and self_model corruption; statelessness
+> is the deliberate fix. A controlled, SQLite-sourced, prompt-injected **recall
+> layer** is scoped to restore self-correction (NOT built yet, NOT vendor memory).
+> (2) Cadence is **gate-driven**, not a 4h clock: the always-on free gate decides
+> whether the paid council wakes at all (floor ≈ 1 call/day; ceiling = breach
+> frequency). The 4h timer is only a backstop.
+>
+> **This is a CODE migration, offline-validated only.** No model has been invoked,
+> nothing deployed, no live cycle run. Running it needs `google-adk`+`litellm`
+> installed and provider keys in env. Everything below describing the *Letta*
+> council or a *running* system is historical. Do NOT restart services or deploy
+> without explicit operator direction. Pre-migration originals are archived under
+> `archive/pre_adk_migration_2026-05-31/` (+ git HEAD); do NOT cancel the Letta
+> subscription until the rebuild is proven live and snapshots verified usable.
 
 ## 1. What MAGI is
 
@@ -64,15 +80,17 @@ stated goal.
 
 Three layers, complementary by design.
 
-**Layer 1 — Council judgment.** Three Letta Cloud agents vote
-independently each cycle (Round 0). Round 1 is a synthesis pass where each
-agent revises after seeing peers' R0; it is CONDITIONAL (2026-05-27) —
-`magi/council.py:should_run_r1` fires it only when a genuine position/lever
-conflict exists AND that conflict is new vs. the prior cycle. Aligned cycles
-and frozen standoffs skip R1 (the hard-rule layer resolves both regardless),
-which bounds council cost. (History: R1 was conflict-gated → "always-fires"
-2026-05-22 → novelty-gated 2026-05-27. The old `CONFLICT_MATRIX`/`detect_conflict`
-remain in `council.py` but are not the gate; `_r0_conflict` is.) The council
+**Layer 1 — Council judgment.** Three agents vote independently each cycle
+(Round 0). As of 2026-05-31 these are native **Google ADK `LlmAgent`s** (was
+Letta Cloud), stateless per cycle, each emitting a Pydantic `output_schema` vote.
+Round 1 is a synthesis pass where each agent revises after seeing peers' R0; it is
+CONDITIONAL (2026-05-27) — `magi/council.py:should_run_r1` fires it only when a
+genuine position/lever conflict exists AND that conflict is new vs. the prior
+cycle. Aligned cycles and frozen standoffs skip R1 (the hard-rule layer resolves
+both regardless), which bounds council cost. (History: R1 was conflict-gated →
+"always-fires" 2026-05-22 → novelty-gated 2026-05-27. The old `CONFLICT_MATRIX`/
+`detect_conflict` remain in `council.py` for compat but are not the gate;
+`_r0_conflict`, now verdict-aware, is.) The council
 exists for cases where multiple defensible answers exist — regime
 classification, when to recentre vs. tighten, when concentration risk has
 crossed a judgment threshold. Judgment is delegated here precisely because it
@@ -105,26 +123,28 @@ model failures. Both are load-bearing.
 ## 3. The council is architectural diversity, not three voices saying the same thing
 
 The three agents run different LLM providers by design, not by
-accident:
+accident (ADK wiring as of 2026-05-31):
 
-- **Casper / Gemini-3-flash-preview** — tends to favour structural
-  classification; reads context blocks (persona, self_model,
-  world_state) on each cycle and updates votes when those blocks change.
-- **Melchior / GPT-4o** — tends to anchor on prior responses
-  (sycophancy / recency bias visible in evidence list repetition
-  across consecutive cycles). Sensitive to conversation history
-  persistence in Letta agent threads.
-- **Balthasar / claude-sonnet-4-6** — defaults toward
-  risk-conservative; will hold a CLEAR or PAUSE position with high
-  conviction when uncertain.
+- **Casper / `gemini-2.5-flash` (native Gemini)** — regime classification; tends
+  to favour structural classification. Now stateless per cycle: world_state is
+  injected fresh into the prompt each call (no persistent self_model block).
+- **Melchior / `openai/gpt-4o` (via LiteLlm)** — grid economist. Historically
+  anchored on prior responses / conversation-history persistence in Letta
+  threads; `include_contents="none"` removes that thread state entirely, which is
+  a primary reason the stateless design was chosen. Redesigned to emit an economic
+  VERDICT (THESIS_HOLDS / RECONFIGURE / NO_PROFITABLE_GRID), not an action.
+- **Balthasar / `anthropic/claude-sonnet-4-6` (via LiteLlm)** — risk/survival;
+  defaults risk-conservative. (Live Letta Balthasar historically ran haiku-4-5;
+  the ADK build pins Sonnet — confirm the intended tier before live spend.)
 
-These known biases are the architectural diversity. The council's
-strength is that one agent's blind spot is another's signal. When the
-three agents genuinely diverge, that is the architecture working as
-designed; `CONFLICT_MATRIX` → Round 1 debate is what surfaces the
-disagreement productively. The goal is NOT to engineer all three into
-producing identical outputs. Treat the model mix as a feature; encode
-known biases into per-agent prompts rather than fight them.
+These known biases are the architectural diversity — one agent's blind spot is
+another's signal. When the three genuinely diverge, the verdict-aware
+`_r0_conflict` → conditional Round 1 surfaces it productively. The goal is NOT to
+engineer identical outputs. Treat the model mix as a feature; encode known biases
+into per-agent personas (`magi/agents/personas/`). NOTE: the agents no longer hold
+vendor-side memory or self_model — per-agent learning, when built, is the
+deterministic SQLite-sourced recall layer (stateless agent + injected context),
+NOT a model-owned block.
 
 ## 4. Source-of-truth facts
 
@@ -133,13 +153,29 @@ re-derive these.
 
 - `debate_records` (in `observer.db`) is the **canonical** write target
   for council decisions in Phase 5. One row per cycle.
-- `magi_decisions` is **dual-written** for legacy consumers
-  (`dashboard.py` panels, `learning.py`, `extract_test_cases.py`). It
-  is not the canonical source; it is maintained for backward compat.
-- Letta Cloud agents persist; `agent_registry` (in `observer.db`) maps
-  logical agent names → Letta agent UUIDs. Do not provision new
-  agents; use `magi/provision_agents.py` to sync persona blocks and
-  LLM config knobs to the existing ones.
+- `magi_decisions` is **dual-written** for legacy consumers. It is not the
+  canonical source; it is maintained for backward compat. The dual-write
+  justification rests on `learning.py` (live-path verification pending —
+  `02_NEXT_BUILD_TASKS.md` item M6) and the dashboard panels not yet migrated off
+  `magi_decisions`. NOTE (verified 2026-05-29): `extract_test_cases.py` is a
+  **one-off manual script, not an active consumer** — top-to-bottom executable, no
+  `__main__` guard, imported by nothing, invoked by no service/cron — so it is NOT
+  a reason to keep the dual-write. (Prior doc text listing it as a live consumer
+  was overstated; see `01_CURRENT_STATE.md` Session 2026-05-29 §7-H.)
+- **Agent layer is ADK as of 2026-05-31** (`magi/council.py` + `magi/agents/`).
+  The Letta facts in this section (agent UUIDs in `agent_registry`,
+  `provision_agents.py` block sync, self_model / recent_outcomes / world_state
+  Letta blocks, the freshness validator, the step/token sweep) are HISTORICAL —
+  they describe the replaced layer. Native agents are built in code from
+  `magi/agents/personas/*.md` (instruction) + `magi/agents/schemas.py`
+  (output_schema); there are no Letta blocks to provision and no vendor-side
+  agent state. `agent_registry` may still back the dashboard AGENT HEALTH chip
+  but no longer maps to Letta UUIDs in the live path.
+- **Melchior emits a verdict, not an action** (2026-05-31). `resolve_consensus`
+  returns `grid_verdict ∈ {THESIS_HOLDS, RECONFIGURE, NO_PROFITABLE_GRID}`;
+  `enforce_hard_rules` translates it (THESIS_HOLDS→MAINTAIN, RECONFIGURE→RECENTRE
+  +geometry, NO_PROFITABLE_GRID→GRID_PAUSE stand-down). The regime_action /
+  geometry_veto veto ladder (rule 0d) still gates a RECONFIGURE unchanged.
 - Hard rules live in `magi/orchestrator.py:HARD_RULES` plus the steps
   inside `enforce_hard_rules`. There is no Supervisor concept; it was
   rejected and removed. Do not re-introduce it.

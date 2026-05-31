@@ -1,14 +1,57 @@
 # MAGI — Current State
 
-> **2026-05-28 18:48 UTC — SYSTEM SHUT DOWN for Letta migration.** Both services
-> stopped + disabled, all live Kraken orders cancelled (3, all 1.65 XRP), full
-> state snapshotted to `snapshots/letta_shutdown_2026-05-28/`. Letta agents
-> preserved, not deleted. Rebuild on native vendor platforms is the pending
-> direction (not started). See "Session 2026-05-28 — SHUTDOWN" immediately below.
-> Everything dated before this and written in the present tense describes the
-> system as it ran up to the shutdown.
+> **2026-05-31 — AGENT LAYER MIGRATED TO GOOGLE ADK (in code); NOT RUN LIVE.** MAGI
+> remains shut down at the service level (stopped + disabled 2026-05-28; no live
+> orders). The council's agent-call layer has been **rebuilt off Letta onto Google
+> ADK** — `magi/council.py` rewritten, three native ADK `LlmAgent`s in
+> `magi/agents/`, **stateless per cycle**, Melchior redesigned as an
+> economic-verdict judge. Code-complete and offline-validated (`py_compile` + logic
+> checks); **no model invoked, nothing deployed, no live cycle run.** See "Session
+> 2026-05-31 (later) — ADK migration" immediately below.
+>
+> **This SUPERSEDES the 2026-05-29 direction in two ways:** (1) agents are
+> **STATELESS**, not vendor-stateful — the "vendor owns memory/self_model/thread
+> history" plan is reversed (Letta statefulness caused anchoring + self_model
+> corruption); a controlled SQLite-sourced recall layer is scoped, not built.
+> (2) Cadence is **gate-driven** (free gate decides whether the paid council wakes;
+> floor ≈ 1 call/day), the 4h timer only a backstop. The 2026-05-29 scoping and the
+> Casper→Google-Agent-Studio M1 work below are now HISTORICAL — the build did not
+> use Agent Studio / Memory Bank; it used ADK `LlmAgent`s with stateless
+> prompt-injection. Pre-migration originals archived in
+> `archive/pre_adk_migration_2026-05-31/` (+ git HEAD).
 
-Last updated: 2026-05-28 (**MAGI SHUT DOWN 18:48 UTC for Letta migration — see
+Last updated: 2026-05-31 (**ADK MIGRATION OF THE AGENT-CALL LAYER (code-complete,
+not run live)** — `magi/council.py` rewritten off Letta onto Google ADK; three
+native ADK `LlmAgent`s in `magi/agents/` (Gemini native / GPT-4o + Claude via
+LiteLlm), STATELESS per cycle; Melchior redesigned to an economic verdict
+(THESIS_HOLDS / RECONFIGURE / NO_PROFITABLE_GRID) consumed directly by
+`enforce_hard_rules` (NO_PROFITABLE_GRID → GRID_PAUSE stand-down). Public boundary
+preserved → orchestrator unchanged in shape. Direction shift from 2026-05-29:
+agents are stateless (not vendor-stateful), recall layer to be SQLite-sourced (not
+built); cadence is gate-driven. Offline-validated only — no model invoked, nothing
+deployed. Originals archived in `archive/pre_adk_migration_2026-05-31/`. See
+"Session 2026-05-31 (later) — ADK migration" below. Prior same day:
+**CASPER → GOOGLE AGENT STUDIO PREP (M1 partial)** [now SUPERSEDED — the build
+used ADK, not Agent Studio] —
+authored Casper's Google Agent Studio "Details" panel fields (Description +
+Instructions, in `casper_gcp/`) from the **live Letta persona** — curated, with
+stale/Letta-runtime content dropped — and extracted Casper's R0 structured-output
+contract for replication as a Studio JSON output schema. Casper's `self_model` was
+deliberately NOT carried forward (contaminated, being left behind — diverges from
+the "seed from snapshot incl. self_model" line in `00`, for Casper only).
+Read-only on Letta/source; no Google API calls; system stayed shut down. See
+"Session 2026-05-31" below. Prior: 2026-05-29 (**MIGRATION SCOPING + LETTA SURFACE
+AUDIT** — direction locked, Letta surface audited end-to-end, §7-H verification
+resolved; read-only session, system stayed shut down. Vendor mapping: Casper→Google / Melchior→OpenAI /
+Balthasar→Anthropic, agents stateful vendor-side, SQLite owns non-agent state.
+Audit (`LETTA_SURFACE_AUDIT.md`): 112 touch-points / 17 files, council.py the
+centre of gravity. §7-H verified: should_run_r1 is a real gate (not dead),
+emit_human_alert is dead code, extract_test_cases.py is a one-off, and
+council.py:238 constructs the Letta client at import time → must be made lazy
+before the port (item M5a). See "Session 2026-05-29" below). Balthasar migrated
+to Claude Managed Agents (agent + memory store + environment + smoke test
+verified). Prior: 2026-05-28
+(**MAGI SHUT DOWN 18:48 UTC for Letta migration — see
 Session 2026-05-28 — SHUTDOWN below.** Earlier same day: **PnL-tracking overhaul + dashboard fixes + audit of
 the post-restart council; two observer fixes STAGED for the next magi.service
 restart**. PnL tracking is now live-scoped (Kraken-txid discriminator) +
@@ -45,12 +88,377 @@ credit-burn guard shipped** — see Session 2026-05-25 below. Prior: 2026-05-24 
 confirmed preserved. See Session 2026-05-24 below. Prior: 2026-05-23 —
 **BOT IS LIVE** — flipped paper→live, live order + fill-reconcile path shipped, fee constants corrected to tier-0 0.25%/0.40%, dashboard auth moved to Flask cookie, renewal READINESS panel removed — see Session 2026-05-23 below. Prior: 2026-05-22 — council restructured to R1-always-fires + two new structural vote fields the engine reads; gate layer with calibrated triggers + Kraken WebSocket v2 substrate shipped; agent state wiped + recreated; freshness validator + retry + warn-alert shipped. See "Session 2026-05-22" entries below).
 
+## Session 2026-05-31 (later) — ADK migration of the agent-call layer + Melchior verdict redesign
+
+**This is the current authoritative state of the council. It supersedes the Agent
+Studio direction in the earlier 2026-05-31 entry below and the 2026-05-29 scoping.**
+Built the native rebuild as a fresh **Google ADK** implementation (not the
+vendor-stateful Agent-Studio/Memory-Bank design the earlier entries assumed).
+Code-complete and offline-validated; NOT run against live models, NOT deployed.
+
+### What was built
+- **`magi/council.py` rewritten off Letta → ADK.** Each agent is a native ADK
+  `LlmAgent` invoked via `Runner` + `InMemorySessionService`, `include_contents=
+  "none"` (stateless per cycle), `output_schema` = its vote model, `output_key` =
+  `casper_r0`/`melchior_r0`/`balthasar_r0`. The Letta client, shared blocks,
+  threads, step/token sweep, and the freshness validator are GONE. The PUBLIC
+  BOUNDARY is preserved verbatim — `update_world_state`, `run_round_0_parallel`,
+  `should_run_r1`, `run_round_1`, `resolve_consensus`, `emit_human_alert` keep
+  their names and parsed-vote dict shapes — so `orchestrator.py` needed no
+  signature changes. world_state is cached in-process (`update_world_state`) and
+  injected into each agent's prompt, replacing the Letta shared block.
+- **New `magi/agents/` package.** `schemas.py` = `RegimeVote` (Casper),
+  `GridVote`+`Geometry` (Melchior), `RiskVote` (Balthasar), all `extra="forbid"`,
+  conviction as float 0.0–1.0. `personas/` = `casper.md`, `melchior.md`,
+  `balthasar.md` + a `load_persona` loader that raises on empty.
+- **Models:** Casper `gemini-2.5-flash` (native Gemini string), Melchior
+  `LiteLlm("openai/gpt-4o")`, Balthasar `LiteLlm("anthropic/claude-sonnet-4-6")`.
+  Keys from env (`GOOGLE_API_KEY`/`OPENAI_API_KEY`/`ANTHROPIC_API_KEY`), never
+  hardcoded. ADK imported lazily so importing council.py/orchestrator.py does not
+  require google-adk installed.
+- **Melchior redesigned: economic VERDICT, not an action.** GridVote emits
+  `verdict ∈ {THESIS_HOLDS, RECONFIGURE, NO_PROFITABLE_GRID}` + optional nested
+  `geometry` (present iff RECONFIGURE, enforced by a model validator). Answers one
+  always-present question — "is there profitable grid economics here right now?" —
+  grid or no grid. The old MAINTAIN/RECENTRE/TIGHTEN/WIDEN tree is RETIRED.
+- **Casper + Balthasar personas rebuilt to standard** (shared council framing,
+  float conviction high→0.8/med→0.5/low→0.2, strict-JSON output). Decision trees,
+  regime_action / geometry_veto, stranded-grid carve-outs preserved.
+
+### orchestrator.py changes (verdict consumed directly)
+- `enforce_hard_rules` reads `consensus['grid_verdict']` and translates at entry:
+  **THESIS_HOLDS → MAINTAIN, RECONFIGURE → RECENTRE (+geometry),
+  NO_PROFITABLE_GRID → GRID_PAUSE** (stand down: cancel orders + idle, NOT a hold).
+  `_VERDICT_TO_GRID_ACTION` is the map. council.py does NOT flatten — the
+  orchestrator owns the translation, so NO_PROFITABLE_GRID stands the grid down
+  instead of being neutered into MAINTAIN.
+- Veto ladder (rule 0d) UNCHANGED: a RECONFIGURE maps to RECENTRE, so STAND_DOWN /
+  DEFER_STRUCTURAL / HOLD_GEOMETRY / RISK_BLOCK still coerce it to MAINTAIN.
+  `_original_grid_action` captured after the map; rule 6 (GRID_DEGENERATE) skips on
+  GRID_PAUSE; new `[NO_PROFITABLE_GRID]` tag added to the canonical set; icontract
+  `in_grid_action` snapshot reads the mapped verdict.
+- `debate_records.melchior_r0_position` and `magi_decisions.melchior_action` now
+  store Melchior's VERDICT string. `_prior_r0_signature` compares verdict-to-verdict
+  so the R1 novelty gate is unaffected.
+
+### Cadence model — corrected (supersedes "4h schedule" framing)
+Cost/cadence is GATE-DRIVEN, not clock-driven. The gate (`magi/gate.py`,
+deterministic, ZERO API cost) runs every observer loop and decides whether the
+council (the only paid layer) wakes. Floor ≈ 1 council call/day; ceiling = grid
+breach frequency. The 4h timer is a backstop. (Gate threshold calibration internals
+not re-read this session — this is the structure, not the tuned fire-rate.)
+
+### Memory / recall — DELIBERATELY stateless; recall layer scoped, NOT built
+The 2026-05-29 "vendor owns memory/self_model/thread history" direction is REVERSED.
+Rationale, from this repo's own failure log: Letta's stateful agent layer caused
+GPT-4o byte-for-byte thread-anchoring, the ~80–90k-token freshness-retry tax, and
+Balthasar's runaway self_model corruption (STAND_DOWN→HALT). ADK agents are
+therefore stateless per cycle. Per-agent learning (the original point of
+`self_model`) is currently ABSENT, not relocated. The agreed rebuild is a
+CONTROLLED recall layer: deterministic, Python-assembled from `debate_records`,
+bounded (recency window + max items), read-only to the agent, injected as per-call
+prompt input by council.py — NOT vendor-owned hidden state, and NOT
+`VertexAiMemoryBankService` (LLM-driven consolidation reintroduces the rejected
+hidden-state problem). SCOPED + approved-in-principle, NOT built. See
+`02_NEXT_BUILD_TASKS.md` post-migration queue.
+
+### Open issues surfaced (carried to 02)
+- **`get_agent_accuracy` mis-scores the verdict model** (`database.py:1635`):
+  "positive" = `fills_6h>0 AND pnl_6h>=0`, identical for all agents — so a CORRECT
+  Melchior `NO_PROFITABLE_GRID` stand-down (fills=0 by design) scores as failure.
+  Must be fixed (per-role correctness) before recall can use it, or recall teaches
+  Melchior to over-trade.
+- **Downstream readers still on the old vocabulary** (display/analysis only, not
+  control): `dashboard.py` panels; `observer._record_outcome_to_block` (now a dead
+  Letta no-op); `analysis/*` replay/forecast scripts testing `== 'RECENTRE'` won't
+  match `'RECONFIGURE'`.
+- **Contaminated history:** pre-restart `debate_records` are Letta-era; recall and
+  any accuracy baseline must exclude them (restart cutoff).
+- **Runtime prerequisites:** `google-adk` + `litellm` not installed here; provider
+  keys not set; LiteLlm structured-output reliability for GPT-4o/Claude unverified
+  (a native forced-tool fallback is proven for Claude in `phase1_balthasar/`).
+
+### Safety / archive
+Everything overwritten in place is archived under
+`archive/pre_adk_migration_2026-05-31/` with a `RESTORE.md`: `council.py.letta`
+(full pre-ADK restore point), `council.py.adk-preverdict`,
+`orchestrator.py.preverdict`, `casper.md.preverdict`. No commits made; git HEAD
+also still holds the originals.
+
+### Validated (no model calls)
+`py_compile` clean on council.py + orchestrator.py; schemas construct + enforce
+(extra=forbid, conviction bounds, verdict↔geometry invariant); personas load
+non-empty; verdict→action map + veto ladder confirmed by offline logic checks
+(NO_PROFITABLE_GRID→GRID_PAUSE; RECONFIGURE vs STAND_DOWN/RISK_BLOCK fires R1;
+aligned THESIS_HOLDS skips R1). NOT validated: any live model call, real-provider
+structured output, a full live cycle, deployment.
+
+---
+
+## Session 2026-05-31 (earlier) — Casper → Google Agent Studio prep (M1 partial) [SUPERSEDED]
+
+> **SUPERSEDED by the ADK migration above.** The build did NOT use Google Agent
+> Studio / Memory Bank; it used ADK `LlmAgent`s with stateless prompt-injection.
+> Casper's curated persona text (`casper_gcp/casper_instructions.txt`) WAS reused
+> as the source for the ADK `magi/agents/personas/casper.md`. The Agent-Studio /
+> Sessions / Memory-Bank mechanics below are no longer the plan.
+
+Read-only build-prep session for **M1** (`02_NEXT_BUILD_TASKS.md` — per-agent
+rebuild spec, Casper → Google). No Google API calls, no resource creation, no
+memory writes; read-only against Letta; system stayed shut down. Produced the
+concrete Google Agent Studio inputs for Casper. Artifacts under `casper_gcp/`.
+
+### What was produced (`casper_gcp/`)
+
+- **`casper_description.txt`** (746 chars) — the Studio "Details → Description"
+  field: a 2-paragraph statement of Casper's role (regime analyst: RANGING /
+  TRENDING / UNCERTAIN + the `regime_action` verdict EXECUTE / DEFER_STRUCTURAL /
+  STAND_DOWN) and scope boundary (does NOT own grid geometry → Melchior, or
+  inventory/risk → Balthasar).
+- **`casper_instructions.txt`** (13,827 chars) — the Studio "Details →
+  Instructions" field: Casper's operating brain, curated from the live persona —
+  Role, trigger context, signals received, derived quantities, the full decision
+  tree (Steps 0–4 verbatim), the REGIME_ACTION rule + stranded-grid carve-out,
+  conviction calibration, both worked examples verbatim, the OUTPUT section, and
+  CONSTRAINTS.
+
+### Source-of-truth decision: live persona only, self_model left behind
+
+- Both files were authored from the **live Letta `persona` block** (fetched via the
+  SDK; confirmed byte-identical to the shutdown snapshot at 15,501 chars), per
+  explicit operator direction "use the persona only." Casper's **`self_model` is
+  contaminated and is being left behind** — it is NOT seeded into Google. This is a
+  deliberate, Casper-specific divergence from the generic "seed each agent from the
+  snapshot incl. self_model contents" line in `00_PROJECT_OVERVIEW.md` "Migration
+  target architecture." (The earlier interrupted self_model fact-deconstruction
+  proposal — `casper_facts_proposal.json` / `casper_facts_needs_review.md` — was
+  abandoned and never written; do NOT resume it without operator direction.)
+- **Content dropped during curation** (reported to operator): PAPER-mode framing;
+  stale fee numbers (persona said maker 0.16% / taker 0.26% — actual tier-0 is
+  0.25% / 0.40%, and the survival/fee floor is Balthasar's domain, not Casper's);
+  and Letta-runtime-specific phrasing (e.g. `R1/regime_action` signal labels
+  relabeled to `regime_action`; the `consensus["regime_action"]` glue sentence
+  generalized). Geometry/fee authorship stays out of Casper by design (the
+  deterministic `spacing_evaluator` owns fee-positive spacing — see CLAUDE.md §4).
+
+### Casper R0 structured-output contract (for the Studio JSON output schema)
+
+Extracted verbatim from `magi/council.py` so the Studio schema replicates the
+existing contract. **Do-not-re-derive facts:**
+
+| field | type | required | allowed values | downstream read-by |
+|---|---|---|---|---|
+| `position` | string | **yes** (parse) | RANGING / TRENDING / UNCERTAIN | `resolve_consensus` → `cons["regime"]` — **informational only** (records + logging; not a hard-rule gate) |
+| `conviction` | float | **yes** (parse) | 0.0–1.0 | degradation fingerprint (0.0 + `(no response)` crux) |
+| `key_evidence` | list[str] | **yes** (parse) | 3–5 short strings | record-building only |
+| `crux` | string | **yes** (parse) | one sentence | **no decision-logic consumer** — used only as the degradation marker (`conviction==0 AND crux LIKE '(no response)%'`, `SAFE_DEFAULTS`) + stored in `*_r0_crux` |
+| `regime_action` | string | optional (prompt) | EXECUTE / DEFER_STRUCTURAL / STAND_DOWN | **the only field with decision authority** — hard rule 0d in `orchestrator.py` (DEFER_STRUCTURAL → `[REGIME_DEFER]`, STAND_DOWN → `[REGIME_STANDDOWN]`, only when grid_action ∈ {RECENTRE,TIGHTEN,WIDEN}) |
+
+- **Two schema recommendations for Studio** (close gaps in the Python validator):
+  1. **Enforce the `position` enum in the Studio schema.** `_validate_r0`
+     (`council.py:438-440`) only checks `position` is a non-empty *string* — it
+     never checks it against `VALID_REGIMES`. The enum is unenforced today.
+  2. **Make `regime_action` required in the Studio schema.** It is optional in the
+     prompt and, when missing/malformed, `resolve_consensus` silently defaults it to
+     `EXECUTE` (no veto) via `_safe_extension`. Since it is the *only* decision-driver,
+     a silent default to "permit structural change" is the risky failure mode.
+- **Validation/coercion pipeline** (for parity): `_parse_json_strict` (strip fences →
+  `json.loads` whole → fallback to first `{...}`) → `_validate_r0` → retry → freshness
+  check → `SAFE_DEFAULTS["casper"]` on failure (`position=UNCERTAIN, conviction=0.0,
+  key_evidence=[], crux="(no response)"`) → consumption-time defaults
+  (`regime_action`→EXECUTE).
+
+### Round structure confirmed (orchestrator is source of truth)
+
+- R1 synthesis is **CONDITIONAL**, not always-fires: `orchestrator.run_cycle` gates
+  it on `council.should_run_r1` (fires iff `_r0_conflict` AND the R0 signature is new
+  vs the prior cycle). Several `council.py` R1 docstrings still say "always-fires" —
+  **those are stale**; the orchestrator gate is authoritative.
+
+### What remains for M1 (not done this session)
+
+- Map Casper's in-cycle inputs (`world_state`, `recent_outcomes`, `cycle_phase`) to
+  Google **Sessions**; decide the **Memory Bank** seeding (persona carried via
+  Instructions; self_model NOT carried). Enter the JSON output schema in Studio and
+  set the model (`google_ai/gemini-3-flash-preview` per `casper_config.json`).
+  Per-cycle prompt assembly (the ~5–8k-token rebuilt-from-SQLite payload) is part of
+  the M5 infrastructure port, not the Studio agent definition.
+
+## Session 2026-05-29 — migration scoping + Letta surface audit
+
+Documentation/scoping session (read-only on source; the system stayed shut down).
+Three outcomes: migration direction locked, the Letta surface audited end-to-end,
+and the four `LETTA_SURFACE_AUDIT.md` §7-H verification questions resolved.
+
+### Migration direction — LOCKED
+
+- **Vendor mapping (per-agent native rebuild, each agent STATEFUL on its
+  platform):** Casper→Google (Gemini Enterprise Agent Platform / Gemini API Managed
+  Agents; Memory Bank for persistent memory, Sessions for in-cycle state);
+  Melchior→OpenAI (Responses API + Conversations API; extended
+  `prompt_cache_retention` up to 24h); Balthasar→Anthropic (Claude Managed Agents,
+  beta header `managed-agents-2026-04-01`; native "dreaming" scheduled memory
+  consolidation in research preview; session-hour runtime $0.08/hr, opened
+  per-cycle, not 24/7).
+- **State ownership:** the vendor owns each agent's memory, persona, self_model
+  equivalent, and thread history — we do NOT mirror agent state locally. We own
+  SQLite for everything non-agent (`debate_records`, `magi_gate_events`,
+  `magi_alerts`, `grid_state`, inventory, all trading-side state).
+- **Seeding:** each agent seeded from `snapshots/letta_shutdown_2026-05-28/`
+  (persona text, self_model contents, accumulated thread history: casper 825 /
+  melchior 466 / balthasar 704 msgs), and tuned on the vendor platform before going
+  live in the new infrastructure.
+- Full target write-up in `00_PROJECT_OVERVIEW.md` "Migration target architecture".
+
+### North star restated (why the migration exists)
+
+MAGI is an ADAPTIVE grid bot whose purpose is to solve the static-grid weakness:
+regime-blindness in directional markets (catches falling knives in downtrends,
+sells into rallies, bleeds in sustained moves). Every migration decision must
+preserve or improve regime detection + reaction speed vs a static grid. NEXT_BUILD
+item 0★ (grid bleeds in downtrends) is exactly this problem in the old system; the
+migration is the chance to fix it via better-tuned native agents. **Not a
+cost-optimization project** — cost was the trigger, adaptiveness is the purpose.
+
+### Cadence / call model clarified (event-driven)
+
+The call model is event-driven via the gate; the 4h `MAGI_HOURS_EST` schedule is a
+backstop, not the primary trigger. Target steady state: **no active grid** → ~1
+call/day at a designated time for assessment / daily recap (gate keeps monitoring
+continuously); **active grid** → scheduled cycles + gate-driven wakes, with the
+existing wake-class trigger curation (`WAKE_REQUIRES_ACTIVE_GRID`,
+`WAKE_DWELL_MINUTES`, `WAKE_MIN_INTERVAL_MIN`, conditional R1 via `should_run_r1`)
+bounding cost. Documented as the target so future sessions don't re-derive it from
+the cost-reduction history.
+
+### Letta surface audit — COMPLETE (`LETTA_SURFACE_AUDIT.md`)
+
+15-agent dynamic Claude Code workflow (2026-05-29): 7 file groups enumerated by
+Sonnet, peer-reviewed by Sonnet, adversarial sweep + synthesis on Opus. ~19 min,
+~760k tokens; saved as `.claude/workflows/letta-surface-audit.js` for reuse.
+- **112 unique touch-points across 17 files.** Counts: SDK_CONSTRUCT 12,
+  AGENT_INVOKE 3, AGENT_LIST 7, BLOCK_CRUD 19, BLOCK_ATTACH 1, THREAD_COMPACT 1,
+  THREAD_RESET 1, TOOL_DEF 0, MODEL_CONFIG 12, IMPORT_ONLY 12, INDIRECT 44.
+- **Centre of gravity: `council.py`** (all 3 AGENT_INVOKE sites). Density top
+  files: council.py 14, provision_agents.py 14, config_validator.py 14,
+  scheduler.py 12, database.py 9.
+- **Per-agent state collapses post-migration:** most of the 8 Letta blocks become
+  vendor-native or per-call prompt content; only `world_state`, `recent_outcomes`,
+  and `cycle_phase` need re-delivery as prompt content (rebuilt fresh from SQLite);
+  persona / self_model / thread history live vendor-side. Per-call payload
+  ~80–114k → ~5–8k tokens.
+- **Retired, not migrated:** `magi/memory_lifecycle.py` (vendors consolidate memory
+  natively — Claude dreaming, Gemini Memory Bank, OpenAI Conversations chaining;
+  30-cycle rotation goes away); most of `magi/provision_agents.py` (agents
+  built/tuned on vendor platforms); the shared `*_r0_output` blocks (redundant — R1
+  already pastes peer outputs into prompts); `sweep_letta_steps_for_failures` raw
+  HTTP (→ per-vendor SDK exception handling); the dashboard LETTA AGENTS panel (→
+  generic "agents reachable" health check).
+
+### §7-H verification — all four resolved
+
+(Read-only verification, 2026-05-29; full citations in `LETTA_SURFACE_AUDIT.md` §7-H.)
+- **should_run_r1 — REAL GATE, not dead code.** `council.py:1445-1463` returns
+  three outcomes (skip on no conflict; skip on frozen standoff; fire only on a
+  NOVEL conflict); `orchestrator.py:1876-1895` honors it with an explicit
+  `if fire_r1:` guard (R1 skipped + `round_1={}` otherwise). CLAUDE.md's
+  conditional-R1 description is correct. **Doc drift flagged (fix during the
+  port, not now):** the `run_round_1` docstring at `council.py:1466-1472`
+  ("Always-fires" / "run_cycle calls this unconditionally") and the "always fires"
+  phrasing in `00_PROJECT_OVERVIEW.md`'s *historical* Architecture + Cycle-protocol
+  sections are stale — R1 has been conditional since 2026-05-27. Historical drift,
+  not a logic concern.
+- **emit_human_alert — DEAD CODE.** Defined `council.py:1638`, imported
+  `orchestrator.py:59`, never called anywhere (repo-wide grep: only the def + the
+  import). Both the function and the unused import are safe to delete during the
+  port.
+- **wake_guard_sim.py — keeps its purpose; Letta-free in test scope.** It
+  exercises `_is_wake_suppressed_nontrading` + `_dwell_t2/t14/t11` (wake-guard
+  logic, no Letta). Audit nuance corrected: it imports `scheduler` *lazily inside
+  `main()`* at `wake_guard_sim.py:87`, not at module level, so importing the module
+  has no side effects. **More significant finding → port prerequisite:**
+  `council.py:238` constructs the Letta client at MODULE-IMPORT time, so every
+  module that transitively imports `council` (scheduler, orchestrator, and every
+  test/CLI in that chain) inherits a hard Letta dependency at import and will fail
+  once Letta is removed. The port MUST make client construction lazy/deferred before
+  or as the first step of the council rewrite — filed as `02_NEXT_BUILD_TASKS.md`
+  item M5a.
+- **extract_test_cases.py — one-off manual script, NOT a live consumer.** Top-to-
+  bottom executable, no `__main__` guard, not imported by anything, not invoked by
+  any service or cron (verified `magi.service`=`python3 -m scheduler`,
+  `magi-dashboard.service`=`python3 -m dashboard`; no crontab/systemd reference).
+  CLAUDE.md §4 corrected accordingly — the `magi_decisions` dual-write justification
+  rests on `learning.py` (live-path verification pending, item M6) and unmigrated
+  dashboard panels, not this script.
+
+### Migration artifacts — Balthasar (Anthropic / CMA)
+
+Balthasar's native artifacts have been built on Claude Managed Agents
+(beta header `managed-agents-2026-04-01`). The droplet port (M5) will
+reference these IDs directly.
+agent_id:        agent_01WhVAYWK7FnZxDtL6ZjSEZz
+version:         v2  (full persona loaded from snapshot)
+model:           claude-haiku-4-5
+memory_store_id: memstore_014Joi8XcyEQfXMvzimZmBED
+memory_id:       mem_01ASJucupxm2PRHfwXzfdkk3  (/self_model.md, 25,070 bytes)
+environment_id:  env_01SvVPP6NrBcgjshQQFZ3nte
+
+**Smoke test (2026-05-29):** real world_state from cyc shutdown sent to a
+fresh session (sesn_011XjUHznBc91nTXyBJ6YTtq). Balthasar returned full
+schema-compliant JSON, walked his decision tree explicitly, correctly
+applied the stranded-grid carve-out (PROCEED, not HOLD_GEOMETRY) for the
+T14 one-sided book + fillable=false geometry he was shown. Stop reason:
+clean end_turn. Cost ~$0.02. No regression from the corrected logic in
+the seeded self_model.
+
+**Persona ported verbatim from snapshot** at
+`snapshots/letta_shutdown_2026-05-28/balthasar_blocks.json` block label
+"persona" (18.8 KB system prompt).
+
+**Self_model ported verbatim** from the same snapshot, block label
+"self_model" (25,070 bytes). The curated post-runaway-HALT-cleanup
+version, including the cyc_1779854457 HOLD_GEOMETRY correction. Lives at
+`/mnt/memory/balthasar/self_model.md` when sessions attach the store.
+
+**Two doc-drift items the migration surfaced (defer to M5 port; do not fix
+in docs now):**
+- Persona text says "R1 always fires." Stale — `should_run_r1` is a real
+  gate. Already flagged in this session's §7-H finding 1. Fix during port.
+- Balthasar's smoke-test reasoning referenced `[RECENT_POSITION_HOLD]`
+  hard rule name from Letta. Hard-rule names may change in the new
+  orchestrator. Re-verify name during M5.
+
+**Not yet attached to a session at runtime:** the memory store was created
+and seeded but the smoke test session did not include it in the `resources`
+array. Balthasar's persona alone produced correct behavior without reading
+the memory file. Memory-attachment path needs verification when council.py
+is ported — open question is whether memory access requires
+`agent_toolset_20260401` to be enabled, which we explicitly chose not to do.
+
+### Still open (gating the rebuild spec)
+
+- Audit §7 design questions: themes A (statefulness — answered: vendor-side),
+  F (provider mapping — answered: locked), G (LETTA AGENTS panel — answered:
+  retire) are settled; **themes B, C, D, E remain open** and need operator
+  decisions before per-agent rebuild specs finalise.
+- Per-agent rebuild specs — not yet written (items M1–M3).
+- Infrastructure port (council.py + 6 wrappers, retire the rest) — item M5, after
+  at least one native endpoint/stub exists; lazy-client-construction (M5a) first.
+- learning.py live-path verification — item M6; gates whether the `magi_decisions`
+  dual-write can be retired.
+- Replay verification — item M7, third workflow, downstream.
+- Verify CMA memory store attachment works without prebuilt agent
+  toolset enabled; if it requires the toolset, decide whether to enable
+  minimal file-read tools on Balthasar (v3) or pass the self_model
+  content inline in the user.message per cycle.
+
 ## Session 2026-05-28 — SHUTDOWN (Letta migration prep)
 
 Controlled stop of the running system to migrate off Letta Cloud and rebuild the
 council on each vendor's native platform (OpenAI / Anthropic / Google) with native
-caching and owned state. Stop-and-preserve only; the rebuild is a separate,
-not-yet-started decision. Driven by the council token-cost investigation earlier
+caching and owned state. Stop-and-preserve only; at the time of shutdown the
+rebuild was a separate, not-yet-started decision (**since scoped and locked
+2026-05-29 — see Session 2026-05-29 above**). Driven by the council token-cost investigation earlier
 this session (see below / the cost memory): ~$5-6/day council spend on a ~$67 book
 is economically inverted, and ~half is structural (4h cadence ≫ provider cache TTLs,
 3 agents × cold-cache input/cycle) that no Letta-side config fixes.
@@ -1540,6 +1948,24 @@ uses `reasoning_effort=medium` (no native extended-thinking budget).
 - Do not delete
 
 ## Verified facts (do NOT re-derive in future sessions)
+
+### Migration scoping + §7-H verification (2026-05-29)
+- **Migration direction locked:** Casper→Google, Melchior→OpenAI,
+  Balthasar→Anthropic; agents stateful vendor-side; SQLite owns non-agent state;
+  seed from `snapshots/letta_shutdown_2026-05-28/`. Full detail: Session 2026-05-29
+  above + `00_PROJECT_OVERVIEW.md` "Migration target architecture".
+- **Letta surface audit:** 112 touch-points / 17 files; `council.py` is the centre
+  of gravity (all 3 AGENT_INVOKE sites). See `LETTA_SURFACE_AUDIT.md`.
+- **`should_run_r1`** is a real novelty-gate (`council.py:1445-1463`,
+  `orchestrator.py:1876-1895`), NOT dead code. R1 has been conditional since
+  2026-05-27.
+- **`emit_human_alert`** is dead code (def `council.py:1638`, import
+  `orchestrator.py:59`, zero call sites) — delete during the port.
+- **`council.py:238` constructs the Letta client at module-import time** — a hard
+  import-time dependency for every transitive importer of `council`; must be made
+  lazy before the council rewrite (item M5a).
+- **`extract_test_cases.py`** is a one-off manual script, NOT a live consumer of
+  `magi_decisions`.
 
 ### Kraken API
 - HMAC auth: signature = HMAC-SHA512(path + SHA256(nonce + urlencoded_payload))

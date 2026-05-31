@@ -755,8 +755,6 @@ _CANONICAL_OVERRIDE_TAGS = {
     "[PAUSE_INVALID]",
     "[GEOMETRY_INJECTED_FROM_SCORER]",
     "[NO_ACCEPTABLE_VARIANT]",
-    # Melchior verdict-driven stand-down (NO_PROFITABLE_GRID -> GRID_PAUSE)
-    "[NO_PROFITABLE_GRID]",
 }
 # AGENT_DEGRADED is emitted templated as "[AGENT_DEGRADED:<agent_id>]". The three
 # valid agent_ids (casper/melchior/balthasar) are enumerated above rather than
@@ -778,18 +776,6 @@ _RULE_0D_COVERAGE_TAGS   = {
 _RULE_0D_SUPERSEDING_TAGS = {
     "[KILL_SWITCH]", "[DAILY_LOSS_LIMIT]", "[ALLOC_SKEW_CEILING]",
     "[GRID_DEGENERATE]", "[NO_ACCEPTABLE_VARIANT]",
-}
-
-# Melchior's economic verdict -> the engine's grid_action vocabulary. council.py
-# passes the verdict through unflattened (consensus['grid_verdict']); the
-# orchestrator owns this deterministic translation. NO_PROFITABLE_GRID resolves to
-# GRID_PAUSE (stand down: cancel orders and idle) — NOT MAINTAIN. RECONFIGURE maps
-# to RECENTRE, so the rule-0d veto ladder still gates it under STAND_DOWN /
-# DEFER_STRUCTURAL / HOLD_GEOMETRY / RISK_BLOCK exactly as before.
-_VERDICT_TO_GRID_ACTION = {
-    "THESIS_HOLDS":       "MAINTAIN",
-    "RECONFIGURE":        "RECENTRE",
-    "NO_PROFITABLE_GRID": "GRID_PAUSE",
 }
 
 
@@ -818,7 +804,7 @@ def _unknown_override_tags(overrides):
 
 @icontract.snapshot(lambda consensus: consensus.get("regime_action"), name="in_regime_action")
 @icontract.snapshot(lambda consensus: consensus.get("geometry_veto"), name="in_geometry_veto")
-@icontract.snapshot(lambda consensus: _VERDICT_TO_GRID_ACTION.get(consensus.get("grid_verdict")), name="in_grid_action")
+@icontract.snapshot(lambda consensus: consensus.get("grid_action"),   name="in_grid_action")
 @icontract.ensure(
     lambda OLD, result: (
         not (
@@ -893,29 +879,10 @@ def enforce_hard_rules(consensus: dict, world_state: dict,
     overrides = list(cons.get("hard_rule_overrides") or [])
     notes = [cons.get("reasoning", "")]
 
-    # Translate Melchior's economic verdict (passed through unflattened by
-    # council.py as consensus['grid_verdict']) into the engine's grid_action
-    # vocabulary:
-    #   THESIS_HOLDS       -> MAINTAIN    (hold the current grid)
-    #   RECONFIGURE        -> RECENTRE    (rebuild to Melchior's geometry)
-    #   NO_PROFITABLE_GRID -> GRID_PAUSE  (stand down: cancel orders and idle)
-    # NO_PROFITABLE_GRID is a stand-down, NOT a hold — the engine's GRID_PAUSE path
-    # cancels all orders and idles. The rest of the precedence ladder operates on
-    # grid_action as before.
-    grid_verdict = cons.get("grid_verdict") or "THESIS_HOLDS"
-    cons["grid_action"] = _VERDICT_TO_GRID_ACTION.get(grid_verdict, "MAINTAIN")
-    if grid_verdict == "NO_PROFITABLE_GRID":
-        overrides.append("[NO_PROFITABLE_GRID]")
-        notes.append(
-            "[NO_PROFITABLE_GRID] Melchior: no acceptable variant — standing down "
-            "(GRID_PAUSE: cancel orders and idle)"
-        )
-
     # Capture Melchior's ORIGINAL intent BEFORE any rule mutates
-    # cons["grid_action"]. The council-veto step (0d) uses this so its tag fires
-    # even when 0a/0b/0c also downgrade — defense-in-depth tag visibility. For a
-    # RECONFIGURE this is "RECENTRE", so rule 0d still vetoes a reconfigure under
-    # DEFER_STRUCTURAL / STAND_DOWN / HOLD_GEOMETRY / RISK_BLOCK exactly as before.
+    # cons["grid_action"]. The council-veto step (added below 0c) uses
+    # this so its tag fires even when the rule layer's 0a/0b/0c also
+    # downgrade — defense-in-depth tag visibility.
     _original_grid_action = cons.get("grid_action")
 
     inventory = world_state.get("inventory") or {}
@@ -1331,11 +1298,7 @@ def enforce_hard_rules(consensus: dict, world_state: dict,
     )
     if (cons.get("grid_action") != "HALT"
             and cons.get("risk_action") != "HALT"
-            and cons.get("grid_action") != "GRID_PAUSE"
             and not _degraded_freeze_active):
-        # GRID_PAUSE here means Melchior's NO_PROFITABLE_GRID stand-down — do NOT
-        # let the grid-degenerate rule force a RECENTRE over a deliberate
-        # stand-down (there is no profitable geometry to rebuild to).
         open_orders = world_state.get("open_orders") or {}
         try:
             buy_count = int(open_orders.get("buy_count") or 0)
@@ -1698,12 +1661,7 @@ def _build_debate_record(cycle_id: str, trigger: str, world_state: dict,
     }
     for agent in ("casper", "melchior", "balthasar"):
         r0 = round_0.get(agent) or {}
-        # Melchior's primary R0 judgment is its verdict (THESIS_HOLDS /
-        # RECONFIGURE / NO_PROFITABLE_GRID), recorded in the _r0_position column;
-        # Casper/Balthasar keep position (regime / risk_action).
-        record[f"{agent}_r0_position"]   = (
-            r0.get("verdict") if agent == "melchior" else r0.get("position")
-        )
+        record[f"{agent}_r0_position"]   = r0.get("position")
         try:
             record[f"{agent}_r0_conviction"] = float(r0.get("conviction") or 0.0)
         except (TypeError, ValueError):
@@ -1775,11 +1733,7 @@ def _dual_write_magi_decision(trigger: str, round_0: dict, cons: dict) -> Option
     """
     def _agent_field_pack(agent_key: str) -> tuple:
         r0 = round_0.get(agent_key) or {}
-        # Melchior's primary judgment is its verdict; Casper/Balthasar use position.
-        position = (
-            (r0.get("verdict") if agent_key == "melchior" else r0.get("position"))
-            or ""
-        )
+        position = r0.get("position") or ""
         conviction_label = _conviction_label(r0.get("conviction"))
         # Pack key_evidence + crux into reasoning so dashboard / learning can
         # surface it without joining tables.
@@ -1905,7 +1859,7 @@ def run_cycle(trigger: str = "manual", force: bool = False) -> dict:
         "Round 0: casper=%s/%.2f melchior=%s/%.2f balthasar=%s/%.2f",
         round_0['casper'].get('position'),
         float(round_0['casper'].get('conviction') or 0.0),
-        round_0['melchior'].get('verdict'),
+        round_0['melchior'].get('position'),
         float(round_0['melchior'].get('conviction') or 0.0),
         round_0['balthasar'].get('position'),
         float(round_0['balthasar'].get('conviction') or 0.0),
@@ -1944,9 +1898,9 @@ def run_cycle(trigger: str = "manual", force: bool = False) -> dict:
     # 9. Resolve consensus from the synthesised votes
     cons = resolve_consensus(round_0, round_1, conflict)
     log.info(
-        "Consensus: verdict=%s risk=%s regime=%s regime_action=%s "
+        "Consensus: grid=%s risk=%s regime=%s regime_action=%s "
         "geometry_veto=%s debate_triggered=%s — %s",
-        cons.get('grid_verdict'), cons.get('risk_action'),
+        cons.get('grid_action'), cons.get('risk_action'),
         cons.get('regime'), cons.get('regime_action'),
         cons.get('geometry_veto'), cons.get('debate_triggered'),
         cons.get('reasoning'),

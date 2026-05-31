@@ -1,12 +1,25 @@
 # MAGI — XRP Grid Bot — Project Overview
 
-> **STATUS — SHUT DOWN (2026-05-28 18:48 UTC). Migrating off Letta.**
-> Services `magi.service` + `magi-dashboard.service` are stopped + disabled,
-> live Kraken orders cancelled, full state snapshotted to
-> `snapshots/letta_shutdown_2026-05-28/`. Letta Cloud agents preserved (not
-> deleted). Plan: rebuild the council natively on OpenAI / Anthropic / Google,
-> drop the Letta runtime. Rebuild not yet started. Everything below describes
-> the system **as it ran up to the shutdown** — historical, not live.
+> **STATUS — AGENT LAYER MIGRATED TO GOOGLE ADK (in code, 2026-05-31); NOT RUN LIVE.**
+> MAGI is still shut down at the service level (stopped + disabled 2026-05-28; no
+> live orders). The council's agent-call layer has been **rebuilt off Letta onto
+> Google ADK** — `magi/council.py` rewritten; three native ADK `LlmAgent`s in
+> `magi/agents/`; **stateless per cycle**; Melchior emits an economic verdict
+> (THESIS_HOLDS / RECONFIGURE / NO_PROFITABLE_GRID). Code-complete, offline-validated;
+> no model invoked, nothing deployed. See `01_CURRENT_STATE.md` "Session 2026-05-31
+> (later) — ADK migration" for the authoritative description.
+>
+> **This SUPERSEDES the 2026-05-29 scoping below in two ways:** (1) agents are
+> **STATELESS**, not vendor-stateful — the "vendor owns agent memory" line is
+> reversed; a controlled SQLite-sourced recall layer is scoped, not built. (2)
+> Cadence is gate-driven (free gate decides whether the paid council wakes; floor ≈
+> 1 call/day), the 4h timer only a backstop. The "Migration target architecture"
+> section at the foot (Agent Studio / Memory Bank / Responses+Conversations /
+> Managed Agents) is now HISTORICAL — the build used ADK `LlmAgent`s with stateless
+> prompt-injection instead. The engine / gate / SQLite / dashboard layers below are
+> current. Do NOT restart services, deploy, or cancel the Letta subscription
+> without operator direction; pre-migration originals are archived in
+> `archive/pre_adk_migration_2026-05-31/`.
 
 ## What this system is
 
@@ -16,17 +29,37 @@ in `.env` + the `CONFIRM_LIVE` gate file). The end goal is profitable live
 trading at meaningful scale. Hard constraint: right >50% of the time AND
 profitable after fees.
 
+**What it is becoming.** The same three-layer adaptive grid, with the council
+rebuilt natively on three vendor platforms (Casper→Google, Melchior→OpenAI,
+Balthasar→Anthropic) and the Letta runtime dropped. The north star is unchanged
+and is the whole point: an *adaptive* grid that detects regime change and acts on
+it faster than a static grid would. The migration is scoped and the vendor mapping
+locked as of 2026-05-29 — see "Migration target architecture" below.
+
 ## Architecture
+
+> **2026-05-31 — agent layer is ADK now.** This section's "three Letta Cloud
+> agents", "R1 always fires", "stateful Letta agents", per-agent Letta memory
+> blocks, and the every-4h cadence are HISTORICAL. Current: native ADK `LlmAgent`s,
+> stateless per cycle, R1 novelty-gated, gate-driven cadence, Melchior emits a
+> verdict. The three layers and hard-rule logic below are unchanged. See
+> `01_CURRENT_STATE.md` "Session 2026-05-31 (later) — ADK migration" for the
+> authoritative council description; the corrected per-item facts are inlined below.
 
 Three layers, complementary by design:
 
-1. **Council (judgment)** — three Letta Cloud agents vote independently each
-   cycle (Round 0), then synthesise (Round 1, **always fires**). Each owns
-   its action vocabulary, and Casper + Balthasar each emit a structural
-   vote field the engine reads via hard rule 0d (new 2026-05-22):
+1. **Council (judgment)** — three agents vote independently each cycle (Round 0),
+   then conditionally synthesise (Round 1, **novelty-gated** since 2026-05-27 — was
+   "always fires"). As of 2026-05-31 these are native ADK `LlmAgent`s (was Letta
+   Cloud). Each owns its vote vocabulary; Casper + Balthasar emit a structural vote
+   field the engine reads via hard rule 0d:
    - Casper → regime: `RANGING | TRENDING | UNCERTAIN` +
      `regime_action: EXECUTE | DEFER_STRUCTURAL | STAND_DOWN`
-   - Melchior → grid action: `MAINTAIN | RECENTRE | TIGHTEN | WIDEN`
+   - Melchior → economic **verdict**: `THESIS_HOLDS | RECONFIGURE |
+     NO_PROFITABLE_GRID` (+ nested `geometry` on RECONFIGURE). `enforce_hard_rules`
+     maps it to the engine's action: THESIS_HOLDS→MAINTAIN, RECONFIGURE→RECENTRE,
+     NO_PROFITABLE_GRID→GRID_PAUSE. (Was: grid action `MAINTAIN | RECENTRE |
+     TIGHTEN | WIDEN`.)
    - Balthasar → risk action: `CLEAR | PAUSE_LONGS | PAUSE_SHORTS | HALT` +
      `geometry_veto: PROCEED | HOLD_GEOMETRY | RISK_BLOCK`
 2. **Hard rules (survival)** — `magi/orchestrator.py:enforce_hard_rules`
@@ -36,23 +69,36 @@ Three layers, complementary by design:
 3. **Engine (execution)** — `grid/engine.py` builds and maintains the ladder,
    places paper orders, tracks fills.
 
-Cycles run **every 4 hours**
-(`MAGI_HOURS_EST = [0, 4, 8, 12, 16, 20]` in `scheduler.py`), 6 cycles/day,
-plus startup and manual triggers via `/api/trigger_magi`. Reduced from hourly
-on 2026-05-18 to fit the $20/mo Letta plan budget (~$13/mo at 6 cycles/day).
-The earlier midnight-reset bug at `scheduler.py:501-502` that minute-bursted
-the EST-0 slot was removed in the same session.
+**Cadence (corrected 2026-05-31): GATE-DRIVEN, not a fixed clock.** The always-on
+gate (`magi/gate.py`, deterministic, zero API cost) runs every observer loop and
+decides whether the paid council wakes at all. Floor ≈ 1 council call/day; ceiling
+= how often the grid breaches gate rules. The `MAGI_HOURS_EST = [0,4,8,12,16,20]`
+4h timer is a BACKSTOP, not the primary trigger. (Historical: framed as "every 4
+hours, 6 cycles/day", reduced from hourly 2026-05-18 to fit the $20/mo Letta
+budget — that cost model no longer applies post-Letta.) Cost is tuned via gate
+breach sensitivity, not the cadence constant.
 
-Agents are **stateful Letta Cloud agents** with persistent memory blocks. The
-runtime is api.letta.com (not self-hosted). Each agent's memory survives
-across cycles, sessions, and droplet restarts.
+Agents are **stateless per cycle** (ADK `include_contents="none"`) as of 2026-05-31
+— each call gets persona (instruction) + freshly-injected world_state, no
+persistent vendor memory/threads. (Historical: stateful Letta Cloud agents on
+api.letta.com whose memory survived across cycles/restarts.) Cross-cycle
+"memory" — what the system remembers — lives in `observer.db` (debate_records,
+trajectory, etc.); a controlled per-agent recall layer (SQLite→prompt-injection)
+is scoped but not yet built. See `01_CURRENT_STATE.md` Session 2026-05-31 (later).
 
-### The three agents
-| agent_id | Display | Model | Role |
-|---|---|---|---|
-| casper | Casper | google_ai/gemini-3-flash-preview | Regime classifier (RANGING / TRENDING / UNCERTAIN) |
-| melchior | Melchior | openai/gpt-4o | Grid microstructure (MAINTAIN / RECENTRE / TIGHTEN / WIDEN) |
-| balthasar | Balthasar | anthropic/claude-haiku-4-5 | Risk / survival (CLEAR / PAUSE_LONGS / PAUSE_SHORTS / HALT). Switched from claude-sonnet-4-6 on 2026-05-18 — ~4-5× cheaper per call. Per-agent knobs (temperature 0.3, effort medium, thinking budget 2048) preserved via `model_settings`. |
+### The three agents (ADK wiring, 2026-05-31)
+| agent_id | Model (ADK) | Role / vote |
+|---|---|---|
+| casper | `gemini-2.5-flash` (native Gemini) | Regime classifier — `RANGING / TRENDING / UNCERTAIN` + `regime_action` |
+| melchior | `LiteLlm("openai/gpt-4o")` | Grid economist — verdict `THESIS_HOLDS / RECONFIGURE / NO_PROFITABLE_GRID` + geometry |
+| balthasar | `LiteLlm("anthropic/claude-sonnet-4-6")` | Risk / survival — `CLEAR / PAUSE_LONGS / PAUSE_SHORTS / HALT` + `geometry_veto` |
+
+> Built in `magi/council.py`; instructions from `magi/agents/personas/*.md`; votes
+> forced by `magi/agents/schemas.py` (`RegimeVote` / `GridVote` / `RiskVote`).
+> Balthasar's tier (Sonnet here vs the haiku-4-5 the live Letta agent ran) to be
+> re-confirmed before live spend. (Historical Letta models: casper
+> `google_ai/gemini-3-flash-preview`, melchior `openai/gpt-4o`, balthasar
+> `anthropic/claude-haiku-4-5` with `model_settings` knobs — no longer applicable.)
 
 The three providers are chosen **by design**, not by accident. Each model has
 known biases (Gemini favours structural classification; GPT-4o anchors on
@@ -251,6 +297,69 @@ and will NOT auto-start on reboot. Do not restart without operator direction.
 - Mem0, Graphiti, persistent thread-only approaches (rejected — Letta Cloud is the runtime)
 - ETH futures system (dead — do not reference)
 - krakenex, python-kraken-sdk, any third-party Kraken wrapper (banned)
+
+## Migration target architecture
+
+Locked 2026-05-29 (scoping complete; see `01_CURRENT_STATE.md` Session 2026-05-29
+and `LETTA_SURFACE_AUDIT.md`). This is the system being built, replacing the Letta
+runtime described above.
+
+**North star (the purpose, not a nice-to-have).** MAGI exists to be an *adaptive*
+grid bot that solves the fatal weakness of a static grid: regime-blindness in
+directional markets — a static grid catches falling knives in downtrends, sells
+into rallies, and bleeds in any sustained one-way move. Every migration decision
+must preserve or improve MAGI's ability to detect a regime change and act on it
+faster than a static grid would. The "Highest priority 0★" item in
+`02_NEXT_BUILD_TASKS.md` (grid bleeds in downtrends) is exactly this problem in the
+old system; the migration is the chance to fix it with better-tuned native agents.
+**This is not a cost-optimization project** — cost was the trigger, adaptiveness is
+the purpose.
+
+**Vendor mapping (locked).** Each agent rebuilds natively and *stateful* on its own
+vendor platform; the vendor owns that agent's memory, persona, self_model
+equivalent, and thread history. We do NOT mirror agent memory locally.
+- **Casper → Google** — Gemini Enterprise Agent Platform / Gemini API Managed
+  Agents, with Memory Bank for persistent memory and Sessions for in-cycle state.
+  Build in progress in Google **Agent Studio**; the "Details" panel inputs
+  (Description + Instructions) and the R0 output-contract spec are drafted in
+  `casper_gcp/` (2026-05-31, M1 partial — see `01_CURRENT_STATE.md` Session
+  2026-05-31).
+- **Melchior → OpenAI** — Responses API + Conversations API; extended
+  `prompt_cache_retention` (up to 24h) available.
+- **Balthasar → Anthropic** — Claude Managed Agents (beta header
+  `managed-agents-2026-04-01`); native scheduled memory consolidation ("dreaming")
+  in research preview; session-hour runtime billed at $0.08/hr, opened per-cycle
+  (not 24/7).
+
+Each agent is seeded from `snapshots/letta_shutdown_2026-05-28/` — persona text,
+self_model contents, and accumulated thread history (casper 825 / melchior 466 /
+balthasar 704 messages) — and tuned on its vendor platform before going live in the
+new infrastructure. **Exception — Casper's self_model is NOT carried forward**
+(contaminated; being left behind, decided 2026-05-31). For Casper only, the persona
+is the sole seed (curated into the Agent Studio Instructions field); the self_model
+is dropped, not deconstructed into Memory Bank.
+
+**State ownership.** Vendors own all *agent* state. We own SQLite (`observer.db`)
+for everything non-agent: `debate_records`, `magi_gate_events`, `magi_alerts`,
+`grid_state`, inventory, all trading-side state. The audit confirmed this is a
+small move: of the 8 Letta blocks, only `world_state`, `recent_outcomes`, and
+`cycle_phase` need re-delivery as per-call prompt content (rebuilt fresh from
+SQLite each cycle); persona / self_model / thread history live vendor-side
+natively. Per-call payload drops from the pre-shutdown ~80–114k tokens to ~5–8k
+tokens.
+
+**Cadence / call model (event-driven, not time-driven).** The gate calls the
+council when conditions justify it; otherwise silence. The 4h `MAGI_HOURS_EST`
+schedule is a backstop, not the primary trigger. Target steady state:
+- **No active grid:** ~1 call/day at a designated time for assessment / daily
+  recap; the gate keeps monitoring continuously.
+- **Active grid:** scheduled cycles + gate-driven wakes, with the existing
+  wake-class trigger curation (`WAKE_REQUIRES_ACTIVE_GRID`, `WAKE_DWELL_MINUTES`,
+  `WAKE_MIN_INTERVAL_MIN`, conditional R1 via `should_run_r1`) continuing to bound
+  cost.
+
+This is the architecture the gate-tuning work has been building toward — it is the
+target, not a dial to re-derive from the cost-reduction history.
 
 ## See also
 
