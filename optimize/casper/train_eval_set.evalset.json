@@ -1,0 +1,230 @@
+{
+  "eval_set_id": "train_eval_set",
+  "name": "train_eval_set",
+  "eval_cases": [
+    {
+      "eval_id": "casper_001",
+      "conversation": [
+        {
+          "invocation_id": "inv_1",
+          "user_content": {
+            "parts": [
+              {
+                "text": "Classify the market regime for this cycle using your decision tree, then respond with your RegimeVote.\n\nworld_state:\n{\"timestamp\": \"2026-05-17T18:00:00\", \"price\": 1.41, \"indicators\": {\"current_price\": 1.41, \"ema_50\": 1.42, \"ema_200\": 1.77, \"adx\": 19.5, \"adx_pos\": 23.7, \"adx_neg\": 14.2, \"autocorr_1h\": 0.02, \"autocorr_4h\": 0.04, \"roc_6h\": 0.05, \"bb_width\": null, \"bb_upper\": null, \"bb_lower\": null, \"btc_ema_50\": null, \"btc_ema_200\": null, \"atr_percentile\": 13}, \"grid_state\": {}, \"inventory\": {}, \"open_orders\": {\"buy_count\": 5, \"sell_count\": 5}, \"hours_since_last_fill\": 1.0, \"hours_since_last_rebuild\": 2.0, \"trajectory\": [], \"market_knowledge\": null, \"hard_rules\": {}}"
+              }
+            ],
+            "role": "user"
+          },
+          "final_response": {
+            "parts": [
+              {
+                "text": "RANGING"
+              }
+            ],
+            "role": "model"
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "casper",
+        "user_id": "user"
+      }
+    },
+    {
+      "eval_id": "casper_002",
+      "conversation": [
+        {
+          "invocation_id": "inv_2",
+          "user_content": {
+            "parts": [
+              {
+                "text": "Classify the market regime for this cycle using your decision tree, then respond with your RegimeVote.\n\nworld_state:\n{\"timestamp\": \"2026-05-17T18:00:00\", \"price\": 1.05, \"indicators\": {\"current_price\": 1.05, \"ema_50\": 1.1, \"ema_200\": 1.3, \"adx\": 28, \"adx_pos\": 14, \"adx_neg\": 29, \"autocorr_1h\": 0.22, \"autocorr_4h\": 0.18, \"roc_6h\": -0.6, \"bb_width\": null, \"bb_upper\": null, \"bb_lower\": null, \"btc_ema_50\": null, \"btc_ema_200\": null, \"atr_percentile\": 55}, \"grid_state\": {}, \"inventory\": {}, \"open_orders\": {\"buy_count\": 5, \"sell_count\": 5}, \"hours_since_last_fill\": 1.0, \"hours_since_last_rebuild\": 2.0, \"trajectory\": [], \"market_knowledge\": null, \"hard_rules\": {}}"
+              }
+            ],
+            "role": "user"
+          },
+          "final_response": {
+            "parts": [
+              {
+                "text": "TRENDING"
+              }
+            ],
+            "role": "model"
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "casper",
+        "user_id": "user"
+      }
+    },
+    {
+      "eval_id": "casper_003",
+      "conversation": [
+        {
+          "invocation_id": "inv_3",
+          "user_content": {
+            "parts": [
+              {
+                "text": "Classify the market regime for this cycle using your decision tree, then respond with your RegimeVote.\n\nworld_state:\n{\"timestamp\": \"2026-05-17T18:00:00\", \"price\": 1.85, \"indicators\": {\"current_price\": 1.85, \"ema_50\": 1.75, \"ema_200\": 1.4, \"adx\": 26, \"adx_pos\": 29, \"adx_neg\": 12, \"autocorr_1h\": 0.18, \"autocorr_4h\": 0.2, \"roc_6h\": 0.5, \"bb_width\": null, \"bb_upper\": null, \"bb_lower\": null, \"btc_ema_50\": null, \"btc_ema_200\": null, \"atr_percentile\": 60}, \"grid_state\": {}, \"inventory\": {}, \"open_orders\": {\"buy_count\": 5, \"sell_count\": 5}, \"hours_since_last_fill\": 1.0, \"hours_since_last_rebuild\": 2.0, \"trajectory\": [], \"market_knowledge\": null, \"hard_rules\": {}}"
+              }
+            ],
+            "role": "user"
+          },
+          "final_response": {
+            "parts": [
+              {
+                "text": "TRENDING"
+              }
+            ],
+            "role": "model"
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "casper",
+        "user_id": "user"
+      }
+    },
+    {
+      "eval_id": "casper_004",
+      "conversation": [
+        {
+          "invocation_id": "inv_4",
+          "user_content": {
+            "parts": [
+              {
+                "text": "Classify the market regime for this cycle using your decision tree, then respond with your RegimeVote.\n\nworld_state:\n{\"timestamp\": \"2026-05-17T18:00:00\", \"price\": 1.65, \"indicators\": {\"current_price\": 1.65, \"ema_50\": 1.5, \"ema_200\": 1.2, \"adx\": 17, \"adx_pos\": 22, \"adx_neg\": 12, \"autocorr_1h\": 0.08, \"autocorr_4h\": 0.05, \"roc_6h\": 0.4, \"bb_width\": null, \"bb_upper\": null, \"bb_lower\": null, \"btc_ema_50\": null, \"btc_ema_200\": null, \"atr_percentile\": 40}, \"grid_state\": {}, \"inventory\": {}, \"open_orders\": {\"buy_count\": 5, \"sell_count\": 5}, \"hours_since_last_fill\": 1.0, \"hours_since_last_rebuild\": 2.0, \"trajectory\": [], \"market_knowledge\": null, \"hard_rules\": {}}"
+              }
+            ],
+            "role": "user"
+          },
+          "final_response": {
+            "parts": [
+              {
+                "text": "TRENDING"
+              }
+            ],
+            "role": "model"
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "casper",
+        "user_id": "user"
+      }
+    },
+    {
+      "eval_id": "casper_005",
+      "conversation": [
+        {
+          "invocation_id": "inv_5",
+          "user_content": {
+            "parts": [
+              {
+                "text": "Classify the market regime for this cycle using your decision tree, then respond with your RegimeVote.\n\nworld_state:\n{\"timestamp\": \"2026-05-17T18:00:00\", \"price\": 1.41, \"indicators\": {\"current_price\": 1.41, \"ema_50\": 1.4, \"ema_200\": 1.42, \"adx\": 15, \"adx_pos\": 15, \"adx_neg\": 13, \"autocorr_1h\": 0.05, \"autocorr_4h\": -0.1, \"roc_6h\": -0.05, \"bb_width\": null, \"bb_upper\": null, \"bb_lower\": null, \"btc_ema_50\": null, \"btc_ema_200\": null, \"atr_percentile\": 28}, \"grid_state\": {}, \"inventory\": {}, \"open_orders\": {\"buy_count\": 5, \"sell_count\": 5}, \"hours_since_last_fill\": 1.0, \"hours_since_last_rebuild\": 2.0, \"trajectory\": [], \"market_knowledge\": null, \"hard_rules\": {}}"
+              }
+            ],
+            "role": "user"
+          },
+          "final_response": {
+            "parts": [
+              {
+                "text": "UNCERTAIN"
+              }
+            ],
+            "role": "model"
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "casper",
+        "user_id": "user"
+      }
+    },
+    {
+      "eval_id": "casper_006",
+      "conversation": [
+        {
+          "invocation_id": "inv_6",
+          "user_content": {
+            "parts": [
+              {
+                "text": "Classify the market regime for this cycle using your decision tree, then respond with your RegimeVote.\n\nworld_state:\n{\"timestamp\": \"2026-05-17T18:00:00\", \"price\": 1.41, \"indicators\": {\"current_price\": 1.41, \"ema_50\": null, \"ema_200\": null, \"adx\": null, \"adx_pos\": null, \"adx_neg\": null, \"autocorr_1h\": null, \"autocorr_4h\": null, \"roc_6h\": null, \"bb_width\": null, \"bb_upper\": null, \"bb_lower\": null, \"btc_ema_50\": null, \"btc_ema_200\": null, \"atr_percentile\": null}, \"grid_state\": {}, \"inventory\": {}, \"open_orders\": {\"buy_count\": 5, \"sell_count\": 5}, \"hours_since_last_fill\": 1.0, \"hours_since_last_rebuild\": 2.0, \"trajectory\": [], \"market_knowledge\": null, \"hard_rules\": {}}"
+              }
+            ],
+            "role": "user"
+          },
+          "final_response": {
+            "parts": [
+              {
+                "text": "UNCERTAIN"
+              }
+            ],
+            "role": "model"
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "casper",
+        "user_id": "user"
+      }
+    },
+    {
+      "eval_id": "casper_007",
+      "conversation": [
+        {
+          "invocation_id": "inv_7",
+          "user_content": {
+            "parts": [
+              {
+                "text": "Classify the market regime for this cycle using your decision tree, then respond with your RegimeVote.\n\nworld_state:\n{\"timestamp\": \"2026-05-17T18:00:00\", \"price\": 1.42, \"indicators\": {\"current_price\": 1.42, \"ema_50\": 1.5, \"ema_200\": 1.68, \"adx\": 18, \"adx_pos\": 21, \"adx_neg\": 15, \"autocorr_1h\": 0.03, \"autocorr_4h\": 0.05, \"roc_6h\": -0.1, \"bb_width\": null, \"bb_upper\": null, \"bb_lower\": null, \"btc_ema_50\": null, \"btc_ema_200\": null, \"atr_percentile\": 14}, \"grid_state\": {}, \"inventory\": {}, \"open_orders\": {\"buy_count\": 5, \"sell_count\": 5}, \"hours_since_last_fill\": 1.0, \"hours_since_last_rebuild\": 2.0, \"trajectory\": [], \"market_knowledge\": null, \"hard_rules\": {}}"
+              }
+            ],
+            "role": "user"
+          },
+          "final_response": {
+            "parts": [
+              {
+                "text": "RANGING"
+              }
+            ],
+            "role": "model"
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "casper",
+        "user_id": "user"
+      }
+    },
+    {
+      "eval_id": "casper_008",
+      "conversation": [
+        {
+          "invocation_id": "inv_8",
+          "user_content": {
+            "parts": [
+              {
+                "text": "Classify the market regime for this cycle using your decision tree, then respond with your RegimeVote.\n\nworld_state:\n{\"timestamp\": \"2026-05-17T18:00:00\", \"price\": 1.45, \"indicators\": {\"current_price\": 1.45, \"ema_50\": 1.45, \"ema_200\": 1.44, \"adx\": 12, \"adx_pos\": 12, \"adx_neg\": 11, \"autocorr_1h\": -0.05, \"autocorr_4h\": 0.03, \"roc_6h\": 0.02, \"bb_width\": null, \"bb_upper\": null, \"bb_lower\": null, \"btc_ema_50\": null, \"btc_ema_200\": null, \"atr_percentile\": 22}, \"grid_state\": {}, \"inventory\": {}, \"open_orders\": {\"buy_count\": 5, \"sell_count\": 5}, \"hours_since_last_fill\": 1.0, \"hours_since_last_rebuild\": 2.0, \"trajectory\": [], \"market_knowledge\": null, \"hard_rules\": {}}"
+              }
+            ],
+            "role": "user"
+          },
+          "final_response": {
+            "parts": [
+              {
+                "text": "RANGING"
+              }
+            ],
+            "role": "model"
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "casper",
+        "user_id": "user"
+      }
+    }
+  ]
+}

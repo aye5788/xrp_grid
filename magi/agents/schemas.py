@@ -14,7 +14,11 @@ ADK ref (adk-docs MCP, agents/llm-agents): output_schema — "If set, the agent'
 final response *must* be a JSON string conforming to this schema"; output_key
 saves that final response into session state.
 
-All three use extra="forbid". conviction is a float 0.0-1.0 on every schema.
+conviction is a float 0.0-1.0 on every schema. GridVote/RiskVote use
+extra="forbid"; RegimeVote uses extra="ignore" because Casper runs on the native
+Gemini API, which 400s (INVALID_ARGUMENT) on the `additionalProperties: false`
+that extra="forbid" emits into response_schema. GPT-4o/Claude via LiteLlm accept
+it, so Melchior/Balthasar keep extra="forbid".
 """
 
 from typing import Literal, Optional
@@ -25,7 +29,13 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 class RegimeVote(BaseModel):
     """Casper — market-regime classification."""
 
-    model_config = ConfigDict(extra="forbid")
+    # extra="ignore", NOT "forbid": Casper runs on the native Gemini API, whose
+    # response_schema rejects the `additionalProperties: false` that extra="forbid"
+    # emits — a 400 INVALID_ARGUMENT on every R0 call. Validated against
+    # gemini-2.5-flash 2026-06-01 (see optimize/casper smoke run). GridVote /
+    # RiskVote keep extra="forbid" — they go through LiteLlm to OpenAI / Anthropic,
+    # which accept (OpenAI requires) additionalProperties.
+    model_config = ConfigDict(extra="ignore")
 
     position: Literal["RANGING", "TRENDING", "UNCERTAIN"] = Field(
         description="Casper's regime classification for this cycle."

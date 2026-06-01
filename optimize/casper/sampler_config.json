@@ -1,0 +1,14 @@
+{
+  "eval_config": {
+    "criteria": {
+      "regime_position_match": { "threshold": 0.75 }
+    },
+    "custom_metrics": {
+      "regime_position_match": {
+        "code_config": { "name": "casper.metrics.regime_position_match" }
+      }
+    }
+  },
+  "app_name": "casper",
+  "train_eval_set": "train_eval_set"
+}
