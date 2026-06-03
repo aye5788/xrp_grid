@@ -58,6 +58,12 @@ it standalone instead (e.g. a systemd timer), set that to `False` and:
 
 - Raw tables are append-only; `trades`/`spread`/`book_l2` are pruned past
   `RAW_RETENTION_DAYS` (default 60). `ohlc_1m` is kept forever (tiny).
+- `ohlc_1m.source` records a bar's **provenance**: `0` = observed live on the WS
+  feed (the default, set by the column DEFAULT on the hot path), `1` = a
+  backfilled flat bar for a minute Kraken REST confirmed was **silent** (zero
+  trades), `2` = a bar **REST-recovered** for a minute we were blind to (real
+  volume). A backfilled bar is therefore never indistinguishable from a live one
+  — filter `WHERE source = 0` for wire-only data. See the backfill section below.
 - `rollup_bars` is permanent.
 - Writer uses WAL + `synchronous=NORMAL` + batched `executemany` (one fsync
   per flush) so plain SQLite keeps up with the tick rate.
@@ -95,10 +101,124 @@ Deploy: `systemctl restart magi-dashboard` (re-enable if needed). It reads
 `market_tape.db`, so it works whether or not the collector is up — it just
 shows "COLLECTOR NOT REPORTING" until the collector writes health beacons.
 
-Panels: process health (ws state / reconnects / rows written-dropped, from
-the `collector_health` beacon), feed freshness, throughput + trades/min
-sparkline, market snapshot, storage usage, rollup status. Page polls
-`/api/status` every 2s.
+Panels: **Data Quality** (the full-width control-panel headline — see below),
+process health (ws state / reconnects / rows written-dropped, from the
+`collector_health` beacon), feed freshness, throughput + trades/min sparkline,
+market snapshot, storage usage, rollup status, **Backup & durability**,
+**Events** (alert + ws-state history from the `events` table), and **Grid
+Conditions** (advisory market-analytics: realized vol → suggested spacing,
+regime, flow imbalance, harvest rate — `tape/conditions.py`, enforces nothing —
+see below). Page polls
+`/api/status` every 2s. Styled in the MAGI terminal palette (amber/orange on
+black, Michroma title + VT323 verdict + Courier-New body — same fonts the
+archived MAGI dashboard loads) so it reads as the same control surface.
+
+## Data quality (garbage-in guard)
+
+`tape/quality.py` is a read-only report that answers one question: is the tape
+trustworthy, or is it ingesting garbage that makes it useless as a reality
+anchor? It runs ~10 checks over a trailing window (default 24h) from tables the
+collector already writes — no new deps, no writes — and rolls them into one
+GREEN / YELLOW / RED verdict shown as the dashboard headline (and in
+`/api/status` under `quality`).
+
+Checks: 1m **coverage** (% of expected bars present in the captured span),
+largest contiguous **gap**, last-bar **freshness**, bar **validity**
+(low≤o,c≤high, positive, vol≥0), **spread integrity** (no crossed/zero/null
+bbo), **trade validity** + **ordering**, **price anomalies** (1m close jumps
+>5% ≈ bad print), **rollup consistency** (completed 1h buckets must reconcile
+to their 1m volume), and the **collector beacon** (alive + connected).
+
+Thresholds are anchored to sane exogenous bounds (a 1m bar closes every 60s;
+XRP doesn't move >5% in a minute absent a bad print; a *completed* rollup bucket
+must reconcile exactly), NOT fitted to the data — they flag corruption, not
+normal market behaviour. The rollup check deliberately ignores the in-progress
+bucket, which always lags the live minute.
+
+One-shot report from the CLI:
+
+```bash
+/root/xrp_grid/venv/bin/python3 -m tape.quality
+```
+
+## Grid conditions (favorability)
+
+`tape/conditions.py` is the advisory companion to Data Quality: it assumes the
+data is good and asks **would current conditions favour the adaptive grid, or
+bleed it?** Read-only, pure stdlib, 24h window. Every threshold is anchored to
+the grid's **real exogenous parameters** — 1.5% spacing, 0.50% maker round-trip
+fee floor, the 0.3–2.5% spacing clamps — NOT fitted to the data. It enforces
+nothing; the verdict is decision-support, shown in `/api/status` under
+`conditions`.
+
+The headline GREEN / YELLOW / RED is the **worst of three drivers** — hourly
+volatility, regime, harvest rate. **Flow imbalance is context only and never
+moves the verdict** (short-window flow is too noisy to gate on).
+
+- **hourly volatility** — realized σ (1m log-returns ×√60) plus a vol-tracking
+  *adaptive spacing* (σ clamped to 0.3–2.5%). 🔴 σ<0.50% (below the fee floor —
+  can't clear a round-trip), 🟡 0.50–1.5%, 🟢 ≥1.5%. The yellow band has a
+  **load-bearing internal gradient**, surfaced as `firm` vs `thin`: `firm`
+  (σ≥0.75%, i.e. ≥0.25% margin over the floor) = the default 1.5% spacing is
+  wider than it needs to be — tighten toward σ and harvest more; `thin` (σ<0.75%)
+  = the vol-tracked spacing barely breaks even, degrading toward too-quiet. Same
+  colour, **opposite** recommendation — the detail spells out the exact fee margin
+  (`+0.42% over fee floor`), so read the number, not just the chip.
+- **regime** — efficiency ratio (|net move| ÷ summed minute moves) + net %/24h.
+  🟢 ER<0.30 choppy / mean-reverting (grid-favourable), 🟡 0.30–0.50 mixed, 🔴
+  ≥0.50 trending (the grid-downtrend-bleed early warning).
+- **flow imbalance (6h)** — aggressor buy vs sell volume; context only, excluded
+  from the verdict.
+- **harvest rate** — fraction of completed 1h buckets whose high–low range ≥1.5%
+  spacing; the most direct "is there anything to harvest" measure. 🟢 ≥25%, 🟡
+  ≥10%, 🔴 <10%. Measured against the fixed 1.5%, so it *understates* the
+  opportunity at a tighter adaptive spacing.
+
+The instructive combination is **vol-yellow-`firm` + harvest-green**: per-minute
+σ sits under 1.5% but hourly ranges still clear the spacing and the path is
+choppy — exactly where an *adaptive* grid earns its keep over a static one by
+tightening toward σ. Watch the vol number's drift inside the band (`firm → thin`),
+not just the colour: that is the early signal conditions are thinning toward
+stand-down **before** the colour flips red.
+
+One-shot report from the CLI:
+
+```bash
+/root/xrp_grid/venv/bin/python3 -m tape.conditions
+```
+
+## Dashboard performance (two clocks — keep heavy queries off the 2s path)
+
+The page polls `/api/status` every **2 s**, but the two heavy panels (Data
+Quality + Grid Conditions, ~24h window-function scans) are **cached on a 15 s
+TTL** (`_ANALYTICS_TTL_SEC` in `dashboard.py`) — they recompute ~4×/min, **not**
+30×/min, and are off the real-time path entirely. Measured on 2026-06-02 (8h of
+data): the hot per-poll work (feed freshness, throughput, market snapshot, five
+`COUNT(*)` totals) is **~0.06 ms**; the cached recompute is **quality ~86 ms +
+conditions ~9 ms**. So the live numbers you watch tick are sub-millisecond, and
+adding a metric to a cached panel cannot slow them.
+
+Two properties make this safe to extend:
+
+- **Cost is bounded by the 24h window + indexes, not total DB size.** Every
+  analytics query filters to the trailing window and those filters are
+  index-backed (`ix_trades_ts`, `ix_spread_ts`, the `ohlc_1m` / `rollup_bars`
+  PKs). As history accumulates the scans keep covering ~24h, so the cost rises
+  only until the window fills (~3× today's, then **plateaus**) — it does **not**
+  grow with months of data.
+- **WAL + a separate read-only dashboard connection** mean a slow analytics scan
+  can't block the collector's writes; worst case it slows only the dashboard's
+  own render, and the 15 s cache caps even that.
+
+**The rule when adding panels / metrics:**
+- ✅ Add to the **cached** path (`conditions.py` / `quality.py`) — windowed,
+  indexed, cheap. conditions at ~9 ms has large headroom.
+- ⚠️ Never add a query to the **hot** path (`build_status` outside the
+  `_analytics()` block) unless it is indexed / `LIMIT 1` / windowed. That is the
+  only way to actually slow the 2 s updates.
+- ⚠️ If `quality.report` ever gets heavy (it already dominates at ~86 ms and does
+  an N+1 loop over settled hourly buckets), raise `_ANALYTICS_TTL_SEC` (15→30 s) —
+  a 24h panel does not need 15 s freshness. Don't drop metrics; slow the cadence.
 
 ## Backups (durability, not capacity)
 
@@ -114,6 +234,11 @@ the tape is backed up off-box.
   fires on boot). The GCS bucket has a lifecycle rule deleting snapshots >30 d.
 - Uses the already-configured `gsutil` (project `xrp-grid-brain-monitor`) — no
   new account or service.
+- Each run writes `tape/backups/.last_backup.json` (GCS-confirmed timestamp,
+  size, upload-ok, local copy count). The dashboard's **Backup & durability**
+  panel reads that file — so it shows real upload status with no per-poll
+  network call, and goes red if the last backup is overdue (>150 min vs the
+  hourly timer) or the GCS upload failed.
 
 Run a backup by hand: `python -m tape.backup`
 
@@ -148,6 +273,79 @@ Fires (from the health loop, `config.ALERT_*`):
 
 Test by hand: `python -m tape.collector` is live; to fire a test push:
 `python -c "from tape import notify; notify.send('Tape: test','[TEST] ignore','warning')"`
+
+## Self-assessment, gap backfill & containment
+
+The collector self-grades data quality every `SELFCHECK_EVERY_SECS` (60 s) in its
+health loop. Design philosophy (operator's): **err on caution — contain a
+*sustained* or systemic problem, and only auto-act on the small,
+exchange-CONFIRMED-benign case.** A detected 1m gap is first run through the
+layered backfill (`tape/backfill.py`); only what it can't confidently resolve is
+flagged.
+
+### Why a gap needs a distinguisher (not blanket backfill)
+
+Kraken's WS `ohlc` channel only publishes a bar **on activity** — a minute with
+zero trades produces no bar, so the tape has a hole. That hole is one of two very
+different things, and they must not be conflated:
+
+1. **The exchange was silent** (zero trades). The faithful value is a flat
+   carry-forward bar (`O=H=L=C` = prior close, `vol=0`). Filling it is
+   *reconstruction*, not fabrication.
+2. **We were blind** (disconnected, or a capture bug). Real trades may have
+   happened that we missed. Filling *that* with a flat bar would be fabrication.
+
+The backfill tells them apart with two arbiters and tags every fill:
+
+- **Local connectivity proof** — were we connected, per our own `events` log,
+  for the whole missing minute? (classifies, and sets how loud a loss is).
+- **Kraken public REST OHLC** — the exchange's own record. `vol==0` confirms (1)
+  benign silence → write a flat bar tagged `source=1`. `vol>0` proves (2) we lost
+  real data → recover the bar tagged `source=2` **and escalate** (a `warning`
+  event + ntfy push; missing it *while connected* is flagged as a capture bug).
+- **Bounds:** a gap larger than `BACKFILL_MAX_GAP_BARS` (15) smells like an
+  outage, not silence — left flagged for review, never auto-filled. Backfill is
+  also skipped entirely while `auto_actions_frozen` (a degraded window).
+
+So benign silent minutes self-heal into a contiguous series; genuine data loss is
+recovered *but surfaced loudly*; and anything unconfirmed stays a flagged `gap`
+event with the reason attached. Confirmed-silent fills make the bar present, so
+they no longer count against the quality verdict; the `backfilled bars` quality
+check reports the running `silent-fill` / `REST-recovered` counts for an audit
+trail. Run a one-shot fill of the settled window with
+`python -m tape.backfill`.
+
+### Sustained-problem escalation
+
+- **Only a SUSTAINED red verdict escalates** — quality red for ≥ `DQ_SUSTAINED_SECS`
+  (180 s), i.e. not a single blip. On escalation: a distinct **critical** ntfy
+  push, a `degraded_start` event marking the window, and `auto_actions_frozen`
+  is set — the containment stance is to do *less*, not more, when something is
+  systemically wrong (a bad source must not be trusted to "fix" itself, and
+  backfill stands down). Recovery emits `degraded_end` and unfreezes.
+- **Backfill only ever ADDS confirmed-or-recovered bars; it never deletes or
+  overwrites** (`INSERT OR IGNORE`), so an observed bar always wins.
+
+All of this surfaces in the dashboard **Events** panel.
+
+## Dead-man's-switch (catches total death)
+
+The ntfy alerts above are emitted *by the collector* — so they can't fire if the
+collector process or the whole box dies. That blind spot is closed by an
+**external** heartbeat: the collector pings `HEALTHCHECK_PING_URL` every
+`HEALTHCHECK_EVERY_SECS` (60 s) while it's alive (`notify.heartbeat()`, same
+env-driven fail-silent pattern as the ntfy push). An external monitor pages you
+when the pings **stop**. The ping is *unconditional* (it proves the process
+runs; feed problems are alerted separately), so the daily Kraken reconnect never
+trips it. Unset URL = silent no-op, so it's inert until you set one up.
+
+Setup (~2 min, free, no card — [healthchecks.io](https://healthchecks.io)):
+1. Create a free account → **Add Check**. Set Period ≈ 2 min, **Grace ≈ 5 min**
+   (well above any brief reconnect). Add a notification (email, or point it at
+   the same ntfy topic).
+2. Copy the check's ping URL (`https://hc-ping.com/<uuid>`).
+3. Put `HEALTHCHECK_PING_URL=https://hc-ping.com/<uuid>` in `.env` and
+   `systemctl restart tape-collector`. Within a minute the check goes green.
 
 ## Extending later
 

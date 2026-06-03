@@ -16,8 +16,10 @@ import threading
 import time
 from datetime import datetime, timezone
 
+from tape import backfill
 from tape import config
 from tape import notify
+from tape import quality
 from tape import rollup
 from tape import schema
 from tape.writer import TapeWriter
@@ -86,6 +88,18 @@ class Collector:
         self._unhealthy_since = None
         self._down_alerted = False
         self._last_drop_alert_count = 0
+        self._last_heartbeat = 0.0   # dead-man's-switch ping cadence
+        # event log queue — appended from any thread (ws + health), drained and
+        # written by the single health-loop connection (events stay single-writer)
+        self._event_lock = threading.Lock()
+        self._events = []
+        # self-assessment / containment state
+        self._last_selfcheck = 0.0
+        self._selfcheck_seeded = False     # first pass seeds unfillable gaps silently
+        self._logged_gaps = set()
+        self._dq_red_since = None
+        self._dq_escalated = False
+        self.auto_actions_frozen = False   # True on sustained problem -> backfill stands down
 
     # ----- WS callbacks -> writer.put -----
 
@@ -129,6 +143,134 @@ class Collector:
     def _on_state_change(self, state, notes):
         log.info("ws state -> %s (%s) reconnects_1h=%d",
                  state, notes, self.client.reconnect_count_1h)
+        sev = "info" if state == "connected" else "warning"
+        self._emit_event(sev, "ws_state", f"ws {state}" + (f": {notes}" if notes else ""))
+
+    # ----- event log (alerts + ws state changes) -----
+
+    def _emit_event(self, severity, category, message):
+        """Queue an event for the health loop to persist. Thread-safe; bounded
+        so a stalled drain can't grow it without limit."""
+        with self._event_lock:
+            self._events.append((_now_ms(), severity, category, (message or "")[:300]))
+            if len(self._events) > 500:
+                self._events = self._events[-500:]
+
+    def _drain_events(self, conn):
+        with self._event_lock:
+            batch, self._events = self._events, []
+        if batch:
+            conn.executemany(
+                "INSERT INTO events (ts, severity, category, message) VALUES (?,?,?,?)",
+                batch)
+            conn.commit()
+
+    # ----- self-assessment / containment (flag-only, NEVER mutates data) -----
+
+    def _detect_gaps(self, conn, now):
+        """Find missing 1m bars in the recent SETTLED window (older than
+        GAP_SETTLE_SECS, so a reconnect's re-sent bars aren't false-flagged).
+        Returns [(gap_start_ms, missing_count)]. Read-only."""
+        settle = now - config.GAP_SETTLE_SECS * 1000
+        win = now - config.GAP_LOOKBACK_HOURS * 3_600_000
+        rows = [r[0] for r in conn.execute(
+            "SELECT ts_begin FROM ohlc_1m WHERE ts_begin>=? AND ts_begin<=? ORDER BY ts_begin",
+            (win, settle))]
+        gaps = []
+        for i in range(1, len(rows)):
+            missing = (rows[i] - rows[i - 1]) // 60_000 - 1
+            if missing > 0:
+                gaps.append((rows[i - 1] + 60_000, int(missing)))
+        return gaps
+
+    def _self_assess(self, conn):
+        """Periodic data-quality self-grade. Detected 1m gaps are first run
+        through the LAYERED backfill (tape/backfill.py): a gap REST confirms was
+        a silent minute is filled with a flat carry-forward bar; a gap REST shows
+        had real volume is recovered AND escalated (we were blind); anything it
+        can't confidently resolve stays FLAGGED for a human. Backfill is skipped
+        entirely while auto-actions are frozen. Separately, a SUSTAINED red
+        verdict (not a single blip) escalates: critical alert + degraded-window
+        marker + freezing auto-actions. The philosophy is unchanged — a
+        sustained/systemic problem makes us LESS aggressive (freeze + escalate),
+        not more; backfill only acts on the small, exchange-CONFIRMED-benign case."""
+        now = _now_ms()
+
+        # --- gap detection -> layered backfill -> flag-only for the residual ---
+        gaps = self._detect_gaps(conn, now)
+        results = []
+        if config.BACKFILL_ENABLED and gaps and not self.auto_actions_frozen:
+            try:
+                results = backfill.backfill_gaps(conn, gaps)
+            except Exception as e:
+                log.warning("backfill pass failed: %r", e)
+                results = []
+
+        by_start = {r["gap_start"]: r for r in results}
+        # one fill notice per resolved gap: info for benign silence; warn + push
+        # for recovered loss (we were blind — never let that read as clean).
+        remaining = self._detect_gaps(conn, now)
+        remaining_starts = {g[0] for g in remaining}
+        for r in results:
+            if r["recovered"]:
+                self._emit_event("warning", "backfill_recovered", "1m backfill: " + r["detail"])
+                notify.send("Tape: recovered missed 1m bars",
+                            "[WARN] " + r["detail"][:160] + " -> open dashboard", "warning")
+            elif r["filled_silent"] and r["gap_start"] not in remaining_starts:
+                self._emit_event("info", "backfill", "1m backfill: " + r["detail"])
+
+        # flag-only for gaps still open after backfill (seed silently on first
+        # pass so a restart doesn't re-flag known-unfillable holes; only NEW ones
+        # after that). Detail carries WHY it couldn't be filled when available.
+        if not self._selfcheck_seeded:
+            self._logged_gaps.update(remaining_starts)
+            self._selfcheck_seeded = True
+        else:
+            for gap_start, missing in remaining:
+                if gap_start in self._logged_gaps:
+                    continue
+                self._logged_gaps.add(gap_start)
+                t0 = time.strftime("%H:%M", time.gmtime(gap_start / 1000))
+                t1 = time.strftime("%H:%M", time.gmtime((gap_start + missing * 60_000) / 1000))
+                why = by_start.get(gap_start, {}).get("detail", "")
+                self._emit_event("warning", "gap",
+                                 f"1m gap: {missing} bar(s) missing {t0}-{t1} UTC"
+                                 + (f" — {why}" if why else " (flagged, unfilled)"))
+        if len(self._logged_gaps) > 1000:
+            self._logged_gaps = set(sorted(self._logged_gaps)[-1000:])
+
+        # --- sustained-problem detection on the quality verdict ---
+        try:
+            rep = quality.report(conn, now)
+        except Exception as e:
+            log.warning("self-assess quality report failed: %r", e)
+            return
+        if rep.get("verdict") == "red":
+            if self._dq_red_since is None:
+                self._dq_red_since = time.time()
+            red_for = time.time() - self._dq_red_since
+            if red_for >= config.DQ_SUSTAINED_SECS and not self._dq_escalated:
+                failing = ", ".join(c["label"] for c in rep.get("checks", [])
+                                    if c.get("status") == "red") or "unknown"
+                self.auto_actions_frozen = True
+                self._dq_escalated = True
+                self._emit_event("critical", "degraded_start",
+                                 f"SUSTAINED data-quality problem ({int(red_for)}s): {failing} "
+                                 f"— auto-actions FROZEN, window marked degraded")
+                notify.send("Tape: SUSTAINED data-quality problem",
+                            f"[CRITICAL] red {int(red_for)}s: {failing} -> open dashboard",
+                            "critical")
+                log.error("SUSTAINED data-quality problem: %s (frozen)", failing)
+        else:
+            if self._dq_escalated:
+                self._emit_event("warning", "degraded_end",
+                                 "data quality recovered — auto-actions unfrozen")
+                notify.send("Tape: data quality RECOVERED",
+                            "[OK] quality back to non-red", "warning")
+                log.info("data quality recovered — unfrozen")
+            self._dq_red_since = None
+            self._dq_escalated = False
+            self.auto_actions_frozen = False
 
     # ----- health beacon (read by the dashboard, a separate process) -----
 
@@ -149,6 +291,7 @@ class Collector:
         conn.execute("PRAGMA busy_timeout=10000")
         try:
             self._write_health(conn)  # write once immediately
+            self._maybe_heartbeat()
             while not self._stop.wait(config.HEALTH_EVERY_SECS):
                 try:
                     self._write_health(conn)
@@ -158,8 +301,36 @@ class Collector:
                     self._check_alerts()
                 except Exception as e:
                     log.warning("alert check failed: %r", e)
+                try:
+                    self._maybe_heartbeat()
+                except Exception as e:
+                    log.debug("heartbeat failed: %r", e)
+                try:
+                    if time.time() - self._last_selfcheck >= config.SELFCHECK_EVERY_SECS:
+                        self._self_assess(conn)
+                        self._last_selfcheck = time.time()
+                except Exception as e:
+                    log.warning("self-assess failed: %r", e)
+                try:
+                    self._drain_events(conn)
+                except Exception as e:
+                    log.warning("event drain failed: %r", e)
         finally:
+            try:
+                self._drain_events(conn)   # flush tail on shutdown
+            except Exception:
+                pass
             conn.close()
+
+    def _maybe_heartbeat(self):
+        """Ping the external dead-man's-switch on a fixed cadence while the
+        process is alive. UNCONDITIONAL: it proves the PROCESS is running (feed
+        problems are alerted separately via _check_alerts), so the daily Kraken
+        reconnect doesn't suppress it. No-op until HEALTHCHECK_PING_URL is set."""
+        now = time.time()
+        if now - self._last_heartbeat >= config.HEALTHCHECK_EVERY_SECS:
+            notify.heartbeat()
+            self._last_heartbeat = now
 
     def _check_alerts(self):
         """Edge-triggered phone alerts via the shared ntfy topic. Fires once
@@ -184,6 +355,8 @@ class Collector:
                     "critical",
                 )
                 self._down_alerted = True
+                self._emit_event("critical", "feed_down",
+                                 f"feed down: ws={st} last_data={age_str} for ~{int(down_for)}s")
                 log.error("ALERT: feed down (ws=%s age=%s) — pushed", st, age)
         else:
             if self._down_alerted:
@@ -193,6 +366,7 @@ class Collector:
                     "warning",
                 )
                 log.info("ALERT: feed recovered — pushed")
+                self._emit_event("warning", "recovered", "feed recovered — data flowing again")
             self._unhealthy_since = None
             self._down_alerted = False
 
@@ -204,6 +378,7 @@ class Collector:
                 "critical",
             )
             self._last_drop_alert_count = dropped
+            self._emit_event("critical", "dropping", f"writer dropped {dropped} rows (queue full)")
             log.error("ALERT: writer dropping (%d) — pushed", dropped)
 
     # ----- rollup loop (optional, in-process) -----
