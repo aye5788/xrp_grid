@@ -539,6 +539,23 @@ def build_world_state() -> dict:
         inv.get("xrp_held"), inv.get("usd_held"), price,
     )
 
+    # Drawdown from the trailing-7d high — a JUDGMENT INPUT for Balthasar's
+    # capital-erosion read, not a threshold (no rule/gate keys off it). Running
+    # peak includes current price so the value clamps to <= 0.0 (0.0 = at/above
+    # the 7d high). Sourced from the same 1h candle series the variant scorer
+    # uses (168 x 1h bars = 7d). None when price is unavailable or no candles.
+    drawdown_from_high_7d = None
+    try:
+        if price is not None:
+            dd_candles = get_candles('1h', limit=168)
+            highs = [float(c['high']) for c in dd_candles if c.get('high') is not None]
+            if highs:
+                peak = max(max(highs), float(price))
+                if peak > 0:
+                    drawdown_from_high_7d = (float(price) - peak) / peak * 100.0
+    except Exception as e:
+        log.warning("drawdown_from_high_7d compute failed (emitting None): %s", e)
+
     ws = {
         "timestamp":                datetime.utcnow().isoformat(),
         "price":                    price,
@@ -567,6 +584,9 @@ def build_world_state() -> dict:
         # Hardcoded tier-0 today; future work: source from Kraken TradeVolume
         # (see 02_NEXT_BUILD_TASKS.md).
         "current_fee_tier_pct":     MAKER_FEE,
+        # Signed-percent drawdown from the trailing-7d running peak (<= 0.0).
+        # Risk-context judgment input for Balthasar — no rule keys off it.
+        "drawdown_from_high_7d":    drawdown_from_high_7d,
         # Position-state context — surfaced so agents can reason about
         # whether they have an open position from a recent fill (and
         # therefore should HOLD, letting the grid close the round-trip)

@@ -110,6 +110,12 @@ FIELDS = {
         "consumers": ["melchior"],
         "melchior_usage": "context — fee floor referenced in derived-quantity formulas (2x maker fee per round-trip)",
     },
+    "drawdown_from_high_7d": {
+        "type": "float",
+        "description": "signed percent drawdown of current price from the trailing-7d (168 x 1h bar) running peak; <= 0.0, where 0.0 = at/above the 7d high and e.g. -5.23 = 5.23% below it. None when price is unavailable or no candles exist",
+        "consumers": ["balthasar"],
+        "balthasar_usage": "context — drawdown from the trailing-7d high, weighed as risk context alongside skew and buffers; a judgment input, NOT a mechanical trigger (no threshold or gate keys off it)",
+    },
 
     # ---------------- indicators block ----------------
 
