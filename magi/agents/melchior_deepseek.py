@@ -74,16 +74,38 @@ def _extract_tool_input(response: Any) -> dict[str, Any]:
     )
 
 
+def _build_user_content(world_state: dict, extra_context: str | None) -> Any:
+    """Build Melchior's first user-turn content. With extra_context=None this is
+    the proven plain-string ("world_state:\\n" + render) — byte-identical to today.
+    With extra_context set, it becomes a two-block list whose FIRST block is the
+    identical world_state text and whose SECOND block is extra_context — placed
+    AFTER the world_state so DeepSeek's automatic prefix cache (system + the
+    world_state block) is never busted by the volatile trailing context."""
+    ws_block = "world_state:\n" + render_world_state(world_state)
+    if extra_context:
+        return [
+            {"type": "text", "text": ws_block},
+            {"type": "text", "text": extra_context},
+        ]
+    return ws_block
+
+
 def run_melchior_with_meta(
     world_state: dict,
     persona: str | None = None,
     model: str = "deepseek-v4-pro",
+    extra_context: str | None = None,
 ) -> tuple[GridVote, Any]:
     """Run the Melchior seat and return (validated GridVote, raw Anthropic response).
 
     Same logic as `run_melchior`, but also surfaces the raw response so callers can
     inspect `response.model` / `response.usage` (cost, token accounting). Public
     callers should prefer `run_melchior`; this variant exists for tests/observability.
+
+    extra_context (council_v2 only): an extra instruction block (regime premise /
+    rebuttal transcript) placed AFTER the world_state block. No cache_control here —
+    DeepSeek caches the stable prefix automatically; we only keep that prefix
+    stable. None -> byte-identical to the proven standalone request.
     """
     api_key = os.environ["DEEPSEEK_API_KEY"]  # KeyError if unset; never logged
     client = anthropic.Anthropic(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
@@ -95,7 +117,7 @@ def run_melchior_with_meta(
     }
     system = persona if persona is not None else _DEFAULT_PERSONA
     messages: list[dict[str, Any]] = [
-        {"role": "user", "content": "world_state:\n" + render_world_state(world_state)},
+        {"role": "user", "content": _build_user_content(world_state, extra_context)},
     ]
 
     def _call(msgs: list[dict[str, Any]]) -> Any:
@@ -147,6 +169,7 @@ def run_melchior(
     world_state: dict,
     persona: str | None = None,
     model: str = "deepseek-v4-pro",
+    extra_context: str | None = None,
 ) -> GridVote:
     """Run the Melchior (Grid Economist) seat on DeepSeek; return a validated GridVote.
 
@@ -155,6 +178,10 @@ def run_melchior(
     conditional GridVote.geometry contract), disables thinking (v4-pro defaults it
     ON, which 400s with a forced tool_choice), forces the grid_vote tool, and
     validates the result with one feedback retry on failure.
+
+    extra_context defaults to None (byte-identical to the proven standalone request).
     """
-    vote, _response = run_melchior_with_meta(world_state, persona=persona, model=model)
+    vote, _response = run_melchior_with_meta(
+        world_state, persona=persona, model=model, extra_context=extra_context
+    )
     return vote

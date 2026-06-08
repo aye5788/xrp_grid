@@ -62,16 +62,53 @@ def _extract_tool_input(response: Any) -> dict[str, Any]:
     )
 
 
+def _build_messages(world_state: dict, extra_context: str | None) -> list[dict[str, Any]]:
+    """Build Balthasar's user turn with an Anthropic prompt-cache breakpoint.
+
+    The STABLE PREFIX is system(persona) + the world_state block; both repeat
+    verbatim across Balthasar's two calls in a cycle (opening, then synthesis).
+    We put a single ephemeral cache_control breakpoint on the LAST block of that
+    prefix — the world_state user block — so tools + system + world_state are
+    cached, and extra_context (the volatile openings/rebuttals transcript) is a
+    SEPARATE block placed AFTER the breakpoint, never busting the cached prefix.
+
+    TTL: the default 5-minute ephemeral TTL (no `ttl` field). Balthasar's opening
+    and synthesis are seconds apart, well inside 5 min; the 1-hour TTL's 2x write
+    premium would never pay at our ~1-convene/day cadence — see the handoff docs.
+
+    Even with extra_context=None the content is a one-element BLOCK LIST carrying
+    cache_control, so the request JSON differs from the pre-caching plain-string
+    form. The model INPUT TEXT (_PROMPT_PREFIX + rendered world_state) is identical,
+    so the vote is unchanged; only the caching metadata/shape is added.
+    """
+    stable_block = {
+        "type": "text",
+        "text": _PROMPT_PREFIX + render_world_state(world_state),
+        "cache_control": {"type": "ephemeral"},
+    }
+    if extra_context:
+        content: Any = [stable_block, {"type": "text", "text": extra_context}]
+    else:
+        content = [stable_block]
+    return [{"role": "user", "content": content}]
+
+
 def run_balthasar_with_meta(
     world_state: dict,
     persona: str | None = None,
     model: str = _DEFAULT_MODEL,
+    extra_context: str | None = None,
 ) -> tuple[RiskVote, Any]:
     """Run the Balthasar seat and return (validated RiskVote, raw Anthropic response).
 
     Same logic as `run_balthasar`, but also surfaces the raw response so callers
     can inspect `response.model` / `response.usage` later. Mirrors
     run_melchior_with_meta's (vote, raw) shape.
+
+    extra_context (council_v2 only): an extra instruction block (openings /
+    rebuttals transcript + synthesis instruction) placed AFTER the cached stable
+    prefix. The forced-tool risk_vote call, temperature, max_tokens and
+    schema_for_tool(RiskVote) are unchanged.
     """
     api_key = os.environ["ANTHROPIC_API_KEY"]  # KeyError if unset; never logged
     client = anthropic.Anthropic(api_key=api_key)
@@ -82,9 +119,7 @@ def run_balthasar_with_meta(
         "input_schema": schema_for_tool(RiskVote),
     }
     system = persona if persona is not None else load_persona("balthasar")
-    messages: list[dict[str, Any]] = [
-        {"role": "user", "content": _PROMPT_PREFIX + render_world_state(world_state)},
-    ]
+    messages: list[dict[str, Any]] = _build_messages(world_state, extra_context)
 
     def _call(msgs: list[dict[str, Any]]) -> Any:
         return client.messages.create(
@@ -134,6 +169,7 @@ def run_balthasar(
     world_state: dict,
     persona: str | None = None,
     model: str = _DEFAULT_MODEL,
+    extra_context: str | None = None,
 ) -> RiskVote:
     """Run the Balthasar (Risk/Survival) seat on Claude Sonnet; return a validated
     RiskVote.
@@ -142,6 +178,12 @@ def run_balthasar(
     environment (never logged), builds the SAFE tool schema via
     schema_for_tool(RiskVote), forces the risk_vote tool, and validates the result
     with one feedback retry on failure. Defaults to the live balthasar.md persona.
+
+    extra_context defaults to None. Note: even at None the request carries the
+    ephemeral cache breakpoint (block-list form); the model input text is
+    unchanged from the pre-caching path, so the vote is identical.
     """
-    vote, _response = run_balthasar_with_meta(world_state, persona=persona, model=model)
+    vote, _response = run_balthasar_with_meta(
+        world_state, persona=persona, model=model, extra_context=extra_context
+    )
     return vote

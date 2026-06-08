@@ -143,21 +143,37 @@ def _parse_validated(raw: Any, final_text: str | None) -> RegimeVote:
     return RegimeVote.model_validate(obj)
 
 
+def _build_message(world_state: dict, extra_context: str | None) -> str:
+    """Compose Casper's single user turn: the proven prompt prefix + rendered
+    world_state, then — only when supplied — extra_context as a SEPARATE trailing
+    block AFTER the world_state. With extra_context=None the message is
+    byte-identical to the proven standalone path (do not change that)."""
+    msg = _PROMPT_PREFIX + render_world_state(world_state)
+    if extra_context:
+        msg = msg + "\n\n" + extra_context
+    return msg
+
+
 def run_casper_with_meta(
     world_state: dict,
     persona: str | None = None,
     model: str = _DEFAULT_MODEL,
+    extra_context: str | None = None,
 ) -> tuple[RegimeVote, Any]:
     """Run the Casper seat and return (validated RegimeVote, raw final ADK event).
 
     Same logic as `run_casper`, but also surfaces the final ADK response event so
     callers can inspect usage_metadata / model later. Mirrors
     run_melchior_with_meta's (vote, raw) shape.
+
+    extra_context (council_v2 only): an extra instruction block (predecessor
+    context / rebuttal transcript) appended AFTER the world_state. None ->
+    byte-identical to the proven standalone message.
     """
     instruction = persona if persona is not None else load_persona("casper")
     agent = _build_agent(instruction, model)
     raw, final_text, final_event = asyncio.run(
-        _invoke_async(agent, _PROMPT_PREFIX + render_world_state(world_state))
+        _invoke_async(agent, _build_message(world_state, extra_context))
     )
     vote = _parse_validated(raw, final_text)
     return vote, final_event
@@ -167,6 +183,7 @@ def run_casper(
     world_state: dict,
     persona: str | None = None,
     model: str = _DEFAULT_MODEL,
+    extra_context: str | None = None,
 ) -> RegimeVote:
     """Run the Casper (Regime Classifier) seat on native gemini-2.5-flash; return a
     validated RegimeVote.
@@ -176,6 +193,10 @@ def run_casper(
     with output_schema=RegimeVote (no schema_for_tool; extra="ignore" keeps the
     schema additionalProperties-free), runs it statelessly, and returns the
     validated regime vote. Defaults to the live casper.md persona.
+
+    extra_context defaults to None (byte-identical to the proven standalone path).
     """
-    vote, _event = run_casper_with_meta(world_state, persona=persona, model=model)
+    vote, _event = run_casper_with_meta(
+        world_state, persona=persona, model=model, extra_context=extra_context
+    )
     return vote

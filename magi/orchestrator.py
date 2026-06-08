@@ -55,14 +55,10 @@ from database import (
 )
 from magi.spacing_evaluator import DEFAULT_VARIANTS, score_variants
 from guardrails import check_all_guardrails
-from magi.council import (
-    emit_human_alert,
-    resolve_consensus,
-    run_round_0_parallel,
-    run_round_1,
-    should_run_r1,
-    update_world_state,
-)
+# Stage-3 hand-rolled arbiter council (sequential six-call choreography). This
+# supersedes the ADK parallel-R0 / conditional-R1 engine in magi/council.py for
+# the run_cycle path; council.py is left intact for any other importer.
+from magi.council_v2 import run_council
 
 load_dotenv()
 log = logging.getLogger('magi.orchestrator')
@@ -1732,29 +1728,51 @@ def _build_debate_record(cycle_id: str, trigger: str, world_state: dict,
         # list/dict values for *_evidence are JSON-encoded by insert_debate_record
         record[f"{agent}_r0_evidence"]   = r0.get("key_evidence") or []
 
-    # debate_triggered semantics under always-R1 synthesis: True iff
-    # any agent's R1 position differs from their R0 position
+    # debate_triggered: True iff a rebuttal label differed from its opening.
+    # Authoritative value is computed by council_v2 and carried on cons (it knows
+    # each agent's primary — verdict for Melchior, position for Casper).
     record["debate_triggered"] = 1 if cons.get("debate_triggered") else 0
 
+    # Balthasar is the ARBITER: he synthesizes, he does NOT rebut, so his R1
+    # columns are n/a (NULL) — never held=1. A held=1 here would be a factual lie
+    # (he never rebutted) and would pollute any "how often did Balthasar hold under
+    # rebuttal" metric with a 100%-hold artifact that never happened. His
+    # post-rebuttal call is the synthesis, recorded as final_risk_action.
+    record["balthasar_r1_held"] = None
+    record["balthasar_revision_valid"] = None
+    record["balthasar_r1_text"] = None
+
     if round_1:
-        for agent in ("casper", "melchior", "balthasar"):
+        for agent in ("casper", "melchior"):
             r1 = round_1.get(agent) or {}
+            # Post-rebuttal structured label (Casper regime / Melchior verdict),
+            # stored under round_1[agent]['position']. Persist it so later accuracy
+            # scoring reads the REVISED call, not the stale opening. NULL when the
+            # rebuttal failed to parse.
+            record[f"{agent}_r1_position"] = r1.get("position")
             if r1.get("_r1_parse_error"):
-                # synthesis call failed parse — fell back to R0
+                # rebuttal call failed parse — fell back to opening
                 record[f"{agent}_r1_held"] = None
                 record[f"{agent}_revision_valid"] = None
                 record[f"{agent}_r1_text"] = f"PARSE_ERROR: {r1.get('_r1_parse_error')!s}"[:500]
                 continue
-            r0_pos = (round_0.get(agent) or {}).get("position")
-            r1_pos = r1.get("position")
-            held = (r0_pos == r1_pos) if (r0_pos and r1_pos) else True
+            # Diff each agent's PRIMARY label opening -> rebuttal. Melchior's
+            # primary is 'verdict' (his R0 dict has no 'position'); Casper's is
+            # 'position'. The rebuttal label sits under 'position' for both. Reading
+            # 'position' for both sides of Melchior would always read None on the
+            # opening side and spuriously report held=1.
+            r0_prim = (round_0.get(agent) or {}).get(
+                "verdict" if agent == "melchior" else "position"
+            )
+            r1_prim = r1.get("position")
+            held = (r0_prim == r1_prim) if (r0_prim and r1_prim) else True
             record[f"{agent}_r1_held"] = 1 if held else 0
-            # revision_valid retained for schema continuity; under
-            # synthesis architecture we accept R1's revision as valid by
-            # construction (the agent saw peer R0s and produced a final
-            # answer). True when revised, None when held.
+            # revision_valid retained for schema continuity; under the synthesis
+            # architecture we accept a rebuttal revision as valid by construction
+            # (the agent saw the frozen openings and produced a final answer).
+            # True when revised, None when held.
             record[f"{agent}_revision_valid"] = None if held else 1
-            # Stash the R1 crux as the human-readable summary
+            # Stash the rebuttal crux as the human-readable summary
             record[f"{agent}_r1_text"] = (r1.get("crux") or "")[:500]
 
     record["final_grid_action"] = cons.get("grid_action")
@@ -1771,6 +1789,13 @@ def _build_debate_record(cycle_id: str, trigger: str, world_state: dict,
     # rule #8. Lets the dashboard show how often Melchior actually contributes
     # geometry vs how often the hard-rule fallback carries the load.
     record["geometry_source"] = cons.get("geometry_source") or "unchanged"
+    # Langfuse trace id for this cycle's council debate. Captured INSIDE
+    # council_v2.run_council's trace_cycle context and carried out on cons (which
+    # enforce_hard_rules preserves via cons = dict(consensus)). It must be read
+    # from cons here, NOT recomputed with tracing.current_trace_id(): this builder
+    # runs after run_council returns, i.e. the trace context has already exited, so
+    # current_trace_id() would return None. NULL when tracing is unavailable.
+    record["trace_id"] = cons.get("trace_id")
     # Per-agent freshness-retry flags from council.py's R0 validator. None of
     # the agents will carry the key if world_state wasn't passed through, so
     # default to False to preserve the JSON shape across cycles.
@@ -1899,6 +1924,11 @@ def run_cycle(trigger: str = "manual", force: bool = False) -> dict:
     log.info("MAGI cycle starting — trigger=%s force=%s", trigger, force)
     cycle_id = f"cyc_{int(time.time())}"
 
+    # 1. Ensure provider keys + Langfuse creds are in the environment. Melchior and
+    # Balthasar read os.environ directly; Casper self-loads .env; this load is
+    # idempotent (module import already ran it) and harmless.
+    load_dotenv()
+
     # 2. Pre-cycle guardrails
     ok, failures = check_all_guardrails()
     if not ok and not force:
@@ -1910,59 +1940,18 @@ def run_cycle(trigger: str = "manual", force: bool = False) -> dict:
     # 3. Build world state
     world_state = build_world_state()
 
-    # 4. Push to shared Letta block — non-fatal if it fails
-    try:
-        update_world_state(world_state)
-    except Exception as e:
-        log.error("Failed to push world_state to Letta: %s — agents will see stale state", e)
-
-    # 5. Round 0 in parallel — pass world_state so council.py's freshness
-    # validator can cross-check each agent's R0 evidence against the
-    # current world_state values and force a one-shot correction re-prompt
-    # on stale agents (see council.py:_validate_r0_freshness).
-    round_0 = run_round_0_parallel(cycle_id, world_state)
-    log.info(
-        "Round 0: casper=%s/%.2f melchior=%s/%.2f balthasar=%s/%.2f",
-        round_0['casper'].get('position'),
-        float(round_0['casper'].get('conviction') or 0.0),
-        round_0['melchior'].get('verdict'),
-        float(round_0['melchior'].get('conviction') or 0.0),
-        round_0['balthasar'].get('position'),
-        float(round_0['balthasar'].get('conviction') or 0.0),
-    )
-
-    # 6. Round 1 — CONDITIONAL synthesis. R1 lets each agent revise after
-    # seeing peers' R0, but it costs three full ~80k-token calls and, over 46
-    # live cycles, only ever changed the applied action when the council
-    # genuinely disagreed about acting AND that disagreement was new. We skip
-    # it on aligned cycles and on frozen standoffs (same R0 positions as the
-    # prior cycle), both of which the hard-rule layer resolves regardless.
-    # See council.should_run_r1. When skipped, round_1={} and resolve_consensus
-    # falls back to each agent's R0 (incl. R0 regime_action/geometry_veto).
-    prior_sig = _prior_r0_signature()
-    fire_r1, r1_reason = should_run_r1(round_0, prior_sig)
-    if fire_r1:
-        log.info("Round 1: firing synthesis — %s", r1_reason)
-        round_1 = run_round_1(round_0, cycle_id)
-        for agent in ("casper", "melchior", "balthasar"):
-            r1 = round_1.get(agent) or {}
-            if r1.get("_r1_parse_error"):
-                log.warning(
-                    "Round 1 [%s] parse error: %s — falling back to R0",
-                    agent, r1.get("_r1_parse_error"),
-                )
-                continue
-            r0_pos = (round_0.get(agent) or {}).get("position")
-            r1_pos = r1.get("position")
-            if r1_pos and r0_pos and r1_pos != r0_pos:
-                log.info("Round 1 [%s] shifted %s -> %s", agent, r0_pos, r1_pos)
-    else:
-        log.info("Round 1: skipped — %s", r1_reason)
-        round_1 = {}
-    conflict = None  # retained for downstream signatures expecting it
-
-    # 9. Resolve consensus from the synthesised votes
-    cons = resolve_consensus(round_0, round_1, conflict)
+    # 4-9. Convene the Stage-3 arbiter council (sequential six-call choreography:
+    # Casper -> Melchior -> Balthasar openings, Casper+Melchior rebuttal against a
+    # frozen snapshot, Balthasar synthesis). run_council owns its own Langfuse trace
+    # and is fail-safe: any seat failure resolves to a safe-hold cons (THESIS_HOLDS
+    # -> MAINTAIN, CLEAR risk) rather than raising. It returns round_0 / round_1 /
+    # cons in the exact shapes _build_debate_record and enforce_hard_rules consume.
+    # (The dead Letta update_world_state push and the ADK parallel-R0 / conditional-R1
+    # block are gone — see magi/council_v2.py.)
+    round_0, round_1, cons = run_council(world_state, cycle_id)
+    conflict = None  # vestigial _build_debate_record arg (unused by the builder)
+    if cons.get("council_error"):
+        log.error("Council stood down on seat failure: %s", cons["council_error"])
     log.info(
         "Consensus: verdict=%s risk=%s regime=%s regime_action=%s "
         "geometry_veto=%s debate_triggered=%s — %s",

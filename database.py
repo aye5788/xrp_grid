@@ -239,6 +239,9 @@ def init_db():
         melchior_r1_text TEXT,
         balthasar_r1_text TEXT,
 
+        casper_r1_position TEXT,
+        melchior_r1_position TEXT,
+
         final_grid_action TEXT,
         final_risk_action TEXT,
         deadlock INTEGER DEFAULT 0,
@@ -262,7 +265,8 @@ def init_db():
         outcome_24h_backfilled INTEGER DEFAULT 0,
 
         hard_rule_overrides TEXT,
-        geometry_source TEXT
+        geometry_source TEXT,
+        trace_id TEXT
     )''')
     c.execute('''CREATE INDEX IF NOT EXISTS idx_debate_records_cycle_id
         ON debate_records (cycle_id)''')
@@ -448,6 +452,22 @@ def init_db():
     for migration in (
         "ALTER TABLE debate_records ADD COLUMN regime_action TEXT",
         "ALTER TABLE debate_records ADD COLUMN geometry_veto TEXT",
+        # trace_id: Langfuse trace id for this cycle's council debate. Groundwork
+        # for Stage 3 — no writer yet, stays NULL until the orchestrator stamps it
+        # (magi/agents/tracing.py:current_trace_id). One trace per cycle.
+        "ALTER TABLE debate_records ADD COLUMN trace_id TEXT",
+        # casper_r1_position / melchior_r1_position: each agent's FINAL
+        # POST-REBUTTAL structured label (Casper regime, Melchior verdict) from
+        # council_v2's rebuttal round. ALWAYS written with the agent's final call —
+        # whether it revised or held — because the rebuttal re-emits a full vote
+        # each round, so accuracy scoring can read the post-rebuttal label directly.
+        # Whether the agent HELD vs REVISED is read from the separate {agent}_r1_held
+        # flag (1 = held, 0 = revised), not from a NULL here. NULL only when the
+        # rebuttal call failed to parse or round_1 is absent. There is deliberately
+        # NO balthasar_r1_position — Balthasar is the arbiter: his post-rebuttal call
+        # is the synthesis, recorded as final_risk_action, not a rebuttal label.
+        "ALTER TABLE debate_records ADD COLUMN casper_r1_position TEXT",
+        "ALTER TABLE debate_records ADD COLUMN melchior_r1_position TEXT",
     ):
         try:
             c.execute(migration)
