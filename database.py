@@ -268,7 +268,10 @@ def init_db():
 
         hard_rule_overrides TEXT,
         geometry_source TEXT,
-        trace_id TEXT
+        trace_id TEXT,
+
+        config_version TEXT,
+        config_snapshot TEXT
     )''')
     c.execute('''CREATE INDEX IF NOT EXISTS idx_debate_records_cycle_id
         ON debate_records (cycle_id)''')
@@ -299,6 +302,15 @@ def init_db():
         # recoverable and decisions like MAINTAIN-on-empty-grid could not be
         # audited after the fact. Written by orchestrator._build_debate_record.
         "ALTER TABLE debate_records ADD COLUMN world_state TEXT",
+        # config_version: short hex hash of the behaviorally-relevant config that
+        # produced this cycle's decision (persona hashes, per-seat served models,
+        # veto mode, HARD_RULES floors, spacing/fee constants). config_snapshot:
+        # the JSON of the readable components behind that hash, for forensics.
+        # Added in BOTH the CREATE TABLE body (fresh DBs) and here (existing
+        # observer.db) — trace_id/r1_position were CREATE-only and missed this loop;
+        # not repeating that. Written by orchestrator._build_debate_record.
+        "ALTER TABLE debate_records ADD COLUMN config_version TEXT",
+        "ALTER TABLE debate_records ADD COLUMN config_snapshot TEXT",
     ):
         try:
             c.execute(_alter)

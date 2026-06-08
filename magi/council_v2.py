@@ -58,6 +58,7 @@ council-degradation detector still trips on a sustained outage.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any, Optional
 
@@ -75,6 +76,18 @@ log = logging.getLogger(__name__)
 _CASPER_MODEL = "gemini-2.5-flash"
 _MELCHIOR_MODEL = "deepseek-v4-pro"
 _BALTHASAR_MODEL = "claude-sonnet-4-6"
+
+# Stage-4 item-1 config fingerprint: the veto is hardcoded as orchestrator hard
+# rule 0d today (no config toggle exists yet — see enforce_hard_rules). Encode it
+# as a stable literal so the fingerprint shape is fixed; this becomes a live value
+# when item 2 lands the veto-placement setting.
+_VETO_MODE = "hard_rule_0d"
+
+
+def _fp_hash(text: str) -> str:
+    """Short, stable content hash of a persona text for the config fingerprint.
+    Fine-grained: any edit to the persona registers as a new hash."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 # Per-seat usage capture for the standalone --cache-debug diagnostic. Cleared at
 # the start of every run_council, appended to by _seat_call. The live path never
@@ -230,6 +243,26 @@ def _usage_adk(event: Any) -> dict:
     return out
 
 
+def _model_anthropic(response: Any) -> Optional[str]:
+    """ACTUAL served model id from an Anthropic-format response (Claude AND DeepSeek
+    via the Anthropic-compat endpoint). `.model` is what the provider billed/served —
+    for DeepSeek this is the field _warn_if_fallback reads to catch a silent
+    v4-pro -> v4-flash downgrade. Reused here so Melchior/Balthasar fingerprint on the
+    real served model, not the configured default."""
+    m = getattr(response, "model", None)
+    return str(m) if m else None
+
+
+def _model_adk(event: Any) -> Optional[str]:
+    """Observed served-version string from a Casper ADK final event
+    (LlmResponse.model_version, populated from Gemini's
+    generate_content_response.model_version). Nullable and a version alias, so it is
+    captured as SOFT snapshot metadata only — the hash uses the configured
+    _CASPER_MODEL, never this."""
+    mv = getattr(event, "model_version", None)
+    return str(mv) if mv else None
+
+
 def _dump(vote: Any) -> dict:
     try:
         return vote.model_dump()
@@ -240,11 +273,18 @@ def _dump(vote: Any) -> dict:
 # --- one traced + fail-safe seat call ---
 
 def _seat_call(label: str, model: str, vendor: str, payload: dict,
-               fn, usage_fn) -> tuple[Optional[Any], Optional[BaseException]]:
+               fn, usage_fn, model_fn,
+               ) -> tuple[Optional[Any], Optional[str], Optional[BaseException]]:
     """Run one seat call inside its own trace_seat generation. Returns
-    (vote, None) on success or (None, exc) on failure — never raises. On success
-    the generation is updated with the vote output + usage_details (incl. cached
-    tokens); on failure the error is recorded to the trace and returned."""
+    (vote, served_model, None) on success or (None, None, exc) on failure — never
+    raises. On success the generation is updated with the vote output +
+    usage_details (incl. cached tokens); on failure the error is recorded to the
+    trace and returned.
+
+    served_model is the ACTUAL model the provider served, pulled from the raw
+    response by model_fn (best-effort — never raises; None if unavailable). This is
+    additive capture of a value already in hand: it changes no behavior, only lets
+    run_council fingerprint on the per-seat served model."""
     with tracing.trace_seat(label, model, vendor, payload) as gen:
         try:
             vote, raw = fn()
@@ -257,18 +297,25 @@ def _seat_call(label: str, model: str, vendor: str, payload: dict,
                     gen.update(level="ERROR", status_message=str(e)[:500])
                 except Exception:  # noqa: BLE001
                     pass
-            return None, e
+            return None, None, e
         # Compute usage unconditionally (cheap attribute reads) so the cache-debug
         # breakdown works even when tracing is unavailable.
         usage = usage_fn(raw)
+        # Served-model capture — best-effort, never breaks the call.
+        try:
+            served_model = model_fn(raw)
+        except Exception as me:  # noqa: BLE001 - fingerprint capture is best-effort
+            log.debug("[council_v2] served-model capture failed for %s: %r", label, me)
+            served_model = None
         _LAST_RUN_USAGE.append(
-            {"seat": label, "model": model, "vendor": vendor, "usage": usage})
+            {"seat": label, "model": model, "vendor": vendor,
+             "served_model": served_model, "usage": usage})
         if gen is not None:
             try:
                 gen.update(output=_dump(vote), usage_details=usage)
             except Exception as ue:  # noqa: BLE001 - tracing never breaks the call
                 log.debug("[council_v2] trace update failed for %s: %r", label, ue)
-        return vote, None
+        return vote, served_model, None
 
 
 # --- round_0 translators (parsed-vote dict shapes the orchestrator consumes) ---
@@ -311,11 +358,17 @@ def _sanitize(text: Any) -> str:
     return str(text or "").replace("[", " ").replace("]", " ")
 
 
-def _safe_hold_cons(trace_id: Optional[str], reason: str) -> dict:
+def _safe_hold_cons(trace_id: Optional[str], reason: str,
+                    council_half: Optional[dict] = None) -> dict:
     """Consensus that resolves to a SAFE HOLD: THESIS_HOLDS -> MAINTAIN, CLEAR risk,
     permissive regime_action/geometry_veto (no fabricated veto). 'council_error' is
     a flag run_cycle can log; it is NOT a debate_records column, so _build_debate_record
-    (which copies named keys only) never tries to insert it."""
+    (which copies named keys only) never tries to insert it.
+
+    '_fingerprint_council_half' carries whatever fingerprint inputs were assembled
+    before stand-down (may be partial/None). The orchestrator reads it, folds in the
+    floor half, and pops it before _build_debate_record — so it, too, never reaches a
+    column."""
     return {
         "grid_verdict": "THESIS_HOLDS",
         "risk_action": "CLEAR",
@@ -330,15 +383,18 @@ def _safe_hold_cons(trace_id: Optional[str], reason: str) -> dict:
         ),
         "trace_id": trace_id,
         "council_error": str(reason)[:500],
+        "_fingerprint_council_half": council_half,
     }
 
 
 def _bail(round_0: dict, round_1: dict, trace_id: Optional[str],
-          where: str, err: BaseException) -> tuple[dict, dict, dict]:
+          where: str, err: BaseException,
+          council_half: Optional[dict] = None) -> tuple[dict, dict, dict]:
     log.error("[council_v2] standing down at %s: %r", where, err)
     for a in ("casper", "melchior", "balthasar"):
         round_0.setdefault(a, dict(_SAFE_DEFAULT_R0[a]))
-    return round_0, round_1, _safe_hold_cons(trace_id, f"{where}: {err!r}")
+    return round_0, round_1, _safe_hold_cons(
+        trace_id, f"{where}: {err!r}", council_half)
 
 
 # --- public entry ---
@@ -375,63 +431,105 @@ def run_council(world_state: dict, cycle_id: str) -> tuple[dict, dict, dict]:
             return round_0, round_1, _safe_hold_cons(
                 trace_id, f"persona_load_failed:melchior:{e!r}")
 
+        # ---- Stage-4 item-1 config fingerprint: COUNCIL HALF ----
+        # Re-read Casper's and Balthasar's personas purely to HASH them. This is a
+        # read of the SAME .md files their seat-callers load; the loaded text is NOT
+        # passed into the seat-callers, so every byte each seat receives is
+        # unchanged (they still self-load via their own persona=None fallback).
+        # Best-effort: a failure here records a null hash and must NOT change
+        # stand-down behavior — a real Casper/Balthasar persona failure still
+        # surfaces inside its seat-caller and flows through _seat_call -> _bail
+        # exactly as before. Melchior's text is already in hand (melchior_persona).
+        persona_texts = {"melchior": melchior_persona}
+        for _pname in ("casper", "balthasar"):
+            try:
+                persona_texts[_pname] = load_persona(_pname)
+            except Exception as e:  # noqa: BLE001 - fingerprint read is best-effort
+                log.warning(
+                    "[council_v2] fingerprint persona re-read failed for %s: %r",
+                    _pname, e)
+                persona_texts[_pname] = None
+
+        # council_half accumulates the fingerprint inputs council_v2 owns. The
+        # orchestrator folds in the floor half (HARD_RULES + spacing/fee constants)
+        # after run_council returns and composes the final hash + snapshot. Mutated
+        # in place as seats succeed; passed to _bail so a stand-down still carries
+        # whatever was assembled.
+        council_half = {
+            "persona_hashes": {
+                n: (_fp_hash(t) if t else None) for n, t in persona_texts.items()
+            },
+            "models": {
+                "casper": _CASPER_MODEL,   # configured: ADK exposes no clean billed model
+                "melchior": None,          # filled with the served raw.model on success
+                "balthasar": None,         # filled with the served raw.model on success
+            },
+            "casper_model_version_observed": None,  # soft metadata; never in the hash
+            "veto_mode": _VETO_MODE,
+        }
+
         # ---- Phase A: openings (sequential) ----
-        cv, err = _seat_call(
+        cv, casper_mv, err = _seat_call(
             "casper", _CASPER_MODEL, "google",
             {"world_state": world_state, "extra_context": None},
             lambda: run_casper_with_meta(world_state),
-            _usage_adk,
+            _usage_adk, _model_adk,
         )
         if err:
-            return _bail(round_0, round_1, trace_id, "casper-open", err)
+            return _bail(round_0, round_1, trace_id, "casper-open", err, council_half)
         round_0["casper"] = _casper_r0(cv)
+        # Casper's served version is soft metadata only (nullable/aliased); the hash
+        # uses the configured _CASPER_MODEL already in council_half["models"].
+        council_half["casper_model_version_observed"] = casper_mv
 
         premise = _melchior_premise(cv)
-        mv, err = _seat_call(
+        mv, melchior_served, err = _seat_call(
             "melchior", _MELCHIOR_MODEL, "deepseek",
             {"world_state": world_state, "extra_context": premise},
             lambda: run_melchior_with_meta(
                 world_state, persona=melchior_persona, extra_context=premise),
-            _usage_anthropic,
+            _usage_anthropic, _model_anthropic,
         )
         if err:
-            return _bail(round_0, round_1, trace_id, "melchior-open", err)
+            return _bail(round_0, round_1, trace_id, "melchior-open", err, council_half)
         round_0["melchior"] = _melchior_r0(mv)
+        council_half["models"]["melchior"] = melchior_served  # ACTUAL served model
 
         openings_b = _openings_for_balthasar(cv, mv)
-        bo, err = _seat_call(
+        bo, balthasar_served, err = _seat_call(
             "balthasar", _BALTHASAR_MODEL, "anthropic",
             {"world_state": world_state, "extra_context": openings_b},
             lambda: run_balthasar_with_meta(world_state, extra_context=openings_b),
-            _usage_anthropic,
+            _usage_anthropic, _model_anthropic,
         )
         if err:
-            return _bail(round_0, round_1, trace_id, "balthasar-open", err)
+            return _bail(round_0, round_1, trace_id, "balthasar-open", err, council_half)
         round_0["balthasar"] = _balthasar_r0(bo)
+        council_half["models"]["balthasar"] = balthasar_served  # ACTUAL served model
 
         # ---- Phase B: rebuttal (Casper + Melchior, vs the FROZEN openings) ----
         frozen = _frozen_transcript(cv, mv, bo)
         reb_ctx = frozen + "\n\n" + _REBUTTAL_INSTRUCTION
 
-        cr, err = _seat_call(
+        cr, _cr_served, err = _seat_call(
             "casper:rebuttal", _CASPER_MODEL, "google",
             {"world_state": world_state, "extra_context": reb_ctx, "phase": "rebuttal"},
             lambda: run_casper_with_meta(world_state, extra_context=reb_ctx),
-            _usage_adk,
+            _usage_adk, _model_adk,
         )
         if err:
-            return _bail(round_0, round_1, trace_id, "casper-rebuttal", err)
+            return _bail(round_0, round_1, trace_id, "casper-rebuttal", err, council_half)
         round_1["casper"] = {"position": cr.position, "crux": cr.crux}
 
-        mr, err = _seat_call(
+        mr, _mr_served, err = _seat_call(
             "melchior:rebuttal", _MELCHIOR_MODEL, "deepseek",
             {"world_state": world_state, "extra_context": reb_ctx, "phase": "rebuttal"},
             lambda: run_melchior_with_meta(
                 world_state, persona=melchior_persona, extra_context=reb_ctx),
-            _usage_anthropic,
+            _usage_anthropic, _model_anthropic,
         )
         if err:
-            return _bail(round_0, round_1, trace_id, "melchior-rebuttal", err)
+            return _bail(round_0, round_1, trace_id, "melchior-rebuttal", err, council_half)
         # 'position' holds the rebuttal LABEL (verdict) for both rebutters — the
         # record builder writes {agent}_r1_position from round_1[agent]['position'].
         round_1["melchior"] = {"position": mr.verdict, "crux": mr.crux}
@@ -445,14 +543,14 @@ def run_council(world_state: dict, cycle_id: str) -> tuple[dict, dict, dict]:
 
         # ---- Phase C: synthesis (Balthasar) — his RiskVote IS the final call ----
         synth_ctx = _full_record(cv, mv, bo, cr, mr) + "\n\n" + _SYNTHESIS_INSTRUCTION
-        bs, err = _seat_call(
+        bs, _bs_served, err = _seat_call(
             "balthasar:synthesis", _BALTHASAR_MODEL, "anthropic",
             {"world_state": world_state, "extra_context": synth_ctx, "phase": "synthesis"},
             lambda: run_balthasar_with_meta(world_state, extra_context=synth_ctx),
-            _usage_anthropic,
+            _usage_anthropic, _model_anthropic,
         )
         if err:
-            return _bail(round_0, round_1, trace_id, "balthasar-synthesis", err)
+            return _bail(round_0, round_1, trace_id, "balthasar-synthesis", err, council_half)
 
         # ---- consensus ----
         casper_changed = cr.position != cv.position
@@ -474,6 +572,11 @@ def run_council(world_state: dict, cycle_id: str) -> tuple[dict, dict, dict]:
                 f"{shift}. {_sanitize(bs.crux)}"
             ),
             "trace_id": trace_id,
+            # Stage-4 item-1: council half of the config fingerprint (persona
+            # hashes, per-seat served models, veto mode). The orchestrator folds in
+            # the floor half, composes config_version/config_snapshot, then pops
+            # this key before _build_debate_record — so it never reaches a column.
+            "_fingerprint_council_half": council_half,
         }
         log.info(
             "[council_v2] %s: regime=%s/%s grid=%s risk=%s/%s debate=%s",
@@ -535,9 +638,24 @@ if __name__ == "__main__":
     print(_json.dumps({"round_0": r0, "round_1": r1, "cons": cons},
                       indent=2, default=str))
 
+    # Stage-4 item-1: show the council half of the config fingerprint that
+    # run_council now rides out on cons (the orchestrator folds in the floor half +
+    # composes config_version/config_snapshot — that step does NOT run on this
+    # standalone path, so config_version is expected absent here).
+    half = cons.get("_fingerprint_council_half") or {}
+    print("\n[fingerprint] council-half carried on cons (orchestrator folds in the "
+          "floor half + hash downstream):")
+    print(f"  persona_hashes: {half.get('persona_hashes')}")
+    print(f"  models (casper=configured; melchior/balthasar=served raw.model): "
+          f"{half.get('models')}")
+    print(f"  casper_model_version_observed (soft, snapshot-only): "
+          f"{half.get('casper_model_version_observed')}")
+    print(f"  veto_mode: {half.get('veto_mode')}")
+
     if args.cache_debug:
         print("\n[cache-debug] per-seat usage (cache_creation / cache_read are the "
-              "cache-positive signals):")
+              "cache-positive signals); served_model = ACTUAL model the provider "
+              "served this call:")
         for rec in _LAST_RUN_USAGE:
             if "error" in rec:
                 print(f"  {rec['seat']:22s} [{rec['vendor']}/{rec['model']}] ERROR: {rec['error']}")
@@ -546,5 +664,6 @@ if __name__ == "__main__":
             cc = u.get("cache_creation_input_tokens")
             cr = u.get("cache_read_input_tokens")
             print(f"  {rec['seat']:22s} [{rec['vendor']}/{rec['model']}] "
+                  f"served={rec.get('served_model')} "
                   f"input={u.get('input')} output={u.get('output')} "
                   f"cache_creation={cc} cache_read={cr}")

@@ -1700,6 +1700,56 @@ def _final_consensus(cons: dict, cycle_id: str, melchior_r0: dict) -> dict:
 
 # --- Persistence: debate_records ---
 
+def _compose_config_fingerprint(cons: dict) -> tuple[str, dict]:
+    """Stage-4 item-1: compose the config-version fingerprint for this cycle.
+
+    The fingerprint is built in two halves because council_v2 must not import from
+    orchestrator (circular). council_v2.run_council computes the half it owns
+    (persona hashes, per-seat served models, veto mode) and rides it out on cons
+    under '_fingerprint_council_half'; this folds in the FLOOR half — the HARD_RULES
+    survival floors plus the config.py spacing/fee constants — which are in scope
+    here but not in council_v2.
+
+    Returns (config_version, config_snapshot):
+      * config_snapshot — a readable dict of every component, for forensics.
+      * config_version — a short hex hash over the snapshot's canonical JSON,
+        EXCLUDING casper_model_version_observed (that ADK-served version string is
+        nullable/aliased, so it is snapshot-only and never allowed to churn the
+        hash).
+
+    Additive record-keeping only; reads cons, changes no decision.
+    """
+    import hashlib
+    from config import (
+        MIN_GRID_SPACING_PCT,
+        MAX_GRID_SPACING_PCT,
+        GRID_LEVEL_FEE_PER_SIDE,
+    )
+
+    half = cons.get("_fingerprint_council_half") or {}
+    snapshot = {
+        "persona_hashes": half.get("persona_hashes") or {},
+        "models": half.get("models") or {},
+        # Soft metadata: Casper's observed served-version string. Snapshot-only.
+        "casper_model_version_observed": half.get("casper_model_version_observed"),
+        "veto_mode": half.get("veto_mode"),
+        # Floor half — folded in here (in scope; council_v2 can't see it).
+        "hard_rules": dict(HARD_RULES),
+        "spacing_fee": {
+            "MIN_GRID_SPACING_PCT": MIN_GRID_SPACING_PCT,
+            "MAX_GRID_SPACING_PCT": MAX_GRID_SPACING_PCT,
+            "GRID_LEVEL_FEE_PER_SIDE": GRID_LEVEL_FEE_PER_SIDE,
+        },
+    }
+    # Hash everything EXCEPT the nullable/aliased observed version. Canonical JSON
+    # (sort_keys + default=str) so key ordering can never churn the hash.
+    hashable = {k: v for k, v in snapshot.items()
+                if k != "casper_model_version_observed"}
+    canon = json.dumps(hashable, sort_keys=True, default=str)
+    version = hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16]
+    return version, snapshot
+
+
 def _build_debate_record(cycle_id: str, trigger: str, world_state: dict,
                           round_0: dict, conflict, round_1, cons: dict) -> dict:
     record = {
@@ -1796,6 +1846,17 @@ def _build_debate_record(cycle_id: str, trigger: str, world_state: dict,
     # runs after run_council returns, i.e. the trace context has already exited, so
     # current_trace_id() would return None. NULL when tracing is unavailable.
     record["trace_id"] = cons.get("trace_id")
+    # Stage-4 item-1 config fingerprint, composed in run_cycle and carried on cons
+    # (same pattern as trace_id). config_version is a short hex string (binds as
+    # TEXT). config_snapshot is a dict — insert_debate_record only JSON-encodes a
+    # hardcoded key allow-list and would throw InterfaceError on a raw dict, so it
+    # is serialized HERE and stored as a JSON string. NULL on a compose failure.
+    record["config_version"] = cons.get("config_version")
+    _cfg_snap = cons.get("config_snapshot")
+    record["config_snapshot"] = (
+        json.dumps(_cfg_snap, sort_keys=True, default=str)
+        if isinstance(_cfg_snap, (dict, list)) else _cfg_snap
+    )
     # Per-agent freshness-retry flags from council.py's R0 validator. None of
     # the agents will carry the key if world_state wasn't passed through, so
     # default to False to preserve the JSON shape across cycles.
@@ -1968,6 +2029,25 @@ def run_cycle(trigger: str = "manual", force: bool = False) -> dict:
     if cons.get('hard_rule_overrides'):
         log.info("Hard-rule overrides applied: %s", cons['hard_rule_overrides'])
     log.info("Geometry source: %s", cons.get('geometry_source') or 'unchanged')
+
+    # 11b. Compose the config-version fingerprint (Stage-4 item 1). The council half
+    # (persona hashes, per-seat served models, veto mode) rode out on cons from
+    # run_council and survived enforce_hard_rules' cons = dict(consensus); here we
+    # fold in the floor half (HARD_RULES + config.py spacing/fee constants, in scope
+    # here) and stamp config_version + config_snapshot onto cons for
+    # _build_debate_record. The intermediate council-half key is popped so it never
+    # lingers downstream. Additive record-keeping — never blocks a cycle.
+    try:
+        _cfg_version, _cfg_snapshot = _compose_config_fingerprint(cons)
+        cons["config_version"] = _cfg_version
+        cons["config_snapshot"] = _cfg_snapshot
+        log.info("Config fingerprint: %s", _cfg_version)
+    except Exception as e:
+        log.warning("config fingerprint compose failed (non-fatal): %s", e)
+        cons["config_version"] = None
+        cons["config_snapshot"] = None
+    finally:
+        cons.pop("_fingerprint_council_half", None)
 
     # 12-13. Write structured debate record (canonical source of truth)
     debate_inserted = False
