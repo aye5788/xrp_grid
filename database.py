@@ -1669,43 +1669,330 @@ def mark_alert_resolved(alert_id):
     return updated
 
 
+# Reality window for the PnL-column-based predicates (Melchior THESIS_HOLDS,
+# Balthasar CLEAR/PROCEED): the 6h outcome — the primary, reliably-backfilled
+# window the prior get_agent_accuracy also used. Casper and the counterfactual /
+# NO_PROFITABLE_GRID sims use the forward_sim 72h horizon instead (their own basis).
+_ACCURACY_WINDOW = '6h'
+# Survival HALTs that can drive final_risk_action='HALT' independent of Balthasar's
+# vote (so the HALT is the rule's, not his call).
+_BALTHASAR_SURVIVAL_HALT_TAGS = {
+    "[KILL_SWITCH]", "[DAILY_LOSS_LIMIT]", "[ALLOC_SKEW_CEILING]",
+}
+
+
+def _decision_bar_index(ts_keys, cycle_ts):
+    """Index of the forward_sim decision bar = the latest 1h candle whose
+    timestamp <= the cycle timestamp. ts_keys is the ascending list of candle
+    timestamps normalised to 'YYYY-MM-DDTHH:MM:SS' (strips microseconds / tz
+    offset so the lexicographic bisect is robust). Returns None if no bar
+    precedes the cycle."""
+    import bisect
+    key = (cycle_ts or "")[:19]
+    if not key:
+        return None
+    pos = bisect.bisect_right(ts_keys, key) - 1
+    return pos if pos >= 0 else None
+
+
+def _score_casper(conn, bars, ts_keys, cutoff):
+    """Casper — regime-realized, PnL-independent, 72h horizon. A call is correct
+    iff casper_r0_position == the forward-realized regime label (forward_sim:
+    simulate->label over WINDOW_H=72h, FEE_FLOOR=2*MAKER_FEE), computed from 1h
+    candles and INDEPENDENT of the pnl_* columns. UNCERTAIN is matched-to-
+    ambiguous: correct iff the realized label is also UNCERTAIN (no abstention
+    exclusion). A row whose 72h forward window is not yet fully covered by candles
+    is NOT scored (excluded as not-matured), never counted wrong."""
+    from grid.forward_sim import simulate, label, WINDOW_H
+    n = len(bars)
+    rows = conn.execute(
+        '''SELECT casper_r0_position AS position, timestamp
+           FROM debate_records
+           WHERE timestamp >= ? AND casper_r0_position IS NOT NULL''',
+        (cutoff,)
+    ).fetchall()
+    scored = correct = not_matured = 0
+    for r in rows:
+        i = _decision_bar_index(ts_keys, r['timestamp'])
+        if i is None or i + WINDOW_H >= n:      # full 72h forward not available
+            not_matured += 1
+            continue
+        realized_label, _dir = label(simulate(bars, i))
+        scored += 1
+        if r['position'] == realized_label:
+            correct += 1
+    acc = round(correct / scored * 100.0, 2) if scored else None
+    return {
+        'eligible_calls': len(rows),
+        'role_basis': 'regime_realized_72h',
+        'scored': scored, 'correct': correct, 'accuracy_pct': acc,
+        'excluded': not_matured,
+        'excluded_reasons': {'not_matured_72h': not_matured},
+    }
+
+
+def _score_melchior(conn, bars, ts_keys, cutoff):
+    """Melchior — verdict-conditional. Per-verdict, no shared predicate:
+      THESIS_HOLDS  (reality)        correct iff fills_6h>0 AND pnl_6h>=0 AND
+                                     (pnl_6h + unrealized_pnl_6h) >= 0.
+      NO_PROFITABLE_GRID (sim 72h)   correct iff simulate alpha_pct <= FEE_FLOOR
+                                     (no fee-clearing grid; 2*MAKER_FEE floor).
+      RECONFIGURE   (decision-time PROXY) correct iff the best-ranked scored
+                                     variant Melchior was shown beat the current
+                                     config on expected daily PnL AND pnl_6h>=0.
+    Rows whose position is not one of the three verdicts (e.g. Letta-era
+    MAINTAIN/RECENTRE action vocabulary) are excluded as non-verdict."""
+    from grid.forward_sim import simulate, FEE_FLOOR, WINDOW_H
+    n = len(bars)
+    rows = conn.execute(
+        '''SELECT melchior_r0_position AS position, timestamp,
+                  fills_6h, pnl_6h, unrealized_pnl_6h, world_state
+           FROM debate_records
+           WHERE timestamp >= ? AND melchior_r0_position IS NOT NULL''',
+        (cutoff,)
+    ).fetchall()
+    scored = correct = 0
+    by_verdict = {v: {'scored': 0, 'correct': 0}
+                  for v in ('THESIS_HOLDS', 'RECONFIGURE', 'NO_PROFITABLE_GRID')}
+    excl = {'non_verdict_position': 0, 'not_matured_72h': 0,
+            'missing_outcome': 0, 'missing_world_state': 0}
+
+    for r in rows:
+        verdict = r['position']
+        if verdict == 'THESIS_HOLDS':
+            pnl = r['pnl_6h']
+            if pnl is None:
+                excl['missing_outcome'] += 1
+                continue
+            fills = r['fills_6h'] or 0
+            unreal = r['unrealized_pnl_6h'] or 0.0          # COALESCE NULL -> 0.0
+            ok = (fills > 0 and pnl >= 0 and (pnl + unreal) >= 0)
+            scored += 1; by_verdict['THESIS_HOLDS']['scored'] += 1
+            if ok:
+                correct += 1; by_verdict['THESIS_HOLDS']['correct'] += 1
+        elif verdict == 'NO_PROFITABLE_GRID':
+            i = _decision_bar_index(ts_keys, r['timestamp'])
+            if i is None or i + WINDOW_H >= n:
+                excl['not_matured_72h'] += 1
+                continue
+            ok = (simulate(bars, i)['alpha_pct'] <= FEE_FLOOR)
+            scored += 1; by_verdict['NO_PROFITABLE_GRID']['scored'] += 1
+            if ok:
+                correct += 1; by_verdict['NO_PROFITABLE_GRID']['correct'] += 1
+        elif verdict == 'RECONFIGURE':
+            # PROXY: grades the DECISION on decision-time info, NOT a true
+            # held-the-old-config counterfactual (no such realized series exists).
+            raw = r['world_state']
+            if not raw:
+                excl['missing_world_state'] += 1
+                continue
+            try:
+                ws = json.loads(raw)
+            except Exception:
+                excl['missing_world_state'] += 1
+                continue
+            top = ws.get('scored_variants_top_10') or []
+            cur = ws.get('current_config_expected_daily_pnl_pct')
+            chosen = top[0].get('expected_daily_pnl_pct') if top else None
+            pnl = r['pnl_6h']
+            if chosen is None or cur is None or pnl is None:
+                excl['missing_world_state'] += 1
+                continue
+            ok = (chosen > cur and pnl >= 0)
+            scored += 1; by_verdict['RECONFIGURE']['scored'] += 1
+            if ok:
+                correct += 1; by_verdict['RECONFIGURE']['correct'] += 1
+        else:
+            excl['non_verdict_position'] += 1   # predates the verdict model
+
+    acc = round(correct / scored * 100.0, 2) if scored else None
+    return {
+        'eligible_calls': len(rows),
+        'role_basis': 'verdict_conditional',
+        'scored': scored, 'correct': correct, 'accuracy_pct': acc,
+        'excluded': sum(excl.values()),
+        'excluded_reasons': excl,
+        'by_verdict': by_verdict,
+    }
+
+
+def _score_balthasar(conn, bars, ts_keys, cutoff):
+    """Balthasar — total-PnL + applied-flag, with the reality/counterfactual split
+    kept SEPARATE (never summed into one accuracy number):
+
+      Applied CLEAR/PROCEED  (REALITY)        correct iff (pnl_6h +
+                                              unrealized_pnl_6h) >= 0.
+      Applied veto PAUSE/HOLD/RISK_BLOCK (COUNTERFACTUAL, sim 72h) correct iff the
+                                              unpaused grid would have bled
+                                              (grid_equity_end - grid_equity_start
+                                              < 0); a positive counterfactual means
+                                              the veto was wrong (bailed before a
+                                              recovery).
+      Overridden by hard rules               EXCLUDED / N-A (not his call).
+
+    Applied-vs-overridden is recovered from balthasar_r0_position + final_risk_action
+    + geometry_veto + the hard_rule_overrides tags."""
+    from grid.forward_sim import simulate, WINDOW_H
+    n = len(bars)
+    rows = conn.execute(
+        '''SELECT balthasar_r0_position AS position, timestamp,
+                  fills_6h, pnl_6h, unrealized_pnl_6h,
+                  geometry_veto, final_risk_action, hard_rule_overrides
+           FROM debate_records
+           WHERE timestamp >= ? AND balthasar_r0_position IS NOT NULL''',
+        (cutoff,)
+    ).fetchall()
+
+    reality = {'scored': 0, 'correct': 0}
+    counterfactual = {'scored': 0, 'correct': 0}
+    excl = {'overridden_hard_rule': 0, 'not_matured_72h': 0, 'missing_outcome': 0}
+
+    for r in rows:
+        pos = r['position']                 # risk_action
+        gveto = r['geometry_veto']
+        final_risk = r['final_risk_action']
+        try:
+            overrides = json.loads(r['hard_rule_overrides']) if r['hard_rule_overrides'] else []
+        except Exception:
+            overrides = []
+        if not isinstance(overrides, list):
+            overrides = []
+
+        # 1. Overridden / not-driving -> exclude.
+        overridden = (
+            '[AGENT_DEGRADED:balthasar]' in overrides
+            or '[COUNCIL_COLLAPSED]' in overrides
+            or (final_risk == 'HALT' and pos != 'HALT'
+                and any(t in overrides for t in _BALTHASAR_SURVIVAL_HALT_TAGS))
+        )
+        if overridden:
+            excl['overridden_hard_rule'] += 1
+            continue
+
+        # 2. Was his veto applied?
+        veto_applied = (
+            (pos in ('PAUSE_LONGS', 'PAUSE_SHORTS', 'HALT') and final_risk == pos)
+            or (gveto in ('HOLD_GEOMETRY', 'RISK_BLOCK')
+                and any(t in overrides
+                        for t in ('[BALTHASAR_HOLD_GEOMETRY]', '[BALTHASAR_RISK_BLOCK]')))
+        )
+
+        if veto_applied:
+            # COUNTERFACTUAL: the actual window is paused (~0 PnL), so grade against
+            # the simulated unpaused grid.
+            i = _decision_bar_index(ts_keys, r['timestamp'])
+            if i is None or i + WINDOW_H >= n:
+                excl['not_matured_72h'] += 1
+                continue
+            d = simulate(bars, i)
+            counterfactual['scored'] += 1
+            if d['grid_pnl'] < 0:               # unpaused grid would have bled -> brake earned its keep
+                counterfactual['correct'] += 1
+        else:
+            # REALITY: CLEAR/PROCEED — grid ran, score actual total PnL.
+            pnl = r['pnl_6h']
+            if pnl is None:
+                excl['missing_outcome'] += 1
+                continue
+            unreal = r['unrealized_pnl_6h'] or 0.0          # COALESCE NULL -> 0.0
+            reality['scored'] += 1
+            if (pnl + unreal) >= 0:
+                reality['correct'] += 1
+
+    r_acc = (round(reality['correct'] / reality['scored'] * 100.0, 2)
+             if reality['scored'] else None)
+    c_acc = (round(counterfactual['correct'] / counterfactual['scored'] * 100.0, 2)
+             if counterfactual['scored'] else None)
+    return {
+        'eligible_calls': len(rows),
+        'role_basis': 'total_pnl_applied_flag',
+        'reality_graded': {**reality, 'accuracy_pct': r_acc},
+        'counterfactual_graded': {**counterfactual, 'accuracy_pct': c_acc},
+        'excluded': sum(excl.values()),
+        'excluded_reasons': excl,
+    }
+
+
 def get_agent_accuracy(agent_id, days=7):
     """
-    Return {total_calls, positive_outcomes, accuracy_pct} for the agent's
-    r0 calls over the last `days` days. A 'positive outcome' is
-    fills_6h > 0 AND pnl_6h >= 0. Only counts rows where the agent's
-    r0_position is non-null and the 6h outcome has been backfilled.
+    Per-role forward-outcome accuracy for an agent's r0 calls over the last
+    `days` days. Each seat is scored on its OWN question — there is no shared
+    fills>0 AND pnl>=0 predicate (that was the database.py:1635 bug):
+
+      casper    — regime-realized (forward_sim 72h label vs casper_r0_position),
+                  PnL-independent. (see _score_casper)
+      melchior  — verdict-conditional (THESIS_HOLDS reality / NO_PROFITABLE_GRID
+                  sim / RECONFIGURE decision-time proxy). (see _score_melchior)
+      balthasar — total-PnL + applied-flag, with reality-graded (CLEAR/PROCEED)
+                  and counterfactual-graded (applied veto, sim) kept SEPARATE.
+                  (see _score_balthasar)
+
+    Return shape (grew from the old {total_calls, positive_outcomes,
+    accuracy_pct}; the back-compat scalar keys are preserved on every agent):
+
+      common:  agent_id, days, role_basis, eligible_calls, scored, excluded,
+               excluded_reasons, total_calls (= eligible_calls back-compat).
+      casper / melchior:  positive_outcomes, accuracy_pct  (correct / scored).
+                          melchior adds by_verdict.
+      balthasar:          reality_graded {scored, correct, accuracy_pct} and
+                          counterfactual_graded {scored, correct, accuracy_pct}
+                          carried SEPARATELY. The back-compat positive_outcomes /
+                          accuracy_pct are the REALITY figures ONLY — the
+                          counterfactual veto results are NEVER summed into them;
+                          read counterfactual_graded for those. accuracy_basis_note
+                          documents this in the payload.
+
+    accuracy_pct is None when nothing was scored (e.g. no matured rows). Note the
+    only historical caller is the archived dashboard
+    (archive/magi_dashboard_2026-06-02/dashboard.py); there is no live consumer.
     """
     if agent_id not in _VALID_AGENT_IDS:
         raise ValueError(f"unknown agent_id: {agent_id!r}")
 
-    from datetime import timedelta
     cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
-    pos_col = f"{agent_id}_r0_position"
 
+    from grid.forward_sim import load_1h
     conn = get_conn()
-    rows = conn.execute(
-        f'''SELECT {pos_col} AS position, fills_6h, pnl_6h
-            FROM debate_records
-            WHERE timestamp >= ?
-              AND outcome_6h_backfilled=1
-              AND {pos_col} IS NOT NULL''',
-        (cutoff,)
-    ).fetchall()
-    conn.close()
+    try:
+        bars = load_1h(conn)
+        ts_keys = [b[0][:19] for b in bars]     # normalised ascending bisect keys
+        if agent_id == 'casper':
+            role = _score_casper(conn, bars, ts_keys, cutoff)
+        elif agent_id == 'melchior':
+            role = _score_melchior(conn, bars, ts_keys, cutoff)
+        else:  # balthasar
+            role = _score_balthasar(conn, bars, ts_keys, cutoff)
+    finally:
+        conn.close()
 
-    total = len(rows)
-    positive = sum(
-        1 for r in rows
-        if (r['fills_6h'] or 0) > 0
-        and r['pnl_6h'] is not None and r['pnl_6h'] >= 0
-    )
-    accuracy_pct = (positive / total * 100.0) if total > 0 else 0.0
-    return {
-        'total_calls': total,
-        'positive_outcomes': positive,
-        'accuracy_pct': round(accuracy_pct, 2),
+    out = {
+        'agent_id': agent_id,
+        'days': days,
+        'role_basis': role['role_basis'],
+        'eligible_calls': role['eligible_calls'],
+        'total_calls': role['eligible_calls'],      # back-compat alias
+        'excluded': role['excluded'],
+        'excluded_reasons': role['excluded_reasons'],
     }
+    if agent_id == 'balthasar':
+        out['reality_graded'] = role['reality_graded']
+        out['counterfactual_graded'] = role['counterfactual_graded']
+        # Back-compat scalars: REALITY basis ONLY (never blended w/ counterfactual).
+        out['scored'] = role['reality_graded']['scored']
+        out['positive_outcomes'] = role['reality_graded']['correct']
+        out['accuracy_pct'] = role['reality_graded']['accuracy_pct']
+        out['accuracy_basis_note'] = (
+            "accuracy_pct / positive_outcomes are REALITY-graded only "
+            "(applied CLEAR/PROCEED). Simulation-graded applied-veto calls are in "
+            "counterfactual_graded and are deliberately NOT summed into them."
+        )
+    else:
+        out['scored'] = role['scored']
+        out['positive_outcomes'] = role['correct']
+        out['accuracy_pct'] = role['accuracy_pct']
+        if agent_id == 'melchior':
+            out['by_verdict'] = role['by_verdict']
+    return out
 
 
 def get_capitulation_rate(agent_id, days=7):
