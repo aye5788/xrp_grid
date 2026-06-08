@@ -252,14 +252,37 @@ def _parse_iso_safe(ts):
         return None
 
 
-def _compute_window_metrics(cycle_start, cycle_end):
+def _compute_window_metrics(cycle_start, cycle_end, baseline_equity=None):
     """
-    Return (fills_count, realized_pnl) for fills with filled_at (or timestamp
-    fallback) in [cycle_start, cycle_end). Realized P&L is FIFO-matched across
-    the full LIVE fills history (so sells in window can match buys from before
-    the window), then summed only for the sells whose fill time fell within
-    window. Pre-live paper fills are excluded — otherwise paper sells drain the
-    FIFO buy queue (incl. live buys) and every live sell attributes to $0.
+    Return (fills_count, realized_pnl, unrealized_pnl) for the window
+    [cycle_start, cycle_end).
+
+    realized_pnl: FIFO-matched across the full LIVE fills history (so sells in
+    window can match buys from before the window), then summed only for the
+    sells whose fill time fell within the window. Pre-live paper fills are
+    excluded (_is_live_order_id) — otherwise paper sells drain the FIFO buy
+    queue (incl. live buys) and every live sell attributes to $0.
+
+    unrealized_pnl: the windowed mark-to-market drift on the held position,
+    computed as get_pnl_snapshot's decomposition (total = realized + unrealized,
+    grid/pnl.py:147-148) restricted to this window, so realized + unrealized
+    equals the full windowed equity change:
+        window_total = equity_at(cycle_end) - baseline_equity   (decision-time)
+        unrealized   = window_total - realized
+    where equity = xrp_held*marked_price + usd_held (inventory.net_position_usd
+    already stores xrp_held*price, so equity = net_position_usd + usd_held).
+
+    Same strict live-only basis as realized: unrealized is attributed ONLY when
+    the window saw at least one LIVE fill (fills_count > 0). Every paper window
+    has fills_count == 0 (paper order_ids are filtered by _is_live_order_id), so
+    unrealized is 0.0 in paper — inert by design, never garbage, even on a DB
+    carrying historical live fills. It is also 0.0 when the decision-time
+    baseline (baseline_equity is None) or the window-end equity is unrecoverable
+    — the same no-baseline fallback get_pnl_snapshot uses at grid/pnl.py:149-153.
+    (Trade-off: a fully quiescent live window — held position bleeding with zero
+    fills, e.g. during a HALT — reports 0.0 here, because there is no live/paper
+    flag on inventory rows to gate on instead; the only live discriminator in the
+    system is _is_live_order_id on fills.)
     """
     from database import get_conn
     from grid.pnl import _fifo_match, _is_live_order_id
@@ -288,7 +311,7 @@ def _compute_window_metrics(cycle_start, cycle_end):
     fills_count = len(in_window)
 
     if not fills:
-        return 0, 0.0
+        return 0, 0.0, 0.0
 
     matched, _unmatched = _fifo_match(fills)
     pnl_per_sell = {}
@@ -299,8 +322,18 @@ def _compute_window_metrics(cycle_start, cycle_end):
     for f in in_window:
         if f['side'] == 'sell':
             realized += pnl_per_sell.get(f['order_id'], 0.0)
+    realized = round(realized, 4)
 
-    return fills_count, round(realized, 4)
+    # Unrealized — same live-only basis as realized. Attributed only when the
+    # window saw live trading (fills_count > 0); 0.0 otherwise (inert in paper).
+    unrealized = 0.0
+    if fills_count > 0 and baseline_equity is not None:
+        equity_end = _get_equity_at_or_before(cycle_end)
+        if equity_end is not None:
+            unrealized = round((equity_end - baseline_equity) - realized, 4)
+        # equity_end unrecoverable -> stays 0.0 (no-baseline fallback, grid/pnl.py:149-153)
+
+    return fills_count, realized, unrealized
 
 
 def _get_skew_at_or_before(timestamp_dt):
@@ -321,6 +354,72 @@ def _get_skew_at_or_before(timestamp_dt):
     conn.close()
     if row and row['inventory_skew'] is not None:
         return float(row['inventory_skew'])
+    return None
+
+
+def _get_equity_at_or_before(timestamp_dt):
+    """Account equity (net_position_usd + usd_held) from the most recent
+    inventory row with timestamp <= given dt. net_position_usd stores
+    xrp_value_usd (xrp_held * marked price) per engine.update_inventory, so this
+    is the marked equity at that snapshot — the same equity definition
+    get_pnl_snapshot uses (xrp*price + usd). Returns float or None. Same lookup
+    pattern as _get_skew_at_or_before (lexicographic compare on naive UTC ISO)."""
+    if timestamp_dt is None:
+        return None
+    from database import get_conn
+    iso = (timestamp_dt.replace(tzinfo=None) if timestamp_dt.tzinfo
+           else timestamp_dt).isoformat()
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT net_position_usd, usd_held FROM inventory WHERE timestamp <= ? "
+        "ORDER BY timestamp DESC LIMIT 1",
+        (iso,)
+    ).fetchone()
+    conn.close()
+    if row and row['net_position_usd'] is not None and row['usd_held'] is not None:
+        return float(row['net_position_usd']) + float(row['usd_held'])
+    return None
+
+
+def _decision_baseline_equity(cycle_id):
+    """Decision-time account equity recovered from the row's stored world_state
+    snapshot (the flight-recorder JSON in debate_records.world_state). Returns
+    float or None.
+
+    equity = portfolio.xrp_value_usd + inventory.usd_held — the same
+    xrp-marked-to-market + usd equity get_pnl_snapshot uses. Falls back to
+    portfolio.total_universe_usd, then to inventory.xrp_held * price + usd_held.
+    Returns None when the snapshot lacks the fields; the caller treats None as
+    the no-baseline fallback (unrealized -> 0.0, mirroring grid/pnl.py:149-153)."""
+    import json
+    from database import get_conn
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT world_state FROM debate_records WHERE cycle_id=?", (cycle_id,)
+    ).fetchone()
+    conn.close()
+    if not row or not row['world_state']:
+        return None
+    try:
+        ws = json.loads(row['world_state'])
+    except Exception:
+        return None
+    portfolio = ws.get("portfolio") or {}
+    inv = ws.get("inventory") or {}
+    xrp_value = portfolio.get("xrp_value_usd")
+    usd_held = inv.get("usd_held")
+    try:
+        if xrp_value is not None and usd_held is not None:
+            return float(xrp_value) + float(usd_held)
+        tot = portfolio.get("total_universe_usd")
+        if tot is not None:
+            return float(tot)
+        price = ws.get("price")
+        xrp_held = inv.get("xrp_held")
+        if price is not None and xrp_held is not None and usd_held is not None:
+            return float(xrp_held) * float(price) + float(usd_held)
+    except (TypeError, ValueError):
+        return None
     return None
 
 
@@ -416,9 +515,16 @@ def backfill_outcomes():
                 continue
             cycle_end = cycle_start + timedelta(hours=hours)
 
+            # Decision-time equity baseline from the row's stored world_state.
+            # None => unrealized falls back to 0.0 inside _compute_window_metrics
+            # (the same no-baseline fallback get_pnl_snapshot uses). Only the
+            # 6h/24h windows have an unrealized column, but computing it for all
+            # windows is harmless — it's only written for 6h/24h below.
+            baseline_equity = _decision_baseline_equity(cycle_id)
+
             try:
-                fills_count, pnl_value = _compute_window_metrics(
-                    cycle_start, cycle_end
+                fills_count, pnl_value, unrealized_value = _compute_window_metrics(
+                    cycle_start, cycle_end, baseline_equity
                 )
             except Exception as e:
                 log.error(f"backfill: metrics for {cycle_id} {window} failed: {e}")
@@ -435,18 +541,28 @@ def backfill_outcomes():
                     update_debate_outcomes(
                         cycle_id, '6h', fills_count, pnl_value,
                         skew_delta=skew_delta, grid_alive=grid_alive,
+                        unrealized_pnl=unrealized_value,
                     )
                     log.info(
                         f"backfill: {cycle_id} 6h → fills={fills_count} "
-                        f"pnl=${pnl_value:.4f} skew_delta={skew_delta} "
-                        f"grid_alive={grid_alive}"
+                        f"pnl=${pnl_value:.4f} unrealized=${unrealized_value:.4f} "
+                        f"skew_delta={skew_delta} grid_alive={grid_alive}"
                     )
                     _record_outcome_to_block(
                         cycle_id, fills_count, pnl_value,
                         skew_delta if skew_delta is not None else 0.0,
                         grid_alive,
                     )
-                else:
+                elif window == '24h':
+                    update_debate_outcomes(
+                        cycle_id, '24h', fills_count, pnl_value,
+                        unrealized_pnl=unrealized_value,
+                    )
+                    log.info(
+                        f"backfill: {cycle_id} 24h → fills={fills_count} "
+                        f"pnl=${pnl_value:.4f} unrealized=${unrealized_value:.4f}"
+                    )
+                else:  # 1h — no unrealized_pnl_1h column; realized only
                     update_debate_outcomes(cycle_id, window, fills_count, pnl_value)
                     log.info(
                         f"backfill: {cycle_id} {window} → fills={fills_count} "

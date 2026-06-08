@@ -257,6 +257,8 @@ def init_db():
         pnl_1h REAL,
         pnl_6h REAL,
         pnl_24h REAL,
+        unrealized_pnl_6h REAL,
+        unrealized_pnl_24h REAL,
         skew_delta_6h REAL,
         grid_alive_6h INTEGER,
 
@@ -456,6 +458,12 @@ def init_db():
         # for Stage 3 — no writer yet, stays NULL until the orchestrator stamps it
         # (magi/agents/tracing.py:current_trace_id). One trace per cycle.
         "ALTER TABLE debate_records ADD COLUMN trace_id TEXT",
+        # unrealized_pnl_{6h,24h}: change in total mark-to-market position value
+        # over the forward window (window-end value − decision-time baseline),
+        # written alongside the realized pnl_{6h,24h} by the observer backfill.
+        # Same live-only basis as realized; inert (0.0 fallback) during paper.
+        "ALTER TABLE debate_records ADD COLUMN unrealized_pnl_6h REAL",
+        "ALTER TABLE debate_records ADD COLUMN unrealized_pnl_24h REAL",
         # casper_r1_position / melchior_r1_position: each agent's FINAL
         # POST-REBUTTAL structured label (Casper regime, Melchior verdict) from
         # council_v2's rebuttal round. ALWAYS written with the agent's final call —
@@ -1386,12 +1394,17 @@ def insert_debate_record(record_dict):
 
 
 def update_debate_outcomes(cycle_id, window, fills, pnl,
-                            skew_delta=None, grid_alive=None):
+                            skew_delta=None, grid_alive=None,
+                            unrealized_pnl=None):
     """
     Backfill outcome metrics on a debate_records row.
     window is one of '1h', '6h', '24h'. Sets fills_{window},
     pnl_{window}, outcome_{window}_backfilled=1. For the 6h window also
-    optionally sets skew_delta_6h and grid_alive_6h.
+    optionally sets skew_delta_6h and grid_alive_6h. For the 6h and 24h
+    windows also optionally sets unrealized_pnl_{window} (the windowed
+    mark-to-market drift the observer backfill computes alongside realized;
+    same live-only basis — 0.0 when no in-window live fills). There is no
+    unrealized_pnl_1h column, so unrealized_pnl is ignored for the 1h window.
     """
     if window not in _VALID_WINDOWS:
         raise ValueError(f"window must be one of {_VALID_WINDOWS}, got {window!r}")
@@ -1410,6 +1423,10 @@ def update_debate_outcomes(cycle_id, window, fills, pnl,
         if grid_alive is not None:
             sets.append("grid_alive_6h=?")
             vals.append(int(bool(grid_alive)))
+
+    if window in ('6h', '24h') and unrealized_pnl is not None:
+        sets.append(f"unrealized_pnl_{window}=?")
+        vals.append(unrealized_pnl)
 
     vals.append(cycle_id)
     conn = get_conn()
