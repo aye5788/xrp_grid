@@ -67,6 +67,7 @@ from magi.agents.melchior_deepseek import run_melchior_with_meta
 from magi.agents.balthasar_claude import run_balthasar_with_meta
 from magi.agents.personas import load_persona
 from magi.agents import tracing
+from database import get_agent_recall
 
 log = logging.getLogger(__name__)
 
@@ -90,6 +91,75 @@ def _fp_hash(text: str) -> str:
     """Short, stable content hash of a persona text for the config fingerprint.
     Fine-grained: any edit to the persona registers as a new hash."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def current_config_council_half() -> dict:
+    """The deterministic COUNCIL HALF of the config fingerprint, computed with NO
+    vendor call. current_config_fingerprint() folds this through
+    orchestrator._compose_config_fingerprint to derive the CURRENT config_version —
+    the contamination boundary the per-agent recall Journal filters by.
+
+    Identical in shape to the council_half run_council assembles on the live write
+    path: the per-seat models are the CONFIGURED handles (_CASPER_MODEL /
+    _MELCHIOR_MODEL / _BALTHASAR_MODEL) — which is exactly what config_version hashes
+    (operator decision: config_version describes the configured setup, never the
+    served id). Because the hash uses configured handles on BOTH the write path and
+    here, the version computed here equals the version stamped on rows — so recall's
+    config filter matches stored config_version with no served-model caveat. persona
+    hashes are read from the SAME .md files the seats load; veto_mode is the live
+    _VETO_MODE constant; served_models / casper_model_version_observed are health
+    metadata, excluded from the hash, so they are omitted here (None on the write
+    path's pre-call state)."""
+    persona_hashes = {}
+    for name in ("casper", "melchior", "balthasar"):
+        try:
+            persona_hashes[name] = _fp_hash(load_persona(name))
+        except Exception as e:  # noqa: BLE001 - best-effort; null hash mirrors write path
+            log.warning("[council_v2] current-config persona read failed for %s: %r",
+                        name, e)
+            persona_hashes[name] = None
+    return {
+        "persona_hashes": persona_hashes,
+        "models": {
+            "casper": _CASPER_MODEL,
+            "melchior": _MELCHIOR_MODEL,
+            "balthasar": _BALTHASAR_MODEL,
+        },
+        "casper_model_version_observed": None,  # soft metadata; never in the hash
+        "veto_mode": _VETO_MODE,
+    }
+
+
+def current_config_fingerprint() -> tuple[Optional[str], Optional[dict]]:
+    """The full (config_version, config_snapshot) for the live configured setup,
+    computed OFFLINE with no vendor call. Folds current_config_council_half() through
+    orchestrator._compose_config_fingerprint — the SAME hasher the write path uses —
+    so the version returned here equals the version stamped on debate_records rows.
+
+    The orchestrator import is LAZY (inside the function) to break the
+    orchestrator<->council_v2 module cycle: orchestrator imports run_council at module
+    load, so council_v2 cannot import orchestrator at its top; at call time the
+    orchestrator module is already imported. Used by run_council to (1) bound recall
+    and (2) stamp the trace. Never raises here — run_council wraps the call and falls
+    back to (None, None)."""
+    from magi.orchestrator import _compose_config_fingerprint  # lazy: break import cycle
+    return _compose_config_fingerprint(
+        {"_fingerprint_council_half": current_config_council_half()})
+
+
+def _with_recall(recall_block: Optional[str], extra_context: Optional[str]) -> Optional[str]:
+    """Prepend a seat's private recall block to its per-call extra_context. Recall
+    rides in extra_context, which every seat-caller places AFTER its cache breakpoint
+    (Balthasar's ephemeral cache_control is on the persona+world_state block;
+    Melchior/Casper render extra_context as a trailing block) — so injecting recall
+    here never busts the cached stable prefix. Computed once per cycle and reused
+    across a seat's opening + rebuttal/synthesis, so the recall text is identical
+    within the cycle (only the openings/rebuttal/synthesis tail differs, as before)."""
+    if not recall_block:
+        return extra_context
+    if extra_context:
+        return f"{recall_block}\n\n{extra_context}"
+    return recall_block
 
 # Per-seat usage capture for the standalone --cache-debug diagnostic. Cleared at
 # the start of every run_council, appended to by _seat_call. The live path never
@@ -420,7 +490,19 @@ def run_council(world_state: dict, cycle_id: str) -> tuple[dict, dict, dict]:
     round_1: dict = {}
     _LAST_RUN_USAGE.clear()  # fresh per-seat usage capture for --cache-debug
 
-    with tracing.trace_cycle(cycle_id):
+    # This cycle's config fingerprint (offline, no vendor call). Two uses: (1) stamp
+    # the trace root span so traces self-partition by config without a DB join; (2)
+    # bound the per-agent recall Journal to the current config. Best-effort — a
+    # failure here must never block the convene, so fall back to (None, None) (recall
+    # then renders the empty sentinel, the trace carries a null version).
+    try:
+        cfg_version, cfg_snapshot = current_config_fingerprint()
+    except Exception as e:  # noqa: BLE001 - fingerprint is best-effort context
+        log.warning("[council_v2] config fingerprint compute failed: %r", e)
+        cfg_version, cfg_snapshot = None, None
+
+    with tracing.trace_cycle(cycle_id, metadata={
+            "config_version": cfg_version, "config_snapshot": cfg_snapshot}):
         trace_id = tracing.current_trace_id()
 
         # Melchior's persona is loaded HERE — inside the trace context, BEFORE any
@@ -472,62 +554,94 @@ def run_council(world_state: dict, cycle_id: str) -> tuple[dict, dict, dict]:
             "persona_hashes": {
                 n: (_fp_hash(t) if t else None) for n, t in persona_texts.items()
             },
+            # config_version hashes the CONFIGURED model handles (operator decision):
+            # config_version describes the configured setup, not what the provider
+            # happened to serve. All three are the configured constants and never
+            # change within a cycle.
             "models": {
-                "casper": _CASPER_MODEL,   # configured: ADK exposes no clean billed model
-                "melchior": None,          # filled with the served raw.model on success
-                "balthasar": None,         # filled with the served raw.model on success
+                "casper": _CASPER_MODEL,
+                "melchior": _MELCHIOR_MODEL,
+                "balthasar": _BALTHASAR_MODEL,
             },
+            # Health/observability only — the ACTUAL model each provider served this
+            # cycle, filled per successful seat call. NEVER enters config_version (the
+            # silent-downgrade signal must not churn the config hash); _warn_if_fallback
+            # in the seat-callers is the live alarm, this is the recorded evidence.
+            "served_models": {"casper": None, "melchior": None, "balthasar": None},
             "casper_model_version_observed": None,  # soft metadata; never in the hash
             "veto_mode": _VETO_MODE,
         }
 
+        # ---- per-seat private recall (the "Journal") ----
+        # Deterministic SQLite read (no model call, no vendor cost). Each seat sees
+        # ONLY its own past calls scored by its own metric, injected as prompt text —
+        # statelessness preserved (this is input, not agent-held memory). Computed
+        # ONCE here and reused across that seat's opening + rebuttal/synthesis via
+        # _with_recall, so the block is identical within the cycle and rides in
+        # extra_context (AFTER each seat's cache breakpoint) — the cached stable
+        # prefix is untouched. Best-effort: a recall failure degrades to no block for
+        # that seat (a null suffix), never a stand-down.
+        recall_block = {}
+        for _seat in ("casper", "melchior", "balthasar"):
+            try:
+                recall_block[_seat] = get_agent_recall(_seat, cfg_version).get("block")
+            except Exception as e:  # noqa: BLE001 - recall is best-effort context
+                log.warning("[council_v2] recall read failed for %s: %r", _seat, e)
+                recall_block[_seat] = None
+
         # ---- Phase A: openings (sequential) ----
+        casper_open_ctx = _with_recall(recall_block["casper"], None)
         cv, casper_mv, err = _seat_call(
             "casper", _CASPER_MODEL, "google",
-            {"world_state": world_state, "extra_context": None},
-            lambda: run_casper_with_meta(world_state),
+            {"world_state": world_state, "extra_context": casper_open_ctx},
+            lambda: run_casper_with_meta(world_state, extra_context=casper_open_ctx),
             _usage_adk, _model_adk,
         )
         if err:
             return _bail(round_0, round_1, trace_id, "casper-open", err, council_half)
         round_0["casper"] = _casper_r0(cv)
-        # Casper's served version is soft metadata only (nullable/aliased); the hash
+        # Casper's served version is health metadata only (nullable/aliased); the hash
         # uses the configured _CASPER_MODEL already in council_half["models"].
         council_half["casper_model_version_observed"] = casper_mv
+        council_half["served_models"]["casper"] = casper_mv
 
         premise = _melchior_premise(cv)
+        melchior_open_ctx = _with_recall(recall_block["melchior"], premise)
         mv, melchior_served, err = _seat_call(
             "melchior", _MELCHIOR_MODEL, "deepseek",
-            {"world_state": world_state, "extra_context": premise},
+            {"world_state": world_state, "extra_context": melchior_open_ctx},
             lambda: run_melchior_with_meta(
-                world_state, persona=melchior_persona, extra_context=premise),
+                world_state, persona=melchior_persona, extra_context=melchior_open_ctx),
             _usage_anthropic, _model_anthropic,
         )
         if err:
             return _bail(round_0, round_1, trace_id, "melchior-open", err, council_half)
         round_0["melchior"] = _melchior_r0(mv)
-        council_half["models"]["melchior"] = melchior_served  # ACTUAL served model
+        council_half["served_models"]["melchior"] = melchior_served  # health only — NOT in config_version
 
         openings_b = _openings_for_balthasar(cv, mv)
+        balthasar_open_ctx = _with_recall(recall_block["balthasar"], openings_b)
         bo, balthasar_served, err = _seat_call(
             "balthasar", _BALTHASAR_MODEL, "anthropic",
-            {"world_state": world_state, "extra_context": openings_b},
-            lambda: run_balthasar_with_meta(world_state, extra_context=openings_b),
+            {"world_state": world_state, "extra_context": balthasar_open_ctx},
+            lambda: run_balthasar_with_meta(world_state, extra_context=balthasar_open_ctx),
             _usage_anthropic, _model_anthropic,
         )
         if err:
             return _bail(round_0, round_1, trace_id, "balthasar-open", err, council_half)
         round_0["balthasar"] = _balthasar_r0(bo)
-        council_half["models"]["balthasar"] = balthasar_served  # ACTUAL served model
+        council_half["served_models"]["balthasar"] = balthasar_served  # health only — NOT in config_version
 
         # ---- Phase B: rebuttal (Casper + Melchior, vs the FROZEN openings) ----
         frozen = _frozen_transcript(cv, mv, bo)
         reb_ctx = frozen + "\n\n" + _REBUTTAL_INSTRUCTION
+        casper_reb_ctx = _with_recall(recall_block["casper"], reb_ctx)
+        melchior_reb_ctx = _with_recall(recall_block["melchior"], reb_ctx)
 
         cr, _cr_served, err = _seat_call(
             "casper:rebuttal", _CASPER_MODEL, "google",
-            {"world_state": world_state, "extra_context": reb_ctx, "phase": "rebuttal"},
-            lambda: run_casper_with_meta(world_state, extra_context=reb_ctx),
+            {"world_state": world_state, "extra_context": casper_reb_ctx, "phase": "rebuttal"},
+            lambda: run_casper_with_meta(world_state, extra_context=casper_reb_ctx),
             _usage_adk, _model_adk,
         )
         if err:
@@ -536,9 +650,9 @@ def run_council(world_state: dict, cycle_id: str) -> tuple[dict, dict, dict]:
 
         mr, _mr_served, err = _seat_call(
             "melchior:rebuttal", _MELCHIOR_MODEL, "deepseek",
-            {"world_state": world_state, "extra_context": reb_ctx, "phase": "rebuttal"},
+            {"world_state": world_state, "extra_context": melchior_reb_ctx, "phase": "rebuttal"},
             lambda: run_melchior_with_meta(
-                world_state, persona=melchior_persona, extra_context=reb_ctx),
+                world_state, persona=melchior_persona, extra_context=melchior_reb_ctx),
             _usage_anthropic, _model_anthropic,
         )
         if err:
@@ -556,10 +670,11 @@ def run_council(world_state: dict, cycle_id: str) -> tuple[dict, dict, dict]:
 
         # ---- Phase C: synthesis (Balthasar) — his RiskVote IS the final call ----
         synth_ctx = _full_record(cv, mv, bo, cr, mr) + "\n\n" + _SYNTHESIS_INSTRUCTION
+        balthasar_synth_ctx = _with_recall(recall_block["balthasar"], synth_ctx)
         bs, _bs_served, err = _seat_call(
             "balthasar:synthesis", _BALTHASAR_MODEL, "anthropic",
-            {"world_state": world_state, "extra_context": synth_ctx, "phase": "synthesis"},
-            lambda: run_balthasar_with_meta(world_state, extra_context=synth_ctx),
+            {"world_state": world_state, "extra_context": balthasar_synth_ctx, "phase": "synthesis"},
+            lambda: run_balthasar_with_meta(world_state, extra_context=balthasar_synth_ctx),
             _usage_anthropic, _model_anthropic,
         )
         if err:
@@ -720,8 +835,10 @@ if __name__ == "__main__":
     print("\n[fingerprint] council-half carried on cons (orchestrator folds in the "
           "floor half + hash downstream):")
     print(f"  persona_hashes: {half.get('persona_hashes')}")
-    print(f"  models (casper=configured; melchior/balthasar=served raw.model): "
+    print(f"  models (CONFIGURED handles — what config_version hashes): "
           f"{half.get('models')}")
+    print(f"  served_models (health only, snapshot-only, NOT in the hash): "
+          f"{half.get('served_models')}")
     print(f"  casper_model_version_observed (soft, snapshot-only): "
           f"{half.get('casper_model_version_observed')}")
     print(f"  veto_mode: {half.get('veto_mode')}")

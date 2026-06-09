@@ -113,6 +113,15 @@ AUTOCORR_TREND_THRESHOLD = 0.3
 # --- Database ---
 DB_PATH = "/root/xrp_grid/observer.db"
 
+# --- Per-agent recall (the "Journal"; database.get_agent_recall) ---
+# Deterministic SQLite read injected as per-seat prompt context: each agent
+# recalls only its OWN past calls, scored by its OWN per-role metric. These bound
+# what is injected — most-recent RECALL_MAX_ITEMS calls within RECALL_LOOKBACK_DAYS
+# of the cycle, after the config-version and scored-only filters. Named here (not
+# as literals at the call site) so the lever is visible and tunable in one place.
+RECALL_MAX_ITEMS = 6
+RECALL_LOOKBACK_DAYS = 21
+
 # --- Dashboard ---
 DASHBOARD_HOST = "0.0.0.0"
 DASHBOARD_PORT = 5000

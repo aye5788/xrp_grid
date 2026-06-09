@@ -56,13 +56,17 @@ def get_tracer():
 
 
 @contextmanager
-def trace_cycle(cycle_id: str):
+def trace_cycle(cycle_id: str, metadata: dict | None = None):
     """Open the root trace for one council cycle.
 
     Names the root observation ``council-cycle:<cycle_id>``; in langfuse 4.x
     that name propagates to the trace, so the trace displays with that title
     without a separate update call. Flushes on exit so a short-lived process
     (or the gate-driven orchestrator between cycles) ships the spans.
+
+    `metadata` (optional) is attached to the ROOT span — used to stamp the
+    cycle's config_version + config_snapshot at write time, so traces
+    self-partition by config without a DB join. None -> no metadata attached.
 
     Yields the root observation object (or None if tracing is unavailable).
     A caller exception raised inside the ``with`` block propagates untouched —
@@ -73,10 +77,11 @@ def trace_cycle(cycle_id: str):
         yield None
         return
 
+    obs_kwargs = {"as_type": "span", "name": f"council-cycle:{cycle_id}"}
+    if metadata is not None:
+        obs_kwargs["metadata"] = metadata
     try:
-        cm = client.start_as_current_observation(
-            as_type="span", name=f"council-cycle:{cycle_id}"
-        )
+        cm = client.start_as_current_observation(**obs_kwargs)
     except Exception as e:  # noqa: BLE001
         log.warning("trace_cycle(%s) init failed: %s", cycle_id, e)
         yield None

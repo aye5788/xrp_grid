@@ -1692,17 +1692,23 @@ def _compose_config_fingerprint(cons: dict) -> tuple[str, dict]:
 
     The fingerprint is built in two halves because council_v2 must not import from
     orchestrator (circular). council_v2.run_council computes the half it owns
-    (persona hashes, per-seat served models, veto mode) and rides it out on cons
-    under '_fingerprint_council_half'; this folds in the FLOOR half — the HARD_RULES
-    survival floors plus the config.py spacing/fee constants — which are in scope
-    here but not in council_v2.
+    (persona hashes, per-seat CONFIGURED model handles, veto mode) and rides it out
+    on cons under '_fingerprint_council_half'; this folds in the FLOOR half — the
+    HARD_RULES survival floors plus the config.py spacing/fee constants — which are
+    in scope here but not in council_v2.
+
+    config_version describes the CONFIGURED setup (operator decision): the per-seat
+    model handles hashed are the configured constants, NEVER the served model id. The
+    served ids ARE captured — in served_models (+ casper_model_version_observed) for
+    the silent-downgrade health signal — but are SNAPSHOT-ONLY and excluded from the
+    hash, so a provider serving a different id is visible in forensics without
+    churning config_version.
 
     Returns (config_version, config_snapshot):
       * config_snapshot — a readable dict of every component, for forensics.
       * config_version — a short hex hash over the snapshot's canonical JSON,
-        EXCLUDING casper_model_version_observed (that ADK-served version string is
-        nullable/aliased, so it is snapshot-only and never allowed to churn the
-        hash).
+        EXCLUDING served_models and casper_model_version_observed (the served-id
+        health metadata, which must never churn the hash).
 
     Additive record-keeping only; reads cons, changes no decision.
     """
@@ -1716,8 +1722,12 @@ def _compose_config_fingerprint(cons: dict) -> tuple[str, dict]:
     half = cons.get("_fingerprint_council_half") or {}
     snapshot = {
         "persona_hashes": half.get("persona_hashes") or {},
+        # CONFIGURED model handles — config_version describes the configured setup.
         "models": half.get("models") or {},
-        # Soft metadata: Casper's observed served-version string. Snapshot-only.
+        # Health/observability only: the ACTUAL served model ids this cycle (+ casper's
+        # served-version alias). EXCLUDED from the hash (see _HASH_EXCLUDE below) so a
+        # silent provider downgrade shows up in forensics without churning the version.
+        "served_models": half.get("served_models") or {},
         "casper_model_version_observed": half.get("casper_model_version_observed"),
         "veto_mode": half.get("veto_mode"),
         # Floor half — folded in here (in scope; council_v2 can't see it).
@@ -1733,10 +1743,11 @@ def _compose_config_fingerprint(cons: dict) -> tuple[str, dict]:
         # disclosure boundary (same pattern as veto_mode in 2a).
         "constraint_disclosure": dict(CONSTRAINT_DISCLOSURE),
     }
-    # Hash everything EXCEPT the nullable/aliased observed version. Canonical JSON
+    # Hash everything EXCEPT the served-id health metadata. Canonical JSON
     # (sort_keys + default=str) so key ordering can never churn the hash.
+    _HASH_EXCLUDE = {"served_models", "casper_model_version_observed"}
     hashable = {k: v for k, v in snapshot.items()
-                if k != "casper_model_version_observed"}
+                if k not in _HASH_EXCLUDE}
     canon = json.dumps(hashable, sort_keys=True, default=str)
     version = hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16]
     return version, snapshot
