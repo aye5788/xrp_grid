@@ -132,7 +132,16 @@ class GridVote(BaseModel):
 
 
 class RiskVote(BaseModel):
-    """Balthasar — survival/risk gating judgment."""
+    """Balthasar — survival/risk gating judgment.
+
+    As the synthesis ARBITER, Balthasar's geometry_veto carries the structural
+    veto that used to live in orchestrator hard-rule 0d: HOLD_GEOMETRY / RISK_BLOCK
+    over a RECONFIGURE holds the grid in-council (the council emits THESIS_HOLDS),
+    PROCEED lets the reconfigure stand. override_justification is the conditional
+    carrier for the one case the schema alone can't gate (it needs Casper's vote):
+    proceeding over a live regime objection. Enforcement lives in
+    council_v2.run_council at synthesis, where all three votes are in hand.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -142,7 +151,9 @@ class RiskVote(BaseModel):
     geometry_veto: Literal["PROCEED", "HOLD_GEOMETRY", "RISK_BLOCK"] = Field(
         description=(
             "Whether risk conditions permit a structural grid change this cycle. "
-            "Read by the downstream consensus/hard-rule layer."
+            "As the arbiter you OWN this veto: HOLD_GEOMETRY / RISK_BLOCK over a "
+            "RECONFIGURE holds the grid (no rebuild this cycle); PROCEED lets it "
+            "stand. Read by the downstream consensus layer."
         )
     )
     conviction: float = Field(
@@ -155,4 +166,18 @@ class RiskVote(BaseModel):
     )
     crux: str = Field(
         description="One sentence: the single thing that would change the verdict."
+    )
+    override_justification: Optional[str] = Field(
+        default=None,
+        description=(
+            "Fill this ONLY when you set geometry_veto=PROCEED on a structural "
+            "reconfigure while Casper's regime read objects (regime_action is "
+            "DEFER_STRUCTURAL or STAND_DOWN). State, on the merits, why the "
+            "reconfigure should proceed over that specific objection — engage "
+            "Casper's cited reason, do not merely assert. Leave null when there is "
+            "no live regime objection, or when you are not proceeding (you set "
+            "HOLD_GEOMETRY/RISK_BLOCK), or the verdict is not RECONFIGURE. An "
+            "un-justified proceed over a live objection is NOT honored: the "
+            "objection stands and the grid holds (MAINTAIN)."
+        ),
     )

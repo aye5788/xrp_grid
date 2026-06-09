@@ -1133,18 +1133,15 @@ class GridEngine:
     def apply_magi_decision(self, consensus: dict):
         """Apply the MAGI consensus to the grid.
 
-        Council structural inputs (regime_action, geometry_veto) flow
-        through enforce_hard_rules upstream — by the time this method
-        sees the consensus dict, grid_action has already been coerced
-        to MAINTAIN if either field was non-permissive. This block is
-        a defensive cross-check that satisfies the literal "engine
-        reads consensus[...]" requirement and surfaces a warning if
-        enforce_hard_rules somehow let a vetoed structural change
-        through. Under normal operation this branch is a no-op."""
+        The structural council veto now lives in the arbiter's synthesis vote
+        (council_v2): a vetoed RECONFIGURE is downgraded to THESIS_HOLDS in-council,
+        so grid_action already arrives as MAINTAIN. The old engine-level veto
+        cross-check (which re-read regime_action / geometry_veto and re-coerced
+        MAINTAIN) was removed with hard-rule 0d in Stage-4 item 2a — there is no
+        post-hoc veto for the engine to second-guess. grid_action flows straight to
+        HALT / GRID_PAUSE / rebuild from here."""
         grid_action = consensus.get('grid_action', 'MAINTAIN')
         risk_action = consensus.get('risk_action', 'CLEAR')
-        regime_action = consensus.get('regime_action') or 'EXECUTE'
-        geometry_veto = consensus.get('geometry_veto') or 'PROCEED'
 
         # What the engine ACTUALLY applies, recorded back to debate_records by
         # the scheduler (database.update_debate_applied). Defaults to the council
@@ -1156,27 +1153,6 @@ class GridEngine:
             'engine_clamped': 0,
             'clamp_reason': None,
         }
-
-        if grid_action in ('RECENTRE', 'TIGHTEN', 'WIDEN'):
-            engine_council_tags = []
-            if regime_action == 'DEFER_STRUCTURAL':
-                engine_council_tags.append('[REGIME_DEFER]')
-            elif regime_action == 'STAND_DOWN':
-                engine_council_tags.append('[REGIME_STANDDOWN]')
-            if geometry_veto == 'HOLD_GEOMETRY':
-                engine_council_tags.append('[BALTHASAR_HOLD_GEOMETRY]')
-            elif geometry_veto == 'RISK_BLOCK':
-                engine_council_tags.append('[BALTHASAR_RISK_BLOCK]')
-            if engine_council_tags:
-                log.warning(
-                    "engine-level council veto cross-check fired %s — "
-                    "enforce_hard_rules should have caught this upstream. "
-                    "Coercing %s to MAINTAIN.",
-                    engine_council_tags, grid_action,
-                )
-                grid_action = 'MAINTAIN'
-                self.last_applied['applied_grid_action'] = 'MAINTAIN'
-                self.last_applied['clamp_reason'] = 'engine_council_veto_crosscheck'
 
         if grid_action == 'HALT' or risk_action == 'HALT':
             log.warning("MAGI HALT — cancelling all orders")

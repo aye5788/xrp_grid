@@ -77,11 +77,13 @@ _CASPER_MODEL = "gemini-2.5-flash"
 _MELCHIOR_MODEL = "deepseek-v4-pro"
 _BALTHASAR_MODEL = "claude-sonnet-4-6"
 
-# Stage-4 item-1 config fingerprint: the veto is hardcoded as orchestrator hard
-# rule 0d today (no config toggle exists yet — see enforce_hard_rules). Encode it
-# as a stable literal so the fingerprint shape is fixed; this becomes a live value
-# when item 2 lands the veto-placement setting.
-_VETO_MODE = "hard_rule_0d"
+# Stage-4 item-1 config fingerprint: where the structural council veto is enforced.
+# As of item 2a the veto lives IN the arbiter's synthesis (Balthasar's geometry_veto
+# decides RECONFIGURE vs. hold in-council, below), NOT in the removed orchestrator
+# hard rule 0d. The literal is part of the config fingerprint, so this flip
+# (hard_rule_0d -> in_debate) intentionally changes config_version: the behavioral
+# placement of the veto moved.
+_VETO_MODE = "in_debate"
 
 
 def _fp_hash(text: str) -> str:
@@ -122,7 +124,15 @@ _SYNTHESIS_INSTRUCTION = (
     "=== SYNTHESIS — YOU ARE THE ARBITER ===\n"
     "Weigh the openings and the rebuttals above and emit your FINAL risk vote. Your "
     "risk_action and geometry_veto are the council's binding risk outputs for this "
-    "cycle; the grid economics stand or fall on Melchior's post-rebuttal verdict."
+    "cycle; the grid economics stand or fall on Melchior's post-rebuttal verdict.\n"
+    "YOUR geometry_veto IS THE STRUCTURAL VETO. If Melchior's verdict is RECONFIGURE "
+    "and you judge the rebuild unsafe, set geometry_veto=HOLD_GEOMETRY or RISK_BLOCK "
+    "and the grid will hold (no rebuild this cycle). If you set geometry_veto=PROCEED "
+    "on a RECONFIGURE while Casper's regime read objects (regime_action "
+    "DEFER_STRUCTURAL or STAND_DOWN), you MUST fill override_justification, engaging "
+    "Casper's cited reason on its merits — an un-justified proceed over a live "
+    "objection is not honored and the grid holds. Leave override_justification null "
+    "in every other case."
 )
 
 
@@ -377,6 +387,9 @@ def _safe_hold_cons(trace_id: Optional[str], reason: str,
         "geometry_veto": "PROCEED",
         "debate_triggered": False,
         "deadlock": False,
+        # No structural reconfigure on a stand-down, so there is nothing to veto or
+        # justify; carried as None for column-shape symmetry with the live path.
+        "override_justification": None,
         "reasoning": (
             "council stood down on a seat failure — safe hold (MAINTAIN/CLEAR), "
             "no structural change, no veto fabricated. " + _sanitize(reason)
@@ -558,18 +571,79 @@ def run_council(world_state: dict, cycle_id: str) -> tuple[dict, dict, dict]:
         debate_triggered = bool(casper_changed or melchior_changed)
         shift = ("rebuttal shifted a stance" if debate_triggered
                  else "all stances held through rebuttal")
+
+        # ---- in-council STRUCTURAL VETO (Stage-4 item 2a) ----
+        # Balthasar is the arbiter; his synthesis geometry_veto now CARRIES the
+        # structural veto that used to live in orchestrator hard-rule 0d. The veto
+        # only bites a RECONFIGURE (the lone structural verdict — THESIS_HOLDS and
+        # NO_PROFITABLE_GRID change no geometry). Three cases:
+        #   * geometry_veto HOLD_GEOMETRY / RISK_BLOCK  -> arbiter holds the
+        #     reconfigure: emit THESIS_HOLDS so the orchestrator maps it to MAINTAIN
+        #     (no rebuild this cycle). This is the old rule-0d MAINTAIN coercion,
+        #     decided in-council instead of after the fact.
+        #   * geometry_veto PROCEED, Casper objects (regime_action DEFER_STRUCTURAL
+        #     / STAND_DOWN) -> the arbiter is overriding a live regime objection and
+        #     MUST justify it (override_justification). A justified proceed stands;
+        #     an UN-justified proceed does not clear the bar — the objection stands
+        #     and we hold (THESIS_HOLDS). That fallback is the conservative old
+        #     rule-0d outcome, so removing rule 0d never loosens safety.
+        #   * geometry_veto PROCEED, no Casper objection -> reconfigure stands, no
+        #     justification needed.
+        # The flight recorder is untouched: round_0['melchior'] still records what
+        # Melchior actually wanted (RECONFIGURE + geometry); the veto outcome shows
+        # up in grid_verdict / geometry_veto / final_grid_action.
+        effective_verdict = mr.verdict
+        override_justification: Optional[str] = None
+        veto_note = ""
+        casper_objects = cr.regime_action in ("DEFER_STRUCTURAL", "STAND_DOWN")
+        if mr.verdict == "RECONFIGURE":
+            if bs.geometry_veto in ("HOLD_GEOMETRY", "RISK_BLOCK"):
+                effective_verdict = "THESIS_HOLDS"
+                veto_note = (
+                    f" arbiter veto: geometry_veto={bs.geometry_veto} holds the "
+                    f"reconfigure (grid stays MAINTAIN)."
+                )
+                log.info("[council_v2] arbiter veto held RECONFIGURE via %s",
+                         bs.geometry_veto)
+            elif casper_objects:
+                oj = (getattr(bs, "override_justification", None) or "").strip()
+                if oj:
+                    override_justification = _sanitize(oj)[:500]
+                    veto_note = (
+                        f" arbiter proceeds over Casper {cr.regime_action} with "
+                        f"justification."
+                    )
+                    log.info(
+                        "[council_v2] arbiter PROCEEDed over Casper %s with "
+                        "justification — reconfigure stands", cr.regime_action)
+                else:
+                    effective_verdict = "THESIS_HOLDS"
+                    veto_note = (
+                        f" arbiter proceeded over Casper {cr.regime_action} WITHOUT "
+                        f"justification — override not honored, reconfigure held."
+                    )
+                    log.warning(
+                        "[council_v2] arbiter PROCEEDed over Casper %s with NO "
+                        "override_justification — holding reconfigure (THESIS_HOLDS)",
+                        cr.regime_action)
+
         cons = {
-            "grid_verdict": mr.verdict,          # Melchior POST-REBUTTAL verdict
+            "grid_verdict": effective_verdict,    # POST-REBUTTAL verdict, AFTER veto
             "risk_action": bs.risk_action,        # Balthasar synthesis
             "regime": cr.position,                # Casper POST-REBUTTAL
-            "regime_action": cr.regime_action,    # Casper POST-REBUTTAL
-            "geometry_veto": bs.geometry_veto,    # Balthasar synthesis
+            "regime_action": cr.regime_action,    # Casper POST-REBUTTAL (record-only)
+            "geometry_veto": bs.geometry_veto,    # Balthasar synthesis (record-only)
+            # The arbiter's justification for proceeding over a live regime
+            # objection (None otherwise). The orchestrator copies it to the
+            # debate_records override_justification column.
+            "override_justification": override_justification,
             "debate_triggered": debate_triggered,
             "deadlock": False,
             "reasoning": (
                 f"arbiter synthesis — regime={cr.position}/{cr.regime_action}, "
-                f"grid_verdict={mr.verdict}, risk={bs.risk_action}/{bs.geometry_veto}; "
-                f"{shift}. {_sanitize(bs.crux)}"
+                f"grid_verdict={mr.verdict}->{effective_verdict}, "
+                f"risk={bs.risk_action}/{bs.geometry_veto}; "
+                f"{shift}.{veto_note} {_sanitize(bs.crux)}"
             ),
             "trace_id": trace_id,
             # Stage-4 item-1: council half of the config fingerprint (persona
@@ -579,8 +653,8 @@ def run_council(world_state: dict, cycle_id: str) -> tuple[dict, dict, dict]:
             "_fingerprint_council_half": council_half,
         }
         log.info(
-            "[council_v2] %s: regime=%s/%s grid=%s risk=%s/%s debate=%s",
-            cycle_id, cr.position, cr.regime_action, mr.verdict,
+            "[council_v2] %s: regime=%s/%s grid=%s(eff=%s) risk=%s/%s debate=%s",
+            cycle_id, cr.position, cr.regime_action, mr.verdict, effective_verdict,
             bs.risk_action, bs.geometry_veto, debate_triggered,
         )
         return round_0, round_1, cons

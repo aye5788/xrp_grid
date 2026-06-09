@@ -271,7 +271,8 @@ def init_db():
         trace_id TEXT,
 
         config_version TEXT,
-        config_snapshot TEXT
+        config_snapshot TEXT,
+        override_justification TEXT
     )''')
     c.execute('''CREATE INDEX IF NOT EXISTS idx_debate_records_cycle_id
         ON debate_records (cycle_id)''')
@@ -311,6 +312,14 @@ def init_db():
         # not repeating that. Written by orchestrator._build_debate_record.
         "ALTER TABLE debate_records ADD COLUMN config_version TEXT",
         "ALTER TABLE debate_records ADD COLUMN config_snapshot TEXT",
+        # override_justification: Stage-4 item 2a. The arbiter (Balthasar) now
+        # carries the structural veto in his synthesis vote; when he PROCEEDs over a
+        # live Casper regime objection (regime_action DEFER_STRUCTURAL/STAND_DOWN) on
+        # a RECONFIGURE, he must justify it, and council_v2 records that prose here
+        # (NULL whenever there was no such override). Added in BOTH the CREATE TABLE
+        # body (fresh DBs) and here (existing observer.db). Written by
+        # orchestrator._build_debate_record.
+        "ALTER TABLE debate_records ADD COLUMN override_justification TEXT",
     ):
         try:
             c.execute(_alter)
@@ -1849,7 +1858,8 @@ def _score_balthasar(conn, bars, ts_keys, cutoff):
     rows = conn.execute(
         '''SELECT balthasar_r0_position AS position, timestamp,
                   fills_6h, pnl_6h, unrealized_pnl_6h,
-                  geometry_veto, final_risk_action, hard_rule_overrides
+                  geometry_veto, final_grid_action, final_risk_action,
+                  hard_rule_overrides
            FROM debate_records
            WHERE timestamp >= ? AND balthasar_r0_position IS NOT NULL''',
         (cutoff,)
@@ -1862,6 +1872,7 @@ def _score_balthasar(conn, bars, ts_keys, cutoff):
     for r in rows:
         pos = r['position']                 # risk_action
         gveto = r['geometry_veto']
+        final_grid = r['final_grid_action']
         final_risk = r['final_risk_action']
         try:
             overrides = json.loads(r['hard_rule_overrides']) if r['hard_rule_overrides'] else []
@@ -1881,12 +1892,15 @@ def _score_balthasar(conn, bars, ts_keys, cutoff):
             excl['overridden_hard_rule'] += 1
             continue
 
-        # 2. Was his veto applied?
+        # 2. Was his veto applied? Re-keyed for Stage-4 item 2a: the structural veto
+        # moved out of hard-rule 0d (the dead [BALTHASAR_HOLD_GEOMETRY] /
+        # [BALTHASAR_RISK_BLOCK] tags are no longer emitted) into the arbiter's
+        # synthesis vote. A geometry veto is now APPLIED iff Balthasar voted
+        # HOLD_GEOMETRY / RISK_BLOCK AND the grid was held to MAINTAIN this cycle
+        # (council_v2 downgrades the vetoed RECONFIGURE -> THESIS_HOLDS -> MAINTAIN).
         veto_applied = (
             (pos in ('PAUSE_LONGS', 'PAUSE_SHORTS', 'HALT') and final_risk == pos)
-            or (gveto in ('HOLD_GEOMETRY', 'RISK_BLOCK')
-                and any(t in overrides
-                        for t in ('[BALTHASAR_HOLD_GEOMETRY]', '[BALTHASAR_RISK_BLOCK]')))
+            or (gveto in ('HOLD_GEOMETRY', 'RISK_BLOCK') and final_grid == 'MAINTAIN')
         )
 
         if veto_applied:

@@ -755,11 +755,11 @@ _CANONICAL_OVERRIDE_TAGS = {
     "[GRID_HEALTHY_NO_RECENTRE]",
     "[RECENTRE_COOLDOWN]",
     "[RECENT_POSITION_HOLD]",
-    # Rule 0d — council veto
-    "[REGIME_DEFER]",
-    "[REGIME_STANDDOWN]",
-    "[BALTHASAR_HOLD_GEOMETRY]",
-    "[BALTHASAR_RISK_BLOCK]",
+    # (The rule-0d council-veto tags — [REGIME_DEFER] / [REGIME_STANDDOWN] /
+    # [BALTHASAR_HOLD_GEOMETRY] / [BALTHASAR_RISK_BLOCK] — were removed in Stage-4
+    # item 2a. The structural veto now lives in the arbiter's synthesis vote
+    # (council_v2.run_council); it downgrades a vetoed RECONFIGURE to THESIS_HOLDS
+    # in-council, so enforce_hard_rules never sees a council-veto override to tag.)
     # Survival floors
     "[KILL_SWITCH]",
     "[DAILY_LOSS_LIMIT]",
@@ -780,28 +780,14 @@ _CANONICAL_OVERRIDE_TAGS = {
 # unexpected agent_id correctly trips Invariant 2. ([GUARDRAILS_BLOCKED] is emitted
 # by _early_halt_return, NOT by enforce_hard_rules, so it is deliberately absent.)
 
-_RULE_0D_REGIME_VETOS    = {"DEFER_STRUCTURAL", "STAND_DOWN"}
-_RULE_0D_GEOMETRY_VETOS  = {"HOLD_GEOMETRY", "RISK_BLOCK"}
-_RULE_0D_TRIGGER_ACTIONS = {"RECENTRE", "TIGHTEN", "WIDEN"}
-_RULE_0D_COVERAGE_TAGS   = {
-    "[REGIME_DEFER]", "[REGIME_STANDDOWN]",
-    "[BALTHASAR_HOLD_GEOMETRY]", "[BALTHASAR_RISK_BLOCK]",
-}
-# Rules that run AFTER rule 0d and may legitimately overwrite its MAINTAIN
-# coercion (see the precedence ladder in enforce_hard_rules' docstring). When
-# one of these tags is present, a non-MAINTAIN grid_action does NOT violate
-# Invariant 1 — survival/integrity rules outrank the council veto.
-_RULE_0D_SUPERSEDING_TAGS = {
-    "[KILL_SWITCH]", "[DAILY_LOSS_LIMIT]", "[ALLOC_SKEW_CEILING]",
-    "[GRID_DEGENERATE]", "[NO_ACCEPTABLE_VARIANT]",
-}
-
-# Melchior's economic verdict -> the engine's grid_action vocabulary. council.py
+# Melchior's economic verdict -> the engine's grid_action vocabulary. council_v2
 # passes the verdict through unflattened (consensus['grid_verdict']); the
 # orchestrator owns this deterministic translation. NO_PROFITABLE_GRID resolves to
 # GRID_PAUSE (stand down: cancel orders and idle) — NOT MAINTAIN. RECONFIGURE maps
-# to RECENTRE, so the rule-0d veto ladder still gates it under STAND_DOWN /
-# DEFER_STRUCTURAL / HOLD_GEOMETRY / RISK_BLOCK exactly as before.
+# to RECENTRE. The structural council veto is no longer applied here (rule 0d was
+# removed in Stage-4 item 2a): the arbiter's synthesis already downgraded a vetoed
+# RECONFIGURE to THESIS_HOLDS in-council, so by the time grid_verdict reaches this
+# map it reflects the post-veto call.
 _VERDICT_TO_GRID_ACTION = {
     "THESIS_HOLDS":       "MAINTAIN",
     "RECONFIGURE":        "RECENTRE",
@@ -809,60 +795,24 @@ _VERDICT_TO_GRID_ACTION = {
 }
 
 
-# The contract predicates below delegate their set logic to these helpers.
-# Keeping set()/any()/`or []` OUT of the @ensure lambda bodies matters: icontract
-# re-walks the lambda AST to build the violation message, and it cannot recompute
-# `set(x or []) & y` (raises 'bool' object is not iterable). Opaque helper calls
-# sidestep that, and icontract still reports each helper's return value plus the
-# `result.get("hard_rule_overrides")` argument in the failure message. The helpers
-# are also independently unit-testable.
-def _has_rule0d_coverage_tag(overrides):
-    """True if the override list carries >=1 rule-0d council-veto tag."""
-    return any(tag in (overrides or []) for tag in _RULE_0D_COVERAGE_TAGS)
-
-
-def _has_rule0d_superseding_tag(overrides):
-    """True if a higher-precedence rule (HALT / RECENTRE / GRID_PAUSE) ran after
-    rule 0d and legitimately overwrote its MAINTAIN coercion."""
-    return any(tag in (overrides or []) for tag in _RULE_0D_SUPERSEDING_TAGS)
-
-
+# The contract predicate below delegates its set logic to this helper. Keeping
+# set()/`or []` OUT of the @ensure lambda body matters: icontract re-walks the
+# lambda AST to build the violation message, and it cannot recompute `set(x or [])
+# - y` (raises 'bool' object is not iterable). An opaque helper call sidesteps that,
+# and icontract still reports the helper's return value plus the
+# `result.get("hard_rule_overrides")` argument in the failure message. The helper
+# is also independently unit-testable.
+#
+# (Invariant 1 — the rule-0d coverage contract — and its _RULE_0D_* constants /
+# _has_rule0d_* helpers were removed with rule 0d in Stage-4 item 2a. The structural
+# veto now lives in the arbiter's synthesis vote, which downgrades a vetoed
+# RECONFIGURE to THESIS_HOLDS in-council; there is no post-hoc coercion left to
+# police here. Invariant 2 — override-tag integrity — is unchanged.)
 def _unknown_override_tags(overrides):
     """Set of override tags that are NOT canonical (empty set when all valid)."""
     return set(overrides or []) - _CANONICAL_OVERRIDE_TAGS
 
 
-@icontract.snapshot(lambda consensus: consensus.get("regime_action"), name="in_regime_action")
-@icontract.snapshot(lambda consensus: consensus.get("geometry_veto"), name="in_geometry_veto")
-@icontract.snapshot(lambda consensus: _VERDICT_TO_GRID_ACTION.get(consensus.get("grid_verdict")), name="in_grid_action")
-@icontract.ensure(
-    lambda OLD, result: (
-        not (
-            (OLD.in_regime_action in _RULE_0D_REGIME_VETOS
-             or OLD.in_geometry_veto in _RULE_0D_GEOMETRY_VETOS)
-            and OLD.in_grid_action in _RULE_0D_TRIGGER_ACTIONS
-        )
-        or (
-            _has_rule0d_coverage_tag(result.get("hard_rule_overrides"))
-            and (
-                result.get("grid_action") == "MAINTAIN"
-                or _has_rule0d_superseding_tag(result.get("hard_rule_overrides"))
-            )
-        )
-    ),
-    description=(
-        "Invariant 1 (rule 0d coverage): when input regime_action is "
-        "DEFER_STRUCTURAL/STAND_DOWN or geometry_veto is HOLD_GEOMETRY/"
-        "RISK_BLOCK AND input grid_action is RECENTRE/TIGHTEN/WIDEN, rule 0d "
-        "must record the veto with at least one of [REGIME_DEFER]/"
-        "[REGIME_STANDDOWN]/[BALTHASAR_HOLD_GEOMETRY]/[BALTHASAR_RISK_BLOCK], "
-        "and returned grid_action must be MAINTAIN UNLESS a later "
-        "higher-precedence rule legitimately superseded it (at least one of "
-        "[KILL_SWITCH]/[DAILY_LOSS_LIMIT]/[ALLOC_SKEW_CEILING]/[GRID_DEGENERATE]/"
-        "[NO_ACCEPTABLE_VARIANT] present — see the precedence ladder in the "
-        "docstring). Regression guard for cyc_1779480012 (2026-05-22T20:00:12)."
-    ),
-)
 @icontract.ensure(
     lambda result: _unknown_override_tags(result.get("hard_rule_overrides")) == set(),
     description=(
@@ -890,8 +840,6 @@ def enforce_hard_rules(consensus: dict, world_state: dict,
         -1.  Council-degradation freeze → MAINTAIN (1 agent) / HALT (council collapsed)
         0a/0b/0c. RECENTRE block        → MAINTAIN (GRID_HEALTHY_NO_RECENTRE /
                                           RECENTRE_COOLDOWN / RECENT_POSITION_HOLD)
-        0d.  Council veto               → MAINTAIN (REGIME_DEFER / REGIME_STANDDOWN /
-                                          BALTHASAR_HOLD_GEOMETRY / BALTHASAR_RISK_BLOCK)
         1.   Kill switch                → HALT
         2.   Daily loss limit           → HALT
         3.   Allocation skew ceiling    → HALT
@@ -899,19 +847,20 @@ def enforce_hard_rules(consensus: dict, world_state: dict,
         6.   Grid degenerate            → RECENTRE
         7.   PAUSE_INVALID              → risk_action CLEAR
         8.   Geometry injection / no acceptable variant → GRID_PAUSE
-    Rule 0d coerces grid_action to MAINTAIN, but rules 1-3 (→HALT), 6 (→RECENTRE)
-    and 8 (→GRID_PAUSE) run afterward and can legitimately supersede it. This is
-    why Invariant 1 requires a rule-0d coverage tag yet accepts a non-MAINTAIN
-    grid_action when one of those superseding rules (_RULE_0D_SUPERSEDING_TAGS)
-    also left its tag in hard_rule_overrides.
+    The structural COUNCIL VETO is no longer a rule here (rule 0d was removed in
+    Stage-4 item 2a). The arbiter (Balthasar) now carries it in his synthesis vote:
+    a HOLD_GEOMETRY / RISK_BLOCK over a RECONFIGURE is downgraded to THESIS_HOLDS
+    in-council by council_v2, so grid_verdict already reflects the veto and the
+    THESIS_HOLDS→MAINTAIN translation below holds the grid — no post-hoc coercion.
+    Only Invariant 2 (override-tag integrity) remains; Invariant 1 went with rule 0d.
     """
     cons = dict(consensus)
     overrides = list(cons.get("hard_rule_overrides") or [])
     notes = [cons.get("reasoning", "")]
 
     # Translate Melchior's economic verdict (passed through unflattened by
-    # council.py as consensus['grid_verdict']) into the engine's grid_action
-    # vocabulary:
+    # council_v2 as consensus['grid_verdict'], already post-veto) into the engine's
+    # grid_action vocabulary:
     #   THESIS_HOLDS       -> MAINTAIN    (hold the current grid)
     #   RECONFIGURE        -> RECENTRE    (rebuild to Melchior's geometry)
     #   NO_PROFITABLE_GRID -> GRID_PAUSE  (stand down: cancel orders and idle)
@@ -926,13 +875,6 @@ def enforce_hard_rules(consensus: dict, world_state: dict,
             "[NO_PROFITABLE_GRID] Melchior: no acceptable variant — standing down "
             "(GRID_PAUSE: cancel orders and idle)"
         )
-
-    # Capture Melchior's ORIGINAL intent BEFORE any rule mutates
-    # cons["grid_action"]. The council-veto step (0d) uses this so its tag fires
-    # even when 0a/0b/0c also downgrade — defense-in-depth tag visibility. For a
-    # RECONFIGURE this is "RECENTRE", so rule 0d still vetoes a reconfigure under
-    # DEFER_STRUCTURAL / STAND_DOWN / HOLD_GEOMETRY / RISK_BLOCK exactly as before.
-    _original_grid_action = cons.get("grid_action")
 
     inventory = world_state.get("inventory") or {}
     xrp_held = float(inventory.get("xrp_held") or 0.0)
@@ -1201,73 +1143,14 @@ def enforce_hard_rules(consensus: dict, world_state: dict,
                 rt_net, rt_dist, cons.get("grid_action"),
             )
 
-    # 0d. COUNCIL VETO — Casper's regime_action and Balthasar's
-    # geometry_veto. Operates on Melchior's ORIGINAL intent (captured
-    # at function entry), NOT on the current grid_action. This means
-    # the council-veto tag fires even when 0a/0b/0c already downgraded
-    # for their own reasons — both tags end up in hard_rule_overrides,
-    # so the operator can see both council judgment AND rule-layer
-    # judgment caught the same case. Defense-in-depth visibility.
-    #
-    # Permissive defaults: missing/unparseable fields default to
-    # EXECUTE / PROCEED in resolve_consensus, so this rule only fires
-    # when the agents EXPLICITLY voted to veto.
-    #
-    # Survival rules (1 KILL_SWITCH, 2 DAILY_LOSS_LIMIT, 3
-    # ALLOC_SKEW_CEILING) run after this and can still force HALT
-    # — council can't override survival floors.
-    if _original_grid_action in ("RECENTRE", "TIGHTEN", "WIDEN"):
-        regime_action_v = cons.get("regime_action") or "EXECUTE"
-        geometry_veto_v = cons.get("geometry_veto") or "PROCEED"
-        council_vetoed = False
-        if regime_action_v == "DEFER_STRUCTURAL":
-            overrides.append("[REGIME_DEFER]")
-            notes.append(
-                f"[REGIME_DEFER] Casper says regime defers structural "
-                f"change (was {_original_grid_action})"
-            )
-            log.info(
-                "Hard rule: REGIME_DEFER — Casper voted DEFER_STRUCTURAL "
-                "against Melchior's %s", _original_grid_action,
-            )
-            council_vetoed = True
-        elif regime_action_v == "STAND_DOWN":
-            overrides.append("[REGIME_STANDDOWN]")
-            notes.append(
-                f"[REGIME_STANDDOWN] Casper says regime stand-down "
-                f"(was {_original_grid_action})"
-            )
-            log.warning(
-                "Hard rule: REGIME_STANDDOWN — Casper voted STAND_DOWN "
-                "against Melchior's %s", _original_grid_action,
-            )
-            council_vetoed = True
-        if geometry_veto_v == "HOLD_GEOMETRY":
-            overrides.append("[BALTHASAR_HOLD_GEOMETRY]")
-            notes.append(
-                f"[BALTHASAR_HOLD_GEOMETRY] Balthasar says hold geometry "
-                f"(was {_original_grid_action})"
-            )
-            log.info(
-                "Hard rule: BALTHASAR_HOLD_GEOMETRY — Balthasar voted "
-                "HOLD_GEOMETRY against Melchior's %s", _original_grid_action,
-            )
-            council_vetoed = True
-        elif geometry_veto_v == "RISK_BLOCK":
-            overrides.append("[BALTHASAR_RISK_BLOCK]")
-            notes.append(
-                f"[BALTHASAR_RISK_BLOCK] Balthasar blocks geometry change "
-                f"(was {_original_grid_action})"
-            )
-            log.warning(
-                "Hard rule: BALTHASAR_RISK_BLOCK — Balthasar voted "
-                "RISK_BLOCK against Melchior's %s", _original_grid_action,
-            )
-            council_vetoed = True
-        if council_vetoed:
-            # Coerce to MAINTAIN (idempotent if 0a/0b/0c already did so).
-            # risk_action is left alone — council veto is geometry-only.
-            cons["grid_action"] = "MAINTAIN"
+    # (Rule 0d — the post-hoc COUNCIL VETO — was removed in Stage-4 item 2a. The
+    # structural veto now lives in the arbiter's synthesis vote: council_v2 downgrades
+    # a RECONFIGURE that Balthasar vetoes (geometry_veto HOLD_GEOMETRY / RISK_BLOCK,
+    # or an un-justified PROCEED over a live Casper regime objection) to THESIS_HOLDS
+    # before this function runs, so grid_action is already MAINTAIN by the verdict
+    # translation above. regime_action / geometry_veto survive on cons as record-only
+    # columns. Survival rules below — KILL_SWITCH / DAILY_LOSS_LIMIT /
+    # ALLOC_SKEW_CEILING — still force HALT regardless of the council's call.)
 
     # 1. Kill switch
     if os.path.exists(HARD_RULES["halt_file"]):
@@ -1831,6 +1714,12 @@ def _build_debate_record(cycle_id: str, trigger: str, world_state: dict,
     # New columns for the structural-vote architecture
     record["regime_action"] = cons.get("regime_action")
     record["geometry_veto"] = cons.get("geometry_veto")
+    # Stage-4 item 2a: the arbiter's justification for PROCEEDing over a live Casper
+    # regime objection on a RECONFIGURE (None whenever there was no such override).
+    # Plain string -> binds straight to the TEXT column; insert_debate_record does
+    # not JSON-encode it (it is not in the encode allow-list, and a string needs no
+    # encoding).
+    record["override_justification"] = cons.get("override_justification")
     # JSON-encoded list of bracketed hard-rule tags applied this cycle
     # (e.g. ["[RECENTRE_COOLDOWN]", "[PAUSE_INVALID]"]). The dashboard reads
     # this column directly instead of parsing magi_decisions.notes.

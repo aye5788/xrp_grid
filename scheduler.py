@@ -56,7 +56,13 @@ _last_magi_cycle_at = None   # set by run_magi_cycle; drives the wake throttle
 # parameterised tags like [AGENT_DEGRADED:...].
 _WAKE_BLOCKING_OVERRIDE_PREFIXES = (
     "[PAUSE_INVALID]",
-    "[REGIME_STANDDOWN]",
+    # [REGIME_STANDDOWN] retired (Stage-4 item 2a): rule 0d was removed, so that tag
+    # is no longer emitted by anything. The Casper regime stand-down objection is now
+    # honored INSIDE the council — Balthasar's synthesis sees regime_action and
+    # declines to reconfigure over a live STAND_DOWN (council_v2 downgrades the
+    # RECONFIGURE to THESIS_HOLDS) — so the scheduler no longer needs to pre-empt the
+    # wake on it. Wake cadence is still governed by the gate, the 4h backstop, and the
+    # geometry_veto='RISK_BLOCK' column suppressor below.
     "[HALT]",
     "[GRID_DEGENERATE]",
     "[COUNCIL_COLLAPSED]",
@@ -518,12 +524,13 @@ def _is_wake_suppressed_nontrading() -> tuple:
 
     Non-trading is defined as any of:
       - The most recent debate_records row has hard_rule_overrides containing
-        a blocking tag (PAUSE_INVALID, REGIME_STANDDOWN, HALT, GRID_DEGENERATE,
-        COUNCIL_COLLAPSED, GRID_PAUSE, KILL_SWITCH, DAILY_LOSS_LIMIT,
-        ALLOC_SKEW_CEILING, AGENT_DEGRADED).
+        a blocking tag (PAUSE_INVALID, HALT, GRID_DEGENERATE, COUNCIL_COLLAPSED,
+        GRID_PAUSE, KILL_SWITCH, DAILY_LOSS_LIMIT, ALLOC_SKEW_CEILING,
+        AGENT_DEGRADED). [REGIME_STANDDOWN] was retired in Stage-4 item 2a — the
+        regime objection is now honored in-council, not pre-empted here.
       - The most recent debate_records row has geometry_veto='RISK_BLOCK'
-        (REGIME_STANDDOWN is blocking geometry changes even when not listed as
-        a hard_rule_override tag on every cycle).
+        (Balthasar vetoed geometry this cycle; it is recorded as a column, not as
+        a hard_rule_override tag, so it is checked separately).
       - The most recent grid_state row has halt=1.
 
     Reads DB directly on every call — no caching — so state is always current.
