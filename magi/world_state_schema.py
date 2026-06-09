@@ -624,14 +624,16 @@ FIELDS = {
         "consumers": [],
     },
 
-    # ---------------- hard_rules block ----------------
+    # ---------------- hard_rules block (CURATED — Stage-4 item 2b) ----------------
+    # The two failure-case breakers (hard_rules.max_allocation_skew,
+    # hard_rules.daily_loss_limit_pct) and the kill-switch path (hard_rules.halt_file)
+    # were DROPPED here when they stopped rendering — build_world_state no longer dumps
+    # the whole HARD_RULES dict; it renders only the disclosed, non-breaker keys (see
+    # _DISCLOSED_HARD_RULE_KEYS in orchestrator.py). The breakers' proximity is now
+    # withheld from the council (budget-effect guard). The buffer floors and engine
+    # spacing clamps below REMAIN disclosed, so Balthasar's buffer-floor citations and
+    # Melchior's spacing-clamp context still resolve.
 
-    "hard_rules.max_allocation_skew": {
-        "type": "float",
-        "description": "max |skew| before HALT — Tier 1 survival rule threshold",
-        "consumers": ["balthasar"],
-        "balthasar_usage": "context — Step 2 HALT threshold reference (numeric value not cited in persona prose)",
-    },
     "hard_rules.min_usd_buffer": {
         "type": "float",
         "description": "minimum USD buffer before PAUSE_LONGS — Tier 1 buffer floor",
@@ -644,17 +646,6 @@ FIELDS = {
         "consumers": ["balthasar"],
         "balthasar_usage": "Step 3 XRP buffer floor reference (cited explicitly via 'portfolio.xrp_value_usd < hard_rules.min_xrp_buffer_usd')",
     },
-    "hard_rules.daily_loss_limit_pct": {
-        "type": "float",
-        "description": "max daily PnL drawdown as fraction of universe before HALT",
-        "consumers": ["balthasar"],
-        "balthasar_usage": "context — survival drawdown limit informs HALT escalation",
-    },
-    "hard_rules.halt_file": {
-        "type": "str",
-        "description": "filesystem path to operator HALT flag",
-        "consumers": [],
-    },
     "hard_rules.max_grid_spacing_pct": {
         "type": "float",
         "description": "engine spacing clamp (max)",
@@ -666,6 +657,21 @@ FIELDS = {
         "description": "engine spacing clamp (min)",
         "consumers": ["melchior"],
         "melchior_usage": "context — engine clamp floor cited in shared preamble; persona may not name explicitly",
+    },
+
+    # ---------------- constraints block (Stage-4 item 2b — opaque disclosure) ------
+    # The curated 'work-within' constraint disclosure built by
+    # orchestrator._build_constraint_disclosure, gated per-constraint by
+    # CONSTRAINT_DISCLOSURE. Declared as ONE opaque type:"dict" entry: the runtime
+    # drift validator does not recurse into type:"dict" fields, so the inner shape
+    # (usd_buffer/xrp_buffer/kill_switch, plus the withheld breakers only if a toggle
+    # is flipped on) can change without firing drift. Disclosed buffers carry floor +
+    # current headroom; the kill switch is a bare existence fact.
+    "constraints": {
+        "type": "dict",
+        "description": "curated work-within constraint disclosure (buffer floor existence + headroom, kill-switch existence fact); breakers withheld by default — gated by CONSTRAINT_DISCLOSURE",
+        "consumers": ["balthasar"],
+        "balthasar_usage": "work-within survival framing — buffer headroom (how close each leg is to its floor) and the operator kill-switch existence fact; withheld breakers are absent by design",
     },
 
     # ---------------- portfolio block (single-sourced derived values) ----------------

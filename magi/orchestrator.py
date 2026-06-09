@@ -74,6 +74,44 @@ HARD_RULES = {
     "min_grid_spacing_pct": 0.003,
 }
 
+# --- Stage-4 item 2b: per-constraint council DISCLOSURE toggles ---
+#
+# Which survival constraints the council is allowed to SEE in world_state, and at
+# what fidelity. "Work-within" constraints are disclosed as existence + CURRENT
+# HEADROOM so the council reasons inside them. The two failure-case BREAKERS
+# (daily_loss_limit, allocation_skew) default WITHHELD — their thresholds never
+# reach world_state.
+#
+#   *** LOUD WARNING — budget-effect guard ***
+#   Flipping a breaker to True exposes its proximity (its threshold, and for skew a
+#   live headroom) to the council. That RE-ENABLES the budget effect: a council that
+#   can see "you have room until the HALT ceiling" will steer toward it as a budget
+#   rather than treating it as a hard floor. That is the exact failure mode this
+#   redaction exists to prevent. Flip a breaker ON only as a DELIBERATE, PAPER-ONLY
+#   experiment, never casually and never on a live book. The toggle state feeds the
+#   config fingerprint (config_version), so any flip is recorded on every cycle.
+CONSTRAINT_DISCLOSURE = {
+    "usd_buffer":        True,   # work-within floor — existence + headroom
+    "xrp_buffer":        True,   # work-within floor — existence + headroom
+    "kill_switch":       True,   # existence fact only (operator can halt; no headroom)
+    "daily_loss_limit":  False,  # BREAKER — withheld (budget-effect guard)
+    "allocation_skew":   False,  # BREAKER — withheld (budget-effect guard)
+}
+
+# HARD_RULES keys that may still be dumped verbatim into world_state.hard_rules.
+# The two breakers (max_allocation_skew, daily_loss_limit_pct) are EXCLUDED so their
+# thresholds never reach the council via the hard_rules block; the kill-switch path
+# (halt_file) is EXCLUDED too — the kill switch is disclosed as a bare existence fact
+# in world_state.constraints, never as a filesystem path. The buffer floors and the
+# engine spacing clamps remain (Balthasar cites the buffer floors; Melchior cites the
+# spacing clamps), so those persona references stay valid.
+_DISCLOSED_HARD_RULE_KEYS = (
+    "min_usd_buffer",
+    "min_xrp_buffer_usd",
+    "max_grid_spacing_pct",
+    "min_grid_spacing_pct",
+)
+
 
 # --- World state assembly ---
 
@@ -476,6 +514,56 @@ def _mark_gate_events_consumed(cycle_id: str, ws_timestamp: str) -> None:
                     cycle_id, e)
 
 
+def _build_constraint_disclosure(usd_held, xrp_value_usd, allocation_skew) -> dict:
+    """Stage-4 item 2b: the curated 'work-within' constraint block for the council.
+
+    Each constraint is gated by CONSTRAINT_DISCLOSURE. Disclosed buffer floors carry
+    existence (the floor value) AND current headroom (how close we are right now), so
+    the council reasons inside the floor instead of being surprised by it. The kill
+    switch is disclosed as a bare existence fact (operator can halt at any time) — no
+    path, no headroom.
+
+    The two failure-case breakers (daily_loss_limit, allocation_skew) default WITHHELD
+    in CONSTRAINT_DISCLOSURE, so they are OMITTED ENTIRELY here — their thresholds
+    never enter world_state and the council cannot steer toward them as a budget. They
+    render only if a toggle is deliberately flipped on (see the loud warning on
+    CONSTRAINT_DISCLOSURE); that path is paper-only and is recorded in the fingerprint.
+    """
+    usd = float(usd_held or 0.0)
+    xrpv = float(xrp_value_usd or 0.0)
+    out: dict = {}
+
+    if CONSTRAINT_DISCLOSURE.get("usd_buffer"):
+        floor = HARD_RULES["min_usd_buffer"]
+        out["usd_buffer"] = {
+            "floor_usd":   floor,
+            "headroom_usd": usd - floor,   # >0 = above floor; <0 = breached
+        }
+    if CONSTRAINT_DISCLOSURE.get("xrp_buffer"):
+        floor = HARD_RULES["min_xrp_buffer_usd"]
+        out["xrp_buffer"] = {
+            "floor_usd":   floor,
+            "headroom_usd": xrpv - floor,
+        }
+    if CONSTRAINT_DISCLOSURE.get("kill_switch"):
+        # Existence fact only — the operator can halt at any time. No path, no state.
+        out["kill_switch"] = {"operator_can_halt": True}
+
+    # --- failure-case breakers: withheld by default; render only if toggled on ---
+    if CONSTRAINT_DISCLOSURE.get("allocation_skew"):
+        ceiling = HARD_RULES["max_allocation_skew"]
+        out["allocation_skew"] = {
+            "ceiling_abs_skew": ceiling,
+            "headroom":         ceiling - abs(float(allocation_skew or 0.0)),
+        }
+    if CONSTRAINT_DISCLOSURE.get("daily_loss_limit"):
+        # Threshold only — live daily-PnL headroom would need a guardrails DB read;
+        # the threshold itself is the budget-relevant disclosure.
+        out["daily_loss_limit"] = {"floor_pct": HARD_RULES["daily_loss_limit_pct"]}
+
+    return out
+
+
 def build_world_state() -> dict:
     """Snapshot of all market/portfolio context for the cycle."""
     from grid.engine import GridEngine
@@ -594,7 +682,23 @@ def build_world_state() -> dict:
         "skew_delta_since_rebuild": _skew_delta_since_rebuild(),
         "trajectory":               get_trajectory_context(),
         "market_knowledge":         _get_latest_market_knowledge(),
-        "hard_rules":               HARD_RULES,
+        # Stage-4 item 2b: CURATED hard_rules — only the disclosed, non-breaker
+        # thresholds (buffer floors + engine spacing clamps). The two failure-case
+        # breakers (max_allocation_skew, daily_loss_limit_pct) and the kill-switch
+        # path (halt_file) are NOT dumped here — see CONSTRAINT_DISCLOSURE and
+        # world_state.constraints. The wholesale HARD_RULES dump is gone so a
+        # withheld breaker's value can never reach the council via this block.
+        "hard_rules":               {k: HARD_RULES[k] for k in _DISCLOSED_HARD_RULE_KEYS},
+        # Stage-4 item 2b: the curated 'work-within' constraint disclosure — buffer
+        # existence + CURRENT HEADROOM and the kill-switch existence fact, each gated
+        # by CONSTRAINT_DISCLOSURE. Declared as one opaque type:"dict" FIELDS entry,
+        # so the runtime drift validator blesses it without enumerating leaves and a
+        # disclosure toggle can add/remove inner keys without firing drift.
+        "constraints":              _build_constraint_disclosure(
+            inv.get("usd_held"),
+            portfolio_block.get("xrp_value_usd"),
+            portfolio_block.get("allocation_skew"),
+        ),
         # Derived portfolio metrics (xrp_value_usd, total_universe_usd,
         # xrp_pct_of_universe, allocation_skew). Single source of truth —
         # both the rule layer and Balthasar's persona read from here.
@@ -1623,6 +1727,11 @@ def _compose_config_fingerprint(cons: dict) -> tuple[str, dict]:
             "MAX_GRID_SPACING_PCT": MAX_GRID_SPACING_PCT,
             "GRID_LEVEL_FEE_PER_SIDE": GRID_LEVEL_FEE_PER_SIDE,
         },
+        # Stage-4 item 2b: which constraints are disclosed to the council and at what
+        # fidelity. Part of the behavioral config — flipping any toggle changes what
+        # the council sees, so it joins the hash and bumps config_version at the
+        # disclosure boundary (same pattern as veto_mode in 2a).
+        "constraint_disclosure": dict(CONSTRAINT_DISCLOSURE),
     }
     # Hash everything EXCEPT the nullable/aliased observed version. Canonical JSON
     # (sort_keys + default=str) so key ordering can never churn the hash.
