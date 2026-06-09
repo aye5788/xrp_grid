@@ -123,6 +123,11 @@ def main() -> int:
                 persona_warn_count += 1
             if not result["ok"]:
                 persona_ok = False
+        # Low-severity prose-token notes — bare snake_case tokens that resolve to
+        # no schema leaf (treated as prose, e.g. melchior.md's `current_price`).
+        # Surfaced for visibility; NEVER counted toward errors/warns or the exit.
+        for note in result.get("notes", []):
+            print(f"[NOTE] {agent_id} persona — {note['reason']}")
     _print_separator()
 
     # ----- Summary -----
