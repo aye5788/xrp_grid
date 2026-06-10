@@ -16,6 +16,9 @@ magi.log
 
 # Working clutter — never commit (added 2026-06-10)
 scratch/
+# Rollback snapshots stay on disk (CLAUDE.md references these paths) but are
+# untracked so the public repo / DeepWiki only sees the current system.
+archive/
 .claude/
 xrp_grid.cc.json
 xrp_grid.cc.json.gz

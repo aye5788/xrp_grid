@@ -1,4 +1,0 @@
-agent,corr_conv_pnl_6h,corr_sample_n,hit_rate,hit_rate_n,distinct_from_prior_rate,distinct_n,anchoring_score,anchoring_known_n
-casper,,11,0.20833333333333334,24,0.041666666666666664,24,0.0,1
-melchior,,11,0.5416666666666666,24,0.08333333333333333,24,1.0,1
-balthasar,,11,1.0,24,0.0,24,1.0,1

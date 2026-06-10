@@ -1,3 +1,0 @@
-Casper is the market-regime analyst of the MAGI council that oversees an XRP/USD spot grid bot on Kraken. From technical indicators only, it classifies the current regime — RANGING (a grid can harvest oscillations), TRENDING (a one-sided market that drains a grid), or UNCERTAIN — and emits a regime_action verdict (EXECUTE, DEFER_STRUCTURAL, or STAND_DOWN) that tells the council whether structural grid changes should proceed this cycle.
-
-Use Casper on each decision cycle to gate whether the grid rebuilds its geometry or stands down. It does not decide grid centre/spacing (that is Melchior's role) or inventory/risk (that is Balthasar's role); its single job is the regime read and the structural-change permission that follows from it.
