@@ -19,8 +19,184 @@
 > use Agent Studio / Memory Bank; it used ADK `LlmAgent`s with stateless
 > prompt-injection. Pre-migration originals archived in
 > `archive/pre_adk_migration_2026-05-31/` (+ git HEAD).
+>
+> **DIRECTION SHIFTED 2026-06-06 — this banner is the historical 2026-05-31 record.**
+> The decision layer is now a **hand-rolled orchestrator** (direct vendor-SDK calls +
+> owned SQLite state; NOT ADK, NOT CrewAI); the three seats are proven standalone but
+> not wired; the ADK `council.py` is unchanged/superseded. The STATE LEDGER directly
+> below is the authoritative current state.
 
-Last updated: 2026-05-31 (**ADK MIGRATION OF THE AGENT-CALL LAYER (code-complete,
+## STATE LEDGER — what is LIVE vs. BUILT vs. EXPERIMENTAL (read this first)
+
+> The one place that separates "live" from "experimental." A reader who only skims
+> this section should never mistake an offline experiment for the running system.
+> Verified against `systemctl` + `magi/council.py` on 2026-06-06. **If a later session
+> changes any of this, update THIS ledger first.** Self-contained on purpose (the
+> claude.ai reader has no shell to check `systemctl`).
+
+**🟢 LIVE / RUNNING RIGHT NOW** — `magi.service` (paper trading — see the dedicated
+🟢 MAGI RUNNING ON PAPER entry below), `magi-dashboard.service`, and the leftover tape
+warehouse timers:
+- `tape-collector.service` — **STOPPED + disabled 2026-06-09 (later)**, stood down for the
+  MAGI paper bring-up. It had collected Kraken XRP/USD 1-minute OHLC + trade tape + spread →
+  `tape/market_tape.db`; collection is paused, the DB/data are retained untouched. The three
+  timers below were left running.
+- `magi-dashboard.service` (active+enabled) — **REVERTED 2026-06-09 (later) back to the MAGI
+  dashboard** (council/grid view, reads `observer.db`; the tape-monitor shim it had been
+  serving was backed up to `dashboard.py.tape-shim.bak`). Same `:5000` + ethobs.uk tunnel +
+  Flask cookie auth — unchanged. **2026-06-09 (later still): GUTTED of Letta-era panels and
+  restarted** — LETTA AGENTS census, the Costs panel (LLM spend, DigitalOcean billing,
+  per-agent credit/runway; spend observability is Langfuse now), and EVAL HISTORY (+ the
+  `/evals/<agent>` route) are deleted (~540 lines). The P&L tile is **paper-scoped** in paper
+  mode and labeled "Paper P&L" (`/api/status → paper_mode:true`). A latent template bug died
+  with the gut: a stray `{% if eval_history.has_any_runs %}` had been wrapping the ENTIRE
+  analytics section (Shadow→Debate Log), which would have blanked those panels on any box
+  with no eval runs. **2026-06-10: TRIMMED 19→11 sections** — Shadow Grid Variants (+ "vs
+  Best Shadow" card), Council Evolution, COUNCIL LEVERS, AGENT REASONING, and the separate
+  Market section removed (Langfuse-redundant or obsolete iterations); added a **Council Log**
+  (last 20 cycles with trigger, positions, hard-rule tags, per-cycle Langfuse trace
+  deep-links) and a header **24h LLM call counter** (counts only the six named seat spans);
+  accuracy/attribution panels paper-scoped.
+- `warehouse-append.timer` (hourly), `tape-backup.timer` + `warehouse-backup.timer`
+  (daily → GCS) — feed/back up the `tape/history.db` warehouse. As of 2026-06-07 the
+  hourly append also writes a **`signals_1h`** snapshot (the dashboard's GRID
+  CONDITIONS metrics persisted as an hourly time series; this is where flow imbalance
+  gets captured going forward). The full ~9.5y history was backfilled 2026-06-07
+  (83,017 rows; see header summary above).
+- Mirror repo `aye5788/market-tape`; operational writeup in `tape/README.md`.
+
+**🟢 MAGI RUNNING ON PAPER — `magi.service` active + enabled since 2026-06-09 21:04 UTC.**
+The full chain runs on the gate-primary cadence: scheduler → observer (10-min polls, candle
+gap backfilled to current) → `council_v2` (on the daily 20:00 EST floor / 25h max-silence
+backstop / gate wakes) → hard rules → engine in PAPER mode. **No real Kraken orders** — the
+live toggle is disarmed (below) and the engine simulates fills against real prices into its
+own paper ledger. First startup was clean end-to-end: fund detection passed ($61.43 ≥ $50),
+scorer-built fresh grid (0.75% × 5 levels around 1.14087), paper anchor executed, startup
+council cycle completed (Casper TRENDING/STAND_DOWN, Melchior THESIS_HOLDS, Balthasar
+CLEAR/HOLD_GEOMETRY → MAINTAIN; trace_id + config fingerprint stamped), ZERO alerts, ZERO
+Letta traffic. Full record: Session 2026-06-09 (later still) below. (Historical: the clean
+LIVE shutdown was 2026-05-28; the 2026-06-08 hand-invoked decision-only `run_cycle` was the
+only new-stack cycle before this run.) **UPDATE 2026-06-10:** the gate wake-class set is
+**T14 / T2 / T11 / T16** with per-episode guards — T2 wakes once per breach episode (fixed
+the hourly-rewake bug), the NEW T16 drawdown trigger wakes once per 3%-wide drawdown rung
+(verified live same day). Decision quality is now scored onto each cycle's Langfuse trace
+(1h/6h/24h outcomes, council_changed/conviction_shift reiteration metrics, per-seat 72h
+accuracy) with a `trigger:<reason>` tag for slicing. See Session 2026-06-10 below.
+
+**Live toggle DISARMED 2026-06-09 (later) for the paper bring-up:** `.env` now has
+`MAGI_LIVE_CONFIRM=NO` and the `CONFIRM_LIVE` gate file was renamed to
+`CONFIRM_LIVE.disarmed.20260609`. The mode selector is `scheduler.py:79-80`
+(`_LIVE = os.environ.get("MAGI_LIVE_CONFIRM")=="YES"; engine = GridEngine(paper=not _LIVE)`),
+so with the toggle off, **`magi.service` runs PAPER, not live** — both levers were flipped
+(defense in depth; either alone forces paper). The kill-switch `HALT` file is absent.
+**UPDATE 2026-06-09 (later still): the "⚑ PAPER BRING-UP READINESS" blockers (BU-1/2/3) were
+ALL EXECUTED and `magi.service` was STARTED on paper** — the Letta config_validator is removed
+(no false pages), the cadence is gate-primary, and no live-path Letta call site remains
+(`LETTA_API_KEY` commented out; `agent_registry` UUIDs blanked). See the session entry below.
+
+**🟢 STAGE-3 ARBITER COUNCIL — BUILT + WIRED + COMMITTED, integration-verified, but NOT
+running live** (2026-06-08, commit `c47e36a`). The **decision layer is a HAND-ROLLED
+arbiter orchestrator**, `magi/council_v2.py` — direct vendor-SDK calls only (NOT CrewAI,
+NOT an ADK framework, NOT LiteLlm), a sequential six-call choreography
+(Casper→Melchior→Balthasar openings → Casper+Melchior rebuttal → Balthasar synthesis as
+arbiter). It is **wired into `run_cycle`** (replacing the ADK parallel-R0/R1 block) and was
+proven end-to-end through **one real `run_cycle`** (debate_records + magi_decisions writes,
+gate-event consume, Langfuse 6-generation trace, hard-rule RECENTRE path, no Kraken order —
+see the 2026-06-08 session entry). Seats (all DECIDED, full personas): Casper
+`gemini-2.5-flash`, Melchior `deepseek-v4-pro`, Balthasar `claude-sonnet-4-6`. **UPDATE
+2026-06-09 (later still): this IS running** — `magi.service` convenes it on the gate-primary
+schedule (see the 🟢 RUNNING entry above). (The 2026-05-31 ADK `council.py` exists but is
+unchanged and superseded for the `run_cycle` path.) See the COUNCIL LINEUP block in
+`CLAUDE.md`. **Stage 4 determinism-shrink is SUBSTANTIALLY DONE + committed (2026-06-09)** —
+item 1 config fingerprinting (`d75db3b`), item 2a council-veto-into-the-arbiter (`5e7f7aa`),
+item 2b constraint disclosure (`dd5b497`); only the skew-categorization question is open (the
+0.85 band is deliberately left in Balthasar's persona pending a paper A/B). **The per-agent
+SQLite Journal recall layer is BUILT + wired into `council_v2`** (committed + pushed
+`cebccb5`, 2026-06-09 — deterministic, config-version-filtered, prompt-injected).
+
+**🧪 EXPERIMENTAL / OFFLINE-ONLY** — proofs, probes, and decision-tests that *inform*
+decisions but **run nowhere** and are NOT part of the live or the built-and-shippable
+system:
+- Casper `adk optimize` persona-tuning scaffold (`optimize/casper/`) — offline smoke
+  run only. (This is the *only* per-agent tuning scaffold that exists. There is **no
+  Balthasar tuning scaffold/prompt** built.)
+- Casper forward-realized eval-labeler (`optimize/casper/forward_label.py`).
+- **Balthasar `drawdown_from_high_7d` decision-test** (2026-06-06, `/tmp` scratch) — a
+  **one-off offline A/B**, not a tuning scaffold and not wired. Finding: the signal is
+  real but thin (moved 3/20, net +2, zero false positives, all cited). Adopted as a
+  Balthasar **judgment input** (corrected persona); **NOT** a fitted `dd7d ≤ −X ⇒ PAUSE`
+  threshold (3 events ⇒ overfitting). The downtrend bleed it targets is a real risk.
+- DeepSeek v4-pro Melchior-seat probe (`magi/agents/melchior_deepseek.py`) — standalone
+  wrapper, proves viability, not wired.
+- `schema_for_tool` Gemini-400 hardening — a real code guard, verified offline.
+- **All of `04_EXPERIMENTAL_IDEAS.md`** — design directions (e.g. the council redesign
+  making Balthasar the *arbiter*; tiered awareness). NOT adopted, NOT built.
+
+**🔧 DECIDED but NOT WIRED** — locked, but no orchestrator wiring yet: all three seats
+(incl. Melchior → `deepseek-v4-pro`) await the hand-rolled orchestrator. (The
+`drawdown_from_high_7d` world_state field — the other item that sat here — was **WIRED
+2026-06-06 (later)**: `build_world_state()` now emits it with a matching `FIELDS` entry,
+closing the persona/world_state inconsistency that was the HARD PREREQUISITE; `02` item
+0★ is now DONE. See Session 2026-06-06 (later) below.)
+
+**⚫ DEAD / HISTORICAL — do NOT treat as current:** the entire **Letta** layer (Cloud
+agents, memory blocks, self_model, memory rotation, freshness validator, provisioning);
+old models Casper `gemini-3-flash-preview` / Melchior `gpt-4o` (being replaced) /
+Balthasar `claude-haiku-4-5`; self-hosted Letta; the renewal-decision READINESS gate;
+ETH futures; the Supervisor concept. Older session entries below describe these as if
+running — they are the historical record, not current state.
+
+---
+
+Last updated: 2026-06-09 (later still) (**PAPER BRING-UP EXECUTED — BU-1/2/3 done,
+Letta fully decoupled, gate-primary cadence wired, dashboard gutted + paper-scoped P&L,
+fresh paper book, `magi.service` STARTED on paper and verified clean.** See the Session
+2026-06-09 (later still) entry. Prior: 2026-06-07 — **TAPE: DOWNTREND-BLEED CHART + `signals_1h` HISTORY
+(live-stack work, separate from MAGI).** Added a directional *drawdown-from-high*
+line to the dashboard's GRID CONDITIONS — the counterpart to the direction-blind
+regime efficiency-ratio (a clean rally and a clean crash both read "trending"; only
+the crash bleeds the grid). Uses MAGI's exact `drawdown_from_high` definition;
+threshold = 2 grid steps (−3%), anchored to geometry not fitted; context-only, not a
+verdict driver. SEPARATELY, the GRID CONDITIONS signals — which had been computed live
+and stored **nowhere** — are now persisted as an hourly **`signals_1h`** time series in
+`tape/history.db`: one row/hour *as of* that hour (verdict + each metric's value+status),
+a deterministic replay of `conditions.report()` so it can never disagree with the
+dashboard. `python -m tape.warehouse build-signals` backfills the full ~9.5y (~83k rows,
+idempotent); the hourly `warehouse-append` writes new rows going forward (rides the
+existing timer — no new service). Provenance `source` col (backfill=1/live=0); **flow
+imbalance is NULL pre-2026-06-02** (no historical trade tape), the other four signals
+reconstruct fully. **Backfill DONE 2026-06-07: 83,017 hourly rows (2016-12-17 → now),
+0 null verdicts; flow populated for 122 rows from 2026-06-02.** Code committed + mirrored
+to `aye5788/market-tape`. MAGI trading remains STOPPED — unchanged by this work. Prior:
+2026-06-06 — **BALTHASAR + DRAWDOWN DECISION-TEST (OFFLINE)** — a
+240-call `claude-sonnet-4-6` sweep over 60 reconstructed, forward-labeled stressed
+XRP world_states asked whether a `drawdown_from_high_7d` input moves Balthasar's
+verdict the cautious way on downtrends. Finding: the signal is **inert under the
+live persona** (which says "there is no drawdown field / never reason about price
+direction"); a **corrected** persona granting narrow price-erosion authority moves
+**3/20 TRUE_BLEED** scenarios more-cautious — all citing the factor, incl. one
+`CLEAR/PROCEED → PAUSE_LONGS/HOLD_GEOMETRY` — with **zero** movement on
+RECOVERY/BENIGN. Directionally right but thin; the corrected persona is necessary
+(signal alone is inert), and drawdown is adopted as a Balthasar **judgment input he
+weighs and cites — NOT a fitted `dd7d ≤ −X ⇒ PAUSE` threshold** (3 events ⇒ overfitting;
+grid params stay anchored to fees/spacing). The downtrend bleed remains a real risk.
+The validated corrected language was then **PROMOTED
+to the live `balthasar.md`** (real repo edit, persona text only, backed up); the
+`drawdown_from_high_7d` world_state field was then **WIRED later the same day** (see
+Session 2026-06-06 (later) below — `02` item 0★ now DONE; validate_schema 0/0 PASS at
+102 paths). Services still stopped; test cost $2.49. ALSO 2026-06-06: **`schema_for_tool` HARDENED**
+against the Gemini `additionalProperties` 400 with a central recursive
+`strip_additional_properties` pass — the guard is now structural, no longer
+dependent on any schema's `extra=` (verified live; RegimeVote native path
+re-confirmed clean). See "Session 2026-06-06" immediately below and
+`04_EXPERIMENTAL_IDEAS.md` Session 2026-06-06. Prior: 2026-06-01
+(**ADK + LiteLlm INSTALLED (two-venv split: core in main
+venv for the live council, `[eval]` stack isolated in `optimize/.venv`); CASPER
+GEMINI-400 BUG FOUND + FIXED (`RegimeVote` `extra="forbid"`→`"ignore"`; would have
+400'd on first live R0 call); `optimize/casper/` adk-optimize tuning scaffold built
++ offline smoke run (7/8, $0, exit 0)** — all inference offline, no live cycle,
+services still stopped. See "Session 2026-06-01" immediately below. Prior:
+2026-05-31 — **ADK MIGRATION OF THE AGENT-CALL LAYER (code-complete,
 not run live)** — `magi/council.py` rewritten off Letta onto Google ADK; three
 native ADK `LlmAgent`s in `magi/agents/` (Gemini native / GPT-4o + Claude via
 LiteLlm), STATELESS per cycle; Melchior redesigned to an economic verdict
@@ -88,10 +264,898 @@ credit-burn guard shipped** — see Session 2026-05-25 below. Prior: 2026-05-24 
 confirmed preserved. See Session 2026-05-24 below. Prior: 2026-05-23 —
 **BOT IS LIVE** — flipped paper→live, live order + fill-reconcile path shipped, fee constants corrected to tier-0 0.25%/0.40%, dashboard auth moved to Flask cookie, renewal READINESS panel removed — see Session 2026-05-23 below. Prior: 2026-05-22 — council restructured to R1-always-fires + two new structural vote fields the engine reads; gate layer with calibrated triggers + Kraken WebSocket v2 substrate shipped; agent state wiped + recreated; freshness validator + retry + warn-alert shipped. See "Session 2026-05-22" entries below).
 
+## Session 2026-06-10 — Paper-run day 1: T2 hourly-rewake bug FIXED (episode guard), NEW T16 drawdown-rung wake trigger (verified live), dashboard trimmed 19→11, Langfuse promoted to the decision-quality surface (outcome/reiteration/seat-accuracy scores + trigger tags + custom dashboards)
+
+**One-paragraph summary.** First full day of the paper run. The overnight check was
+healthy (paper P&L ≈ −$0.96 in a drifting-down tape; one hard-rule RECENTRE at 06:02
+when the buy side emptied) but exposed a real bug: **T2 was level-triggered, so a
+standing skew breach re-woke the paid council every hour** (04:00/05:01/06:02, three
+cycles for one unchanged question — the 60-min throttle was the only brake). Fixed
+with a **per-episode guard** and, on the operator's push that an unevaluated drawdown
+is wasted spend, a **new T16 drawdown-rung trigger** was built so a *deepening*
+downtrend convenes the council once per rung — it fired live the same afternoon and
+its guard correctly dropped the repeat event an hour later. The cluttered dashboard
+was trimmed 19→11 sections (Langfuse-redundant/obsolete panels deleted; a Council Log
+with per-cycle Langfuse deep-links added). Langfuse is now the **decision-quality**
+surface, not just cost/latency: every cycle's trace gets outcome scores as they
+mature, reiteration metrics answering "did this triggered call change anything?",
+per-seat 72h forward-realized accuracy, and a `trigger:<reason>` tag so all of it
+slices by convene reason in custom dashboards (built in the UI — Langfuse has no
+dashboards API). Early signal worth watching: **9 of the first 10 scored cycles were
+council reiterations, including all four gate wakes.** All code changes UNCOMMITTED
+in the working tree (operator pushes).
+
+- **T2 episode guard (`scheduler.py`).** Gate *detection* stays level-based — a
+  standing breach keeps appearing in gate events, which is correct observability —
+  but the *wake* decision now dedupes per breach episode:
+  `_t2_episode_already_answered()` looks back 48h for a consumed T2 event of the
+  same direction and band (1e-4 relative tolerance) already answered by a council
+  cycle; if found, the event is consumed with `wake_episode_answered` instead of
+  waking. One wake per episode; a NEW breach (direction flip or band change) still
+  wakes. The dwell path routes through the same guard. Verified live: no T2 re-wakes
+  after deploy with the skew breach still standing.
+- **T16 drawdown-rung wake trigger (`magi/gate.py` + `scheduler.py`) — NEW, the
+  gate-coverage gap closed.** Context: Balthasar *receives* `drawdown_from_high_7d`
+  but nothing *convened* the council on a deepening drawdown — between the daily
+  floor and a skew/degeneracy breach, a slow bleed could run for hours unevaluated.
+  The operator explicitly rejected letting that ride ("wasted spend when we could
+  have been evaluating it"). `t16_drawdown_rung()` computes drawdown from the 7d
+  1h-candle high and bands it into rungs anchored to **grid geometry, not fitted
+  thresholds** (per the standing anti-datamining doctrine): band width =
+  2 × n_pairs × spacing = 3.0% on the current 5-level/0.75% grid; rung =
+  floor(drawdown/band). Rung ≥ 1 fires; wake-class with the standard 15-min dwell;
+  `_t16_rung_already_answered()` (7d lookback) gives **one wake per same-or-deeper
+  rung** — only a *deepening* drawdown re-convenes. Verified live end-to-end:
+  fired 13:42 UTC at rung 3 (−10.4% from the $1.247 7d high), council answered
+  MAINTAIN/CLEAR, and the 14:43 repeat event was dropped "rung 3 already answered."
+  `world_state_schema.py` usage note updated: T16 keys off the field for CONVENING;
+  Balthasar's vote stays judgment-based (convening and voting are separate concerns
+  — the persona was deliberately NOT edited).
+- **Dashboard trimmed 19→11 sections (`dashboard.py`; snapshot
+  `dashboard.py.bak.20260610`).** Removed as Langfuse-redundant or
+  obsolete-iteration: COUNCIL LEVERS chips, AGENT REASONING expander, the separate
+  Market section (price/vol-regime/VWAP folded into GRID STATUS), Shadow Grid
+  Variants panel + "vs Best Shadow" P&L card, Council Evolution, the learning
+  buttons, and their routes/helpers. Added: **Council Log** (last 20 cycles —
+  trigger, seat positions, debate flag, hard-rule tags, fills_6h, and a `trace→`
+  deep-link per cycle into Langfuse via `LANGFUSE_PROJECT_ID` in `.env`) and a
+  header **24h LLM call counter** (counts ONLY the six named seat spans via a
+  paginated Langfuse observations sweep, 60s cache, DB fallback — raw GENERATION
+  counts overstate ~1.7× from auto-instrumented inner SDK spans). Agent accuracy +
+  attribution panels re-scoped to the paper run (cutoff =
+  `system_state['paper_run_started_utc']`, fractional days).
+- **Langfuse decision-quality scores (`observer.py`, `magi/agents/tracing.py`,
+  `magi/council_v2.py`, `magi/orchestrator.py`, `database.py`).** Four layers, all
+  fire-and-forget (a Langfuse outage never touches the trading path):
+  1. **Outcome scores** — the existing 1h/6h/24h outcome backfill now mirrors each
+     window onto the cycle's trace (`fills_*`, `pnl_*`, `unrealized_pnl_6h/24h`,
+     `grid_alive_6h`) via `tracing.push_trace_scores()` (REST, since the trace is
+     hours closed).
+  2. **Reiteration metrics** (the operator's gate-evaluation question: do triggered
+     calls produce changed judgment, or rubber-stamp the prior one?) — pushed with
+     the 1h window: `council_changed` (any SEAT position moved vs the immediately
+     prior cycle — the anchoring metric), `judgment_changed` (also counts
+     rule-forced final-action changes; kept separate so a hard-rule RECENTRE isn't
+     mistaken for the council changing its mind), `conviction_shift` (mean
+     |Δconviction| across the three seats), `trigger_class` (categorical),
+     `hard_rule_overridden` (boolean).
+  3. **Per-seat 72h accuracy** — `observer.backfill_seat_accuracy_scores()` pushes
+     `casper_correct`/`melchior_correct`/`balthasar_correct` BOOLEANs once a cycle
+     is ≥72h old, grading delegated to the same `database._grade_*_row` functions
+     the dashboard panel uses (single source of truth); new
+     `debate_records.seat_scores_pushed` column marks completion; 5 cycles/pass;
+     transient grades (`not_matured_72h`/`missing_outcome`) retry next pass. First
+     scores land ~2026-06-12 (72h after the paper start).
+  4. **Trigger on the trace** — `run_council()` now takes `trigger` (orchestrator
+     passes it through); the trace gets `trigger`/`gate_triggered` metadata AND a
+     `trigger:<reason>` TAG via `tracing.set_trace_tags()` (ingestion-API merge).
+     Tags matter because the Langfuse metrics engine can group scores ONLY by
+     trace tags — not by metadata, not by another score. All 11 traced cycles
+     back-tagged + back-scored.
+  Also: DeepSeek price entry added to the Langfuse model registry ($0.435/$0.87
+  per M tokens, flat prices — the API rejects tiered maps), ending Melchior's
+  $0.00 cost rows (~$0.0036/cycle, ~4% of cycle cost; Sonnet/Balthasar is ~85%).
+  **Gotchas learned:** the scores REST endpoint rate-limits hard (~30 rapid POSTs
+  → 429s silently dropped by fire-and-forget; bulk pushes must throttle ~1.5s),
+  score/tag reads are eventually consistent (minutes), and whether after-the-fact
+  tags ever join *pre-existing* scores in the metrics views was still unconfirmed
+  at session end — new cycles are correct-by-construction (tag at trace open,
+  scores arrive ≥1h later).
+- **Langfuse custom dashboards (UI-built).** No dashboards API exists (404 +
+  open feature request) and the native Langfuse MCP server (probed via JSON-RPC:
+  prompts/observations/scores/metrics tools) has no dashboard tools either — but
+  its `queryMetrics` validated the widget queries. Operator is building a "MAGI
+  Council" dashboard from delivered recipes; the headline widget is **avg
+  `council_changed` (Scores-numeric view, filter Score Name = council_changed)
+  broken down by trace tags** — a `trigger:gate_wake:*` bar at ~0 means gate wakes
+  reiterate (triggers too loose, or anchoring). Companions: conviction_shift by
+  trigger, call volume by `trigger_class`, hard_rule_overridden rate, pnl_6h by
+  trigger, seat accuracy once 72h data lands.
+- **Early reiteration read (10 scored cycles): avg `council_changed` = 0.1.** All
+  four gate wakes (3× the T2 bug, 1× T16) and all startup/scheduled cycles
+  reiterated; the only changed cycle was a manual one. Too early to separate
+  anchoring from correctly-stable judgment in a quiet drift — this is exactly what
+  the dashboard now tracks.
+- **`gate_ws_down` alert noise fixed (`magi/gate_monitor.py`).** Transient WS
+  reconnects were writing a warn row each flap (5+ visible). Now: `disconnected`
+  still alerts critical; `reconnecting` warns only when `reconnect_count_1h ≥ 6`
+  AND ≥1h since the last flap alert; on recovery to `connected`, open
+  `gate_ws_down` alerts auto-resolve (`resolved=1` + timestamp).
+- **Day-1 call accounting** (the "is it hourly?" question answered): 8 cycles on
+  2026-06-10 ≈ $0.72 — 1 organic daily-floor call (00:00 UTC), 3 from the T2 bug
+  (now fixed), 3 startup cycles from this session's deploy restarts, 1 organic
+  T16 wake. Steady-state expectation: 1 scheduled/day + episodic per-episode gate
+  wakes. The dashboard call counter and the Langfuse trigger_class widget are the
+  monitors.
+- **Files touched** (all uncommitted): `dashboard.py`, `scheduler.py`,
+  `magi/gate.py`, `magi/gate_monitor.py`, `magi/council_v2.py`,
+  `magi/orchestrator.py`, `magi/agents/tracing.py`, `observer.py`, `database.py`
+  (docstring + `seat_scores_pushed` ALTER), `magi/world_state_schema.py`, `.env`
+  (`LANGFUSE_PROJECT_ID`). Snapshots: `dashboard.py.bak.20260610`,
+  `magi/agents/personas/balthasar.md.bak.20260610` (taken, persona NOT edited).
+
+## Session 2026-06-09 (later still) — PAPER BRING-UP EXECUTED: BU-1/2/3 done, dashboard gutted + paper P&L scope, fresh paper book, `magi.service` STARTED on paper (verified clean)
+
+**One-paragraph summary.** Executed all three "⚑ PAPER BRING-UP READINESS" blockers
+(BU-1 config-validator removal, BU-2 gate-primary cadence rewiring, BU-3 full Letta
+decoupling incl. the dashboard gut), added a **paper-scoped P&L** so the validation run
+is measurable, **reset the paper book fresh**, then **started `magi.service` on paper**
+(21:04 UTC) and monitored the startup — clean end-to-end, zero alerts, zero Letta
+traffic. All code changes are in the WORKING TREE, **uncommitted** (operator reviews/
+commits). `magi-dashboard.service` was restarted onto the gutted code.
+
+**1 — BU-1 (config validator).** Both `alert_on_config_drift()` hooks removed from
+`run_magi_cycle` (they made live Letta `agents.retrieve()` calls against dead UUIDs →
+3 false `config_drift` criticals + phone pages per cycle). `magi/config_validator.py`
+→ `archive/letta_decoupling_2026-06-09/`. Its audit purpose is superseded by the
+`config_version` fingerprint (`d75db3b`) and the seat model handles being constants in
+the seat-callers.
+
+**2 — BU-2 (cadence = gate-primary, clock backstop).** `MAGI_HOURS_EST=[0,4,8,12,16,20]`
+DELETED. New: `MAGI_DAILY_HOUR_EST=20` (one scheduled call per EST day in the 20:00
+hour — the end-of-day assessment, grid or no grid; dedupe is by DATE, immune to the
+2026-05-18 re-fire bug class) + `MAGI_MAX_SILENCE_HOURS=25` (forces a cycle if none ran
+in 25h, e.g. service down across the daily slot; `trigger='backstop_silence'`). Gate
+wakes (T14/T2/T11, 60-min throttle, 15-min dwell, non-trading suppression) are the only
+other path and are UNCHANGED. Startup cycle + 30-min debounce kept (and a debounce-skip
+now seeds the throttle baseline from the DB instead of leaving it None). Restart dedupe
+reads the last `trigger='scheduled'` `debate_records` row (suppresses today's floor call
+only if one ran at/after 20:00 EST today). `dashboard.py:_next_magi_eta` now mirrors the
+single daily hour. There is NO catch-up mechanism: missed days are not replayed
+(verified before start: zero unconsumed gate events; bounded day-one = startup + daily
+floor + genuine wakes only).
+
+**3 — BU-3 (Letta decoupling, live path).** (a) `sweep_letta_steps_for_failures` (114
+lines) + its 30-min loop wiring + `LETTA_STEPS_SWEEP_INTERVAL_MIN` deleted — seat
+failures are covered by `council_v2` safe-hold + the SAFE_DEFAULTS degradation rule.
+(b) `observer._record_outcome_to_block` + `_get_letta_client` deleted (the
+`recent_outcomes` Letta block no stateless seat reads); the DB `update_debate_outcomes`
+backfill is untouched. (c) Memory-rotation hook fully unwired (per-cycle counter +
+`maybe_rotate` + startup log + `ROTATION_*`/`SELF_MODEL_CHAR_CAP`/`MAX_NEW_PATTERNS`
+config constants); `magi/memory_lifecycle.py` archived — it constructed a Letta client
+at import and would have ERROR'd every cycle once the key vanished. (d) Dashboard gut
+(~540 lines): LETTA AGENTS census (was making live Letta calls on every render), Costs
+panel (incl. `get_do_billing` and `magi/costs.py`, archived — spend is Langfuse's job),
+EVAL HISTORY + `/evals/<agent>` route. Latent bug killed: a stray Jinja
+`{% if eval_history.has_any_runs %}` wrapped the entire analytics section. (e) Root
+neutralized: `agent_registry.letta_agent_id` blanked for all three agents AND the stale
+`model` column corrected to the rebuild lineup (`gemini-2.5-flash`/`deepseek-v4-pro`/
+`claude-sonnet-4-6` — the AGENT HEALTH chips now show truth); `LETTA_API_KEY` commented
+out in `.env` (value preserved for manual snapshot recovery). Verified: whole live chain
+imports with the key gone; `letta_client` never enters `sys.modules`.
+
+**4 — Paper P&L scope (so the run is measurable).** `grid/pnl.py:get_pnl_snapshot`
+gained `paper=True`: scope = NON-txid (hex) order_ids at/after the new
+`system_state['paper_run_started_utc']` cutoff (excludes May paper-era fills); all other
+mechanics (FIFO, equity baseline anchored at first in-scope fill) identical to live.
+Dashboard passes `paper=engine.paper`; tile renders "Paper P&L". Live scope verified
+unchanged (23 fills, −$6.95 total, baseline $68.44).
+
+**5 — Fresh paper book.** The 3 restored 'open' `grid_orders` rows were STALE LIVE-era
+orders (real Kraken txids from 2026-05-28 16:02, cancelled on Kraken at shutdown but
+never marked in the DB; book centred 1.31 vs market ~1.14). Left alone they would have
+(a) simulate-filled ~12% above market, polluting the run, and (b) been counted as LIVE
+fills by the txid discriminator, corrupting the live PnL record. Marked
+`status='cancelled'`; `paper_inventory` rebased to the REAL Kraken balances
+(30.0214 XRP + $27.18 ≈ $61.5) via `engine.update_inventory`. Engine restore verified:
+0 open orders, fresh ledger.
+
+**6 — Bring-up (21:04 UTC) — clean.** `systemctl enable --now magi.service` (and
+`magi-dashboard` restarted first; login 200). Startup sequence observed via journal
+monitor: GateMonitor on Kraken WS v2 → fund detection passed ($61.43 ≥ $50) → 12-day
+candle gap backfilled → first-boot scorer geometry (rank-1: spacing 0.75%, 5 levels,
+centre 1.14087) → paper anchor SELL 1.65 @ 1.14087 (taker fee $0.0075; ledger
+28.37 XRP / $29.05) → 5/5 resting paper orders (buys 1.12376/1.13231, sells
+1.14943/1.15798/1.16654) → startup council cycle `cyc_1781039097`: Casper
+TRENDING/STAND_DOWN, Melchior THESIS_HOLDS, Balthasar CLEAR/HOLD_GEOMETRY → synthesis
+THESIS_HOLDS → MAINTAIN, no hard-rule overrides, Langfuse `trace_id` + config
+fingerprint `d66f7ccd…` stamped → scheduler log confirms "council cadence gate-primary
+(daily floor at 20:00 EST, max-silence backstop 25h)". `magi_alerts` since start: NONE.
+`/api/pnl` (paper scope): fill_count 1 (the anchor), baseline equity $61.42, total
++$0.03 unrealized. One benign `ws_health insert failed: database is locked` WARNING
+from the gate monitor (wrapped, non-fatal; watch if it recurs under load).
+
+**Open after this session:** commit the working tree (operator); the skew-categorization
+paper A/B; per-seat world_state trimming (needs Langfuse token data); Langfuse SCORES
+mirror; watch the first gate-driven convene + the 20:00 EST daily floor fire.
+
+## Session 2026-06-09 (later) — Journal recall layer committed+pushed; tape stood down + MAGI dashboard restored + live toggle DISARMED for a paper bring-up; read-only Letta-decoupling/cadence audit
+
+**One-paragraph summary.** Continued the Stage-4 work and then pivoted to **preparing a
+paper bring-up of `magi.service`**. Three blocks of work: (1) committed + **pushed** the
+per-agent **Journal recall layer** plus two coupled cleanups; (2) **stood the tape stack
+down and reverted the dashboard to MAGI**, then **disarmed the live-trading toggle** so a
+start runs PAPER; (3) ran a **read-only audit** of the live bring-up import chain and wrote
+the findings up as the new **"⚑ PAPER BRING-UP READINESS"** task block at the top of
+`02_NEXT_BUILD_TASKS.md`. **No vendor calls beyond the earlier recall-proof, no Kraken
+orders, `magi.service` never started.**
+
+**1 — Journal recall layer + coupled cleanups (committed `cebccb5`, PUSHED).** The
+deterministic, config-version-filtered, prompt-injected per-agent recall (`database.py:
+get_agent_recall(agent_id, config_version, as_of=None)`) wired into `council_v2`, with three
+coupled changes: (A) the config-version **fingerprint is built from the CONFIGURED setup, not
+the served model** (operator decision — served-vs-configured divergence is recorded in a
+`served_models` snapshot field but excluded from the hash, so a silent vendor downgrade shows
+up for health without forking history); (B) **layering fix** — `get_agent_recall` now takes
+`config_version` as a parameter so `database.py` imports neither `council_v2` nor
+`orchestrator` (a SELECT no longer drags in the vendor-SDK import graph); (C) `config_version`
++ readable snapshot stamped onto the **Langfuse** root-span metadata so traces self-partition
+by config. A real six-call convene earlier this session proved the recall blocks reach each
+seat's prompt. This is the **Stage-4 per-agent Journal** that was the listed NEXT BUILD.
+Operator pushed code this session (override of the usual "operator pushes manually").
+
+**2 — Paper bring-up prep (services).** Stood down `tape-collector.service` (stopped +
+disabled; `market_tape.db`/`history.db` retained; the warehouse/backup timers left running).
+Restored the MAGI dashboard: backed up the tape-monitor shim to `dashboard.py.tape-shim.bak`,
+copied `archive/magi_dashboard_2026-06-02/dashboard.py` back to `dashboard.py`, restarted
+`magi-dashboard.service` — verified it serves the MAGI app and login works (same `:5000` +
+ethobs.uk tunnel + Flask cookie auth, unchanged). **Disarmed the live toggle** (see the STATE
+LEDGER 🔴 update): `.env` `MAGI_LIVE_CONFIRM=NO` + `CONFIRM_LIVE` → `CONFIRM_LIVE.disarmed.20260609`;
+restarted the dashboard, which now reports `paper_mode:true`. The mode selector is the env var
+(`scheduler.py:79-80`); both levers were flipped (defense in depth). The dashboard process
+reads the same toggle, which is why it had logged "LIVE MODE ACTIVE" before the disarm and
+reports paper after.
+
+**3 — Read-only audit: what a paper start actually imports + runs, and what's Letta-rotted.**
+Established the live chain — `scheduler → observer.poll_cycle + orchestrator.run_cycle →
+council_v2.run_council` — and confirmed **nothing in it imports the old `council.py`**. The
+real Letta exposure is live because `LETTA_API_KEY` is set, `letta_client` 1.11.0 is
+installed, and `agent_registry` still holds the three dead Letta agent UUIDs, so stale call
+sites actually reach Letta Cloud. **None hard-crash** (all wrapped), but three classes
+MISbehave, now written as tasks BU-1/BU-2/BU-3 in the `02` block:
+- **BU-1 (highest):** `config_validator.alert_on_config_drift()` runs 2×/cycle in
+  `run_magi_cycle` (scheduler.py:322,385), makes live `client.agents.retrieve()` per agent,
+  and on the resulting `letta_error` fires `insert_alert(severity="critical")` →
+  **phone push** — i.e. it would **page the operator with false `config_drift` criticals
+  every cycle** on a paper start. Remove it from the cycle or repoint it at the stateless
+  seat config.
+- **BU-2 (cadence):** the scheduler still fires the paid council on the Letta-era 4h clock
+  (`MAGI_HOURS_EST=[0,4,8,12,16,20]`, comment "~$13/mo to fit $20 Letta plan") + a forced
+  startup cycle, with the gate only adding off-schedule wakes — the **inverse** of the
+  rebuild's gate-primary design. As-is a paper run over-fires ~6 council cycles/day. The
+  gate's own detection (`magi/gate.py` T1–T15) is current and Letta-clean; the fix is the
+  scheduler wiring relationship (clock → backstop, `magi_gate_events` → primary) + retuning
+  `WAKE_MIN_INTERVAL_MIN`.
+- **BU-3 (cleanup):** remaining wrapped-but-live Letta touch points on the paper path —
+  `sweep_letta_steps_for_failures` (every 30 min), `observer._record_outcome_to_block`
+  (6h outcome → dead Letta block), `memory_lifecycle` (module-import Letta client + rotation),
+  and the dashboard "LETTA AGENTS" census (live Letta calls every render, **right now**).
+  Common root + single lever: null `agent_registry.letta_agent_id` and/or drop `LETTA_API_KEY`.
+- **Verified CLEAN (not blockers, don't re-derive):** the `RECENTRE` action vocabulary is
+  CURRENT (orchestrator maps Melchior `RECONFIGURE→RECENTRE` at orchestrator.py:897; engine
+  consumes `RECENTRE` at engine.py:1191,1238 — the only stale `melchior_action=='RECENTRE'`
+  readers are non-live `extract_test_cases.py`/`analysis/*`); `emit_human_alert` is no longer
+  imported by the orchestrator; `council.py` is ADK-migrated and imported by nothing.
+
+**State at session end:** `magi.service` stopped + disabled (would run PAPER if started);
+`magi-dashboard.service` active, serving MAGI, paper; `tape-collector.service` stopped;
+warehouse/backup timers running. The paper bring-up is the operator's call AFTER the `02`
+BU-1/BU-2/BU-3 tasks land.
+
+## Session 2026-06-09 — Stage 4 determinism-shrink committed (items 1/2a/2b) + two done-but-uncommitted changesets finally committed; OFFLINE; services stayed stopped
+
+**Stage 4 `enforce_hard_rules` determinism-shrink is now SUBSTANTIALLY DONE and committed
+(local only — operator pushes code manually). Only the skew-categorization question is open.**
+All work this session was ZERO-cost / offline — no live council, no vendor calls, no Kraken
+order; `magi.service` stayed inactive+disabled; the tape stack was untouched.
+
+- **Item 1 — config-version fingerprinting. Committed `d75db3b`** (earlier session; recorded
+  here for the Stage-4 ledger). Every `debate_records` row is stamped `config_version` (short
+  hash of the behaviorally-relevant config: per-seat persona hashes + served models + veto mode +
+  HARD_RULES floors + spacing/fee constants) and `config_snapshot` (readable JSON). Additive —
+  no decision or seat-facing byte changed. This is the lever that makes the open skew A/B (below)
+  cleanly separable: a band-present arm and a band-absent arm fingerprint differently.
+  - **The item-1 verification wrote ONE test row to `debate_records`: `id 270` /
+    `cyc_1780949300` (2026-06-08T20:08:20, carries a `config_version`, `override_justification`
+    NULL).** It is a TEST ARTIFACT, not a real council decision — do not treat it as a cycle in
+    any accuracy/outcome analysis. Left in place (not deleted) by operator direction.
+
+- **Item 2a — council veto moved from a post-hoc hard rule INTO the arbiter's vote. Committed
+  `5e7f7aa`.** Removed rule 0d (the post-council `grid_action→MAINTAIN` coercion), its
+  `_RULE_0D_*` constants, `_has_rule0d_*` helpers, Invariant 1 (+ its icontract snapshots), and
+  the engine-level veto cross-check. Balthasar's synthesis `geometry_veto` now CARRIES the
+  structural veto — HOLD_GEOMETRY / RISK_BLOCK over a RECONFIGURE is downgraded to THESIS_HOLDS
+  in-council (grid holds), and PROCEED over a live Casper STAND_DOWN / DEFER_STRUCTURAL requires a
+  new optional `override_justification` (RiskVote carrier + `debate_records` TEXT column), else the
+  objection stands (conservative fallback — safety never loosens). `veto_mode` fingerprint flipped
+  `hard_rule_0d → in_debate`. Invariant 2 (override-tag integrity) survives with a trimmed
+  canonical tag set. The now-inert `[REGIME_STANDDOWN]` wake suppressor was retired from
+  `scheduler.py` (its `geometry_veto='RISK_BLOCK'` column-based sibling still governs wake
+  cadence). Verified offline: the rule-0d coercion is gone (flipping regime_action/geometry_veto
+  no longer moves `grid_action`), survival floors still HALT, no dangling rule-0d references.
+
+- **Item 2b — council constraint DISCLOSURE. Committed `dd5b497`.** `world_state` now discloses
+  the "work-within" constraints as existence + CURRENT HEADROOM (USD/XRP buffer distance-to-floor)
+  plus a kill-switch existence fact, in a new opaque `world_state.constraints` block gated
+  per-constraint by `CONSTRAINT_DISCLOSURE` (an orchestrator module global; breakers default OFF;
+  loud budget-effect warning in the code). The two failure-case BREAKERS
+  (`daily_loss_limit_pct`, `max_allocation_skew`) and the `halt_file` path are WITHHELD —
+  redacted from the seat-facing `world_state`, dropped from `world_state_schema.py:FIELDS`, and
+  removed from Balthasar's SIGNALS hints **together** (the load-bearing three-surface redaction;
+  the runtime drift validator stays clean). `constraint_disclosure` joins the config fingerprint,
+  so flipping any toggle bumps `config_version`. Structural pauses (no-valid-geometry /
+  NO_PROFITABLE_GRID) were DROPPED from the disclosure set — they are council OUTCOMES (Melchior's
+  verdict / geometry injection), not pre-vote standing state with headroom. Verified offline:
+  breakers absent from the rendered JSON, no drift alert, toggle controls both visibility and
+  `config_version`.
+
+- **Two done-but-uncommitted changesets were FINALLY committed this session, split out from 2b
+  under honest messages (NOT bundled under the 2b message):**
+  - **`0623dd3` — Balthasar downtrend/capital-erosion persona correction** (authored 2026-06-05;
+    had lived uncommitted in the working tree). Replaces the "WHAT YOU DO NOT SEE" price-blind
+    framing with explicit ownership of long-only-grid capital risk (sustained downtrend bleed +
+    drawdown as a judgment input), and drops "Never reason about price direction." This is the
+    work CLAUDE.md §1 item 0★ references; it is now in git history, not just on disk.
+  - **`c84cdbd` — `validate_schema` repoint to the live `.md` personas + bare-token NOTE
+    downgrade** (authored 2026-06-07; had lived uncommitted). `PERSONA_DIR`/`load_persona` now
+    resolve `magi/agents/personas/*.md` (the files `council.py` actually loads) instead of the
+    dead Letta-era `magi/prompts/*_prompt.txt`; a bare non-resolving snake_case token is a NOTE,
+    not a blocking ERROR. **This CLOSES the standing "repoint validate_schema to live persona
+    paths" open item** (`02_NEXT_BUILD_TASKS.md` item 9). `validate_schema` now PASSes (0 ERROR,
+    17 WARN) against the LIVE personas — including a clean Balthasar after the 2b redaction.
+  - The three-commit order was `0623dd3` (X) → `c84cdbd` (Y) → `dd5b497` (2b). Two of the three
+    2b files (`balthasar.md`, `world_state_schema.py`) had intermixed pre-existing edits; the
+    split was reconstructed against a clean HEAD and each staged diff reviewed before committing,
+    so nothing was mislabeled and nothing was lost (working tree == pre-split state, verified).
+
+- **OPEN — skew categorization (the one piece of the determinism-shrink not settled).**
+  Allocation skew is currently treated as a WITHHELD breaker, but it is arguably a *work-within*
+  risk condition Balthasar should reason about concretely. **The 0.85 band was deliberately LEFT
+  in his persona** (his Step-2 bands operate on the disclosed `portfolio.allocation_skew`, not on
+  the withheld `max_allocation_skew` threshold) — do NOT change it until decided. Settle it with a
+  band-present vs band-absent **paper A/B** (definitive — item-1 fingerprinting now separates the
+  arms). See `02_NEXT_BUILD_TASKS.md` Stage-4 OPEN/DEFERRED list (also records the coupled
+  wake-type/`world_state`-trimming deferral and the carry-forward Langfuse SCORES mirror).
+
+**NEXT BUILD = the per-agent SQLite Journal recall layer** (`02` item 4) — the remaining Stage-4
+build; needs its own design pass. Determinism-shrink otherwise complete.
+
+## Session 2026-06-08 — Stage 3 arbiter council built + wired + INTEGRATION-VERIFIED through real `run_cycle`; committed (`c47e36a`); services stayed as-is
+
+The Stage-3 hand-rolled arbiter orchestrator is **built, wired into `run_cycle`, and
+integration-verified end-to-end through one real `run_cycle`** (six real vendor calls),
+then **committed to `xrp_grid` as `c47e36a`** (six files; NOT pushed — the operator pushes
+code manually). `magi.service` (the trading/council scheduler) stayed **inactive+disabled**
+throughout; the only running service is the unrelated market-tape `magi-dashboard.service`
+(it serves the tape monitor and shares no tables with the trading code — verified). No live
+trading happened: `run_cycle` is a **decision-only** path (it convenes the council, enforces
+hard rules, and writes the decision tables) — its one engine touch is
+`GridEngine(paper=True).get_current_price()`, a read-only price fetch — so **no Kraken order
+was placed** (confirmed: zero order-placement calls reachable in the path; no new
+`grid_orders` row; newest order row is still 2026-05-28).
+
+**What was built.** A new module `magi/council_v2.py` with one public entry
+`run_council(world_state, cycle_id) -> (round_0, round_1, cons)`, implementing the
+2026-06-04 redesign as a **sequential six-call choreography over the three proven
+seat-callers** (direct vendor SDKs only — NOT CrewAI, NOT ADK, NOT LiteLlm):
+- **Phase A (openings, sequential):** Casper (regime) → Melchior (grid econ, prompted
+  *orthogonally*: Casper's regime+regime_action passed as a GIVEN FACT, **label only** —
+  no Casper conviction/crux/evidence, to avoid anchoring) → Balthasar (opening risk read,
+  sees both full openings).
+- **Phase B (rebuttal, ALWAYS runs, Casper+Melchior only):** both rebut against a **frozen
+  snapshot of all three openings** (neither sees the other's rebuttal); hold REQUIRES a
+  crux stating why you hold against the strongest opposing point (no silent assent).
+- **Phase C (synthesis):** Balthasar sees the three openings + both rebuttals; his returned
+  `RiskVote` IS the final risk call. He is the **arbiter** and does NOT rebut.
+
+**Supporting changes this session:**
+- **Seat-callers** gained an optional `extra_context` param (appended as a trailing block
+  AFTER the world_state). `extra_context=None` is byte-identical to the proven standalone
+  path for **Casper and Melchior**; for **Balthasar** the request gains an Anthropic
+  **ephemeral (5-min TTL) prompt-cache breakpoint** on the stable prefix (persona +
+  world_state), so his synthesis call reuses the opening call's cached prefix — the input
+  *text* is unchanged so the vote is identical, only caching metadata/shape is added.
+  Melchior preserves the stable prefix for DeepSeek's *automatic* cache (no `cache_control`
+  code). Casper caching is deliberately OFF (see `02` Stage-3 notes).
+- **`database.py`:** `debate_records` gained `casper_r1_position` / `melchior_r1_position`
+  (CREATE TABLE + idempotent ALTERs) — each agent's POST-REBUTTAL structured label, so later
+  accuracy scoring reads the revised call, not the stale opening. **No `balthasar_r1_position`**
+  (he's the arbiter; his post-rebuttal call is `final_risk_action`).
+- **`magi/orchestrator.py`:** `run_cycle` now calls `load_dotenv()` once at the top, then
+  `round_0, round_1, cons = run_council(world_state, cycle_id)` in place of the ADK
+  parallel-R0 / conditional-R1 / `resolve_consensus` block. The dead Letta
+  `update_world_state()` push was removed. `_build_debate_record` was edited: it stamps
+  `trace_id` **from `cons`** (NOT `tracing.current_trace_id()` — that builder runs after the
+  trace context exits and would write NULL; `run_council` captures the id inside `trace_cycle`
+  and carries it on `cons`, which `enforce_hard_rules` preserves via `cons = dict(consensus)`),
+  writes the two `*_r1_position` columns from `round_1`, fixes the `r1_held` diff to use each
+  agent's PRIMARY label (verdict for Melchior, position for Casper), and writes Balthasar's R1
+  columns as **NULL** (arbiter never rebuts → `held=1` would be a false 100%-hold artifact).
+  `magi/council.py` is **unchanged** (left intact for any other importer; superseded for the
+  `run_cycle` path).
+- **Persona-load = hard stand-down (this session's small fix).** `run_council` loads
+  Melchior's persona once, inside the trace context, BEFORE any vendor call. If that load
+  fails it does NOT continue — it hard stands down (the same safe-hold cons as a vendor
+  failure, with `council_error="persona_load_failed:melchior:…"`), because Melchior's
+  seat-caller would otherwise silently fall back to a **thin default persona** (a 287-char
+  stub vs. the full 13.9 KB `melchior.md`). Casper and Balthasar are NOT special-cased: their
+  seat-callers resolve their full `casper.md` / `balthasar.md` via their own
+  `load_persona(...)` fallback, so a persona-load failure for them surfaces through the normal
+  per-seat fail-safe (stand-down). Net effect: a missing/empty persona file for ANY seat → the
+  council declines to convene that cycle, never runs on degraded instructions.
+
+**Five contract subtleties resolved during the build (operator-approved before writing):**
+(A) trace_id stamped from `cons`, not recomputed post-context; (B) `r1_held` diffs the
+per-agent primary key, since Melchior's R0 primary is `verdict` not `position` (and adding
+`position` to his R0 dict would have flipped the scheduler return shape via
+`_agent_view_action`); (C) Melchior **geometry follows the post-rebuttal verdict** —
+`round_0["melchior"]["geometry"]` is overwritten with the final geometry so a rebuttal
+flipping THESIS_HOLDS→RECONFIGURE builds to the right grid, while the `melchior_r0_position`
+column keeps the opening verdict; (D) Balthasar's `extra_context=None` request is NOT
+byte-identical (caching restructure) but the input text is — semantic check, not byte check;
+(E) Balthasar R1 columns NULL, not held=1.
+
+**Fail-safe.** Every seat call is wrapped. Any vendor error (missing key, balance exhaustion,
+API/validation error after the seat-caller's own retry) does NOT crash: the council STANDS
+DOWN to a safe hold — `grid_verdict=THESIS_HOLDS` (→ MAINTAIN), `risk_action=CLEAR`, permissive
+`regime_action=EXECUTE`/`geometry_veto=PROCEED` (no fabricated veto), `cons["council_error"]`
+set, and any seat we never got a vote from is filled with the SAFE_DEFAULTS degradation
+fingerprint (`conviction=0.0`, `crux="(no response)"`) so the existing council-degradation
+detector still trips on a sustained outage. The same stand-down covers a Melchior
+**persona-load** failure (see the persona bullet above). Verified two ways: a
+`ANTHROPIC_API_KEY`-blanked standalone run (Casper+Melchior ran, Balthasar's blanked key
+stood the council down to the safe-hold cons without raising), and a monkeypatched
+persona-load failure (stood down before any vendor call — the vendor seat-callers were never
+invoked — with `council_error="persona_load_failed:melchior:…"`).
+
+**Standalone verification (real output):** `py_compile` + import clean on all changed files;
+`PRAGMA table_info(debate_records)` shows the new columns; Casper/Melchior `extra_context=None`
+payloads byte-identical, Balthasar same input text; a live standalone `run_council` produced
+valid `round_0`/`round_1`/`cons` with a Langfuse trace of six seat generations (correct
+per-seat model attribution — Melchior labeled **deepseek**, not claude) and **cache-creation
+tokens on Balthasar's opening + cache-read tokens on his synthesis**.
+
+**Integration verification — one real `run_cycle` (the seam that matters), real output:**
+`run_cycle(trigger="manual", force=True)` returned its normal scheduler-shape dict without
+raising and wrote a new `debate_records` row (`cyc_1780930146`). The full persistence seam was
+confirmed: (1) all three R0 votes populated (Melchior carries a **verdict**, not an action);
+(2) `casper_r1_position` / `melchior_r1_position` written from the rebuttal (both agents HELD
+this cycle, so the post-rebuttal label equals the opening and `*_r1_held=1`; Balthasar's R1
+columns NULL as designed); (3) `trace_id` populated (carried on `cons`); (4) the
+`magi_decisions` legacy dual-write landed (id 436) and is consistent with the `debate_records`
+final actions; (5) the gate-event consume ran — it swept a **100-event backlog** that had
+accumulated since the last real cycle on 2026-05-28 (the period the council was offline),
+including one `fired=1` T13, leaving zero unconsumed; (6) the Langfuse trace
+(`council-cycle:cyc_1780930146`) shows the same six-generation shape as the standalone, now
+under a real cycle, with Balthasar **cache write 12,960 → cache read 12,960** on the synthesis
+call and DeepSeek auto-cache reads on Melchior. Notably the run **exercised the hard-rule
+override path for real**: the council's raw verdict was THESIS_HOLDS (Melchior held), but
+because the grid had not filled in 260.5 h the survival rule `[GRID_DEGENERATE]` forced
+`grid_action=RECENTRE`; since a THESIS_HOLDS verdict carries no geometry,
+`[GEOMETRY_INJECTED_FROM_SCORER]` injected the scorer's rank-1 geometry (5 levels, 0.75 %
+spacing) and recorded `geometry_source=scorer_fallback` — the exact council-says-hold /
+rule-forces-recentre / scorer-supplies-geometry interaction, now proven through the live
+orchestrator.
+
+**Committed.** The six code files (`magi/council_v2.py` new; `magi/orchestrator.py`,
+`database.py`, and the three seat-callers modified) were committed as **`c47e36a`** —
+"Stage 3: hand-rolled arbiter council (six-call) wired into run_cycle". **Not pushed** (the
+operator pushes `xrp_grid` manually; HEAD is 1 ahead of `origin/main`). The `database.py`
+staging was **patch-level**: only the Stage-3 schema (`trace_id` + the two `*_r1_position`
+columns + their ALTERs) went into this commit. A **pre-existing, unwired agent
+accuracy-scoring layer** that also lives uncommitted in `database.py` (`_decision_bar_index`,
+`_score_casper/_melchior/_balthasar`, plus the `unrealized_pnl_{6h,24h}` outcome columns and
+the matching `update_debate_outcomes` change) was **deliberately left out** of the Stage-3
+commit — it has no live consumer yet and was not part of this verified work; it stays in the
+working tree for its own future commit.
+
+**NOT done / next:** services stay stopped pending operator direction (nothing here flips the
+bot live). **Stage 4** is next: `enforce_hard_rules` determinism-shrink + the per-agent
+Journal (SQLite recall layer). Carried-forward follow-ups (see `02`): per-seat world_state
+trimming is deferred until Langfuse shows real per-seat token counts; Gemini/Casper caching
+stays OFF (revisit from Langfuse data if convene frequency rises); nginx basic-auth and the H4
+two-engine divergence remain pre-live items.
+
+**Follow-up commits 2026-06-08 (the two leftover `database.py` pieces, committed in dependency
+order; xrp_grid local, not pushed):**
+- **`9c7d1df` — outcome-backfill unit** (`database.py` + `observer.py`): `debate_records` gains
+  `unrealized_pnl_6h`/`unrealized_pnl_24h`; `update_debate_outcomes` accepts/writes them;
+  `observer._compute_window_metrics` returns `(fills, realized, unrealized)` and
+  `backfill_outcomes` computes + passes the unrealized drift. **Runtime-verified** on a temp
+  copy of `observer.db` (real cycle `cyc_1779955233`: computed `unrealized_6h=-0.0956`,
+  `unrealized_24h=1.097`, both written; canonical DB untouched). This is the **live-wired** half
+  — `observer.py`'s backfill consumes it.
+- **`c4c0bd8` — per-role `get_agent_accuracy` rewrite** (the `_score_casper/_melchior/_balthasar`
+  + `_decision_bar_index` layer): the never-committed 2026-06-07 work (the source tree had
+  diverged from `02` item 3, which already marked it DONE), committed **as-is**. It **consumes
+  the committed `grid/forward_sim.py` (`60fc0ea`) and reads `unrealized_pnl_6h`** (hence it
+  commits AFTER `9c7d1df`). It is **NOT wired to any live consumer** — only the archived
+  dashboard ever called the old function; live wiring is a **Stage-4 Journal** task.
+
+## Session 2026-06-07 — Langfuse observability + Stage 1 prereqs + Stage 2 seat-callers (all OFFLINE; services stayed stopped)
+
+Three blocks of work toward the hand-rolled arbiter orchestrator (the "Stage 3"
+build): an observability layer, the Stage-1 prerequisites + per-role accuracy fix,
+and the two missing Stage-2 seat-callers. Nothing was wired into a live cycle; every
+proof below was a standalone run. Naming used this session: **Stage 1** = DB/schema
+prereqs + the `get_agent_accuracy` rewrite; **Stage 2** = the three standalone
+seat-callers + a shared world_state renderer; **Stage 3** (next) = the orchestrator
+that convenes them.
+
+### 1. Langfuse observability layer added (NEW; not yet wired)
+
+A tracing helper now exists at **`magi/agents/tracing.py`**, built and proven against
+**Langfuse SDK v4.7.1**, cloud **Hobby tier, US region**, org **"NERV"** / project
+**"MAGI"**. It exposes four functions: **`trace_cycle(cycle_id)`** (a context manager
+opening the root trace for one council cycle, named `council-cycle:<id>`),
+**`trace_seat(seat, model, vendor, request_payload)`** (a context manager opening a
+nested generation observation, yielding the generation object so the caller can
+`.update(output=…, usage_details=…)` after the model returns),
+**`current_trace_id()`** (returns the active trace id as a string, for stamping into
+the DB later), and **`get_tracer()`** (returns the Langfuse client or `None`).
+
+- **Manual attribution, deliberately NOT auto-instrumentation.** Each seat's `model`
+  is set explicitly. This is on purpose: the Melchior seat reaches DeepSeek through
+  the Anthropic-compatible endpoint using the Anthropic SDK, so an Anthropic-SDK
+  auto-instrumentor would mislabel that generation as Claude. Explicit per-seat
+  `model`/`vendor` is the only way to attribute it correctly.
+- **Fire-and-forget.** If Langfuse is unreachable or unauthed the helper degrades to
+  no-ops and never raises into the caller — the trading path is never blocked by
+  tracing. Verified with a blanked-keys run: with the keys cleared the process still
+  exits cleanly and the helper silently does nothing.
+- **Two bugs in the original reference were caught and fixed during the build.**
+  (a) `update_current_trace(...)` does **not exist** in SDK v4.7.1 — instead the root
+  span's `name` propagates to the trace, so naming the root span `council-cycle:<id>`
+  is what titles the trace. (b) A double-`yield` bug in the context-manager wrapping
+  would have masked a caller's own exception (turning a real trading error into a
+  confusing tracing error); it was restructured so caller exceptions propagate
+  untouched.
+- **State:** proven end-to-end with one real trace (a generation correctly attributed
+  to DeepSeek, not Claude). **NOT yet wired into any cycle** — wrapping cycles/seats in
+  these context managers is a Stage-3 orchestrator job. Keys live in `.env` as
+  `LANGFUSE_SECRET_KEY` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_BASE_URL` (note: the host
+  var is `LANGFUSE_BASE_URL`, the current canonical name, not the older `LANGFUSE_HOST`).
+
+### 2. Stage 1 prerequisites landed (DB columns, persona-path repoint, validator)
+
+- **`debate_records` gained three columns** (idempotent migration applied to the live
+  `observer.db`, and added to the `CREATE TABLE` in `database.py` so fresh DBs include
+  them): **`trace_id` (column index 51)** — groundwork for stamping the Langfuse trace
+  id of each cycle (no writer yet; stays NULL until the orchestrator stamps it); and
+  **`unrealized_pnl_6h` (52) / `unrealized_pnl_24h` (53)** — the windowed mark-to-market
+  drift on the held position, written by the existing observer backfill alongside the
+  realized `pnl_6h`/`pnl_24h`. The unrealized number is computed on the SAME strict
+  live-only basis as realized (it is `0.0` in paper / when no live fills occurred in the
+  window, never garbage), and `realized + unrealized` equals the window's total equity
+  change.
+- **`PERSONA_DIR` / `load_persona` in `world_state_schema.py` repointed** off the dead
+  Letta-era `magi/prompts/*_prompt.txt` onto the **live `magi/agents/personas/*.md`** —
+  the files the council actually uses. This closes the "toothless validator" issue noted
+  on 2026-06-06: the persona checks now run against the real persona text.
+- **The validator now tolerates bare prose tokens.** A bare snake_case token in a
+  persona that resolves to no schema field (e.g. `current_price` appearing in
+  `melchior.md` as prose describing a dead function argument, not a world_state field)
+  was previously a hard ERROR; it is now downgraded to a low-severity **NOTE**. A genuine
+  broken *dotted* reference (`foo.bar` that resolves to nothing) still ERRORs.
+  `python -m magi.validate_schema` is back to a **WARN-only PASS** (0 ERROR; exit 0).
+- **The 12 Melchior persona-coverage WARNs are KNOWN AND DELIBERATELY LEFT.** The
+  validator warns that 12 world_state paths the schema declares Melchior consumes
+  (`hours_since_last_fill`, `hours_since_last_rebuild`, `indicators.vwap_dev_pct`,
+  `indicators.vol_regime`, `indicators.autocorr_1h`, `indicators.autocorr_4h`,
+  `cooldown_status.recentre_cooldown_active`, `last_fill.side`, `last_fill.hours_ago`,
+  `position_state.round_trip_distance_pct`, `position_state.round_trip_net_pnl_usd`,
+  `trajectory.skew_delta`) are never *cited* in `melchior.md`'s decision-tree prose.
+  These are **persona-prose gaps, NOT data starvation**: all 12 paths ARE fed to
+  Melchior (the seat-caller serializes the entire world_state into the prompt; a runtime
+  check confirms all 102 declared paths are present in `build_world_state()` output).
+  The verdict judge simply doesn't quote them in its written reasoning. **No action was
+  taken and none is needed** — they are left visible (not suppressed) on purpose.
+
+### 3. Per-role `get_agent_accuracy` rewrite (`database.py`)
+
+The old accuracy function scored every agent with one predicate — `fills_6h > 0 AND
+pnl_6h >= 0`. That is wrong per seat: it marked a **correct** Melchior `NO_PROFITABLE_GRID`
+stand-down (which by design produces zero fills) as a *failure*. Rewritten so each seat
+is scored on its own question:
+
+- **Casper — regime-realized, PnL-independent.** A call is correct iff the regime he
+  named (`RANGING`/`TRENDING`/`UNCERTAIN`) matches what a recycling grid would actually
+  have done over the **next 72 hours** of real price history. `UNCERTAIN` is
+  *matched-to-ambiguous* (correct only when the realized regime was also ambiguous; no
+  free abstention). Rows whose 72h forward window isn't yet covered by candles are
+  excluded as not-yet-matured, never counted wrong.
+- **Melchior — verdict-conditional.** `THESIS_HOLDS` is reality-graded (grid kept
+  filling and realized + unrealized didn't bleed); `NO_PROFITABLE_GRID` is graded by the
+  forward sim (was no fee-clearing grid actually available); `RECONFIGURE` is graded by a
+  **decision-time scorer-comparison PROXY** — explicitly flagged in the code as NOT a
+  true held-the-old-config counterfactual (no such realized series exists).
+- **Balthasar — total PnL (realized + unrealized) with applied-vs-overridden detection.**
+  Critically, **reality-graded calls (he said CLEAR/PROCEED and it was applied) and
+  counterfactual-graded calls (he applied a veto, scored by what the *unpaused* grid
+  would have done via the forward sim) are kept SEPARATE in the return shape and are
+  NEVER summed into one number.** Calls his vote didn't drive (overridden by a hard rule)
+  are excluded.
+- **Known limitations, stated plainly:** Balthasar's reality figure is currently
+  inflated because most historical windows are paper / zero-PnL and the unrealized
+  columns are NULL on all historical rows — it becomes meaningful only once **live**
+  cycles populate the unrealized columns. Melchior is **ungradeable on historical rows**
+  because those rows carry the Letta-era `MAINTAIN`/`RECENTRE` action vocabulary, not the
+  new verdict vocabulary — the scorer correctly excludes them all.
+- **New shared module `grid/forward_sim.py`** is the single source of the recycling-grid
+  forward simulation + regime label (the harvest-vs-bleed-vs-hold logic, thresholded on
+  the exogenous maker round-trip fee floor `2 × maker_fee = 0.50%`). The old
+  `optimize/casper/forward_label.py` was refactored to a thin re-export from it, so the
+  core path never imports anything under `optimize/` — important because importing that
+  package pulls in the `vertexai` ADK-eval dependency, which is not installed in the core
+  venv and would crash a core import.
+- **This accuracy fix is the stated HARD DEPENDENCY for the future per-agent Journal**
+  (the recall layer): without correct per-role scoring, validated recall would teach
+  Melchior to over-trade.
+
+### 4. Stage 2 seat-callers built and proven standalone (NEW)
+
+Two new standalone seat-callers now exist as siblings to the proven
+`magi/agents/melchior_deepseek.py`:
+
+- **`magi/agents/casper_gemini.py`** — `run_casper(world_state, persona=None,
+  model="gemini-2.5-flash")` and `run_casper_with_meta(...)`. Uses the **native-Gemini
+  ADK path**: an ADK `LlmAgent` with `output_schema=RegimeVote` passed **directly** (NOT
+  through `schema_for_tool`), because `RegimeVote` is declared `extra="ignore"` and so
+  emits no `additionalProperties` — the structure that native Gemini 400s on. Parses the
+  structured output and validates it against `RegimeVote`.
+- **`magi/agents/balthasar_claude.py`** — `run_balthasar(world_state, persona=None,
+  model="claude-sonnet-4-6")` and `run_balthasar_with_meta(...)`. Uses the **raw Anthropic
+  forced-tool** path (single forced tool, `temperature=0`), builds the tool schema via
+  `schema_for_tool(RiskVote)` (keeping the "always `schema_for_tool`" rule even though
+  Claude tolerates `additionalProperties`), validates against the **live `RiskVote`** from
+  `schemas.py` (NOT the older phase-1-local schema), and retries once with the validation
+  error fed back if the first emission is invalid.
+- **New shared renderer `magi/agents/world_state_render.py`** — `render_world_state(ws)`
+  returns deterministic pretty JSON (`json.dumps(ws, indent=2, sort_keys=True)`). **All
+  three callers now use it**, so the world_state block they put in front of their model is
+  byte-identical. Melchior was switched off its old flattened `key: value` renderer onto
+  this one and **RE-PROVEN** with a real DeepSeek call: it returned a valid
+  `THESIS_HOLDS` verdict with conviction 0.82 and the geometry-iff-`RECONFIGURE` contract
+  held (geometry absent on a non-`RECONFIGURE` verdict).
+- **All three proven standalone with REAL vendor API calls** on a real historical
+  world_state pulled from a `debate_records.world_state` row (no `build_world_state` call,
+  which could hit Kraken): **Casper billed `gemini-2.5-flash`** (returned a validated
+  `RegimeVote`, `position=RANGING`, via the native path with no `additionalProperties`
+  400), **Balthasar billed `claude-sonnet-4-6`** (validated `RiskVote`, `risk_action=CLEAR`,
+  reasoning that walks the live persona's decision tree), **Melchior billed
+  `deepseek-v4-pro`** (validated `GridVote`, `THESIS_HOLDS` as above).
+
+- **FINAL WIRING CONCLUSION (state plainly): the three seats are intentionally NOT
+  symmetric in transport, and that is by design.** Casper runs on native-Gemini via ADK
+  (`output_schema`); Balthasar and Melchior run on the raw Anthropic-shape forced-tool
+  pattern (Melchior pointing at DeepSeek's Anthropic-compat endpoint). Three-vendor
+  judgment diversity is the architectural principle; transport symmetry is explicitly
+  **not** a goal, so no effort will be spent forcing one transport across all three.
+- **Two known, harmless asymmetries the orchestrator resolves:** (a) **`.env` self-load**
+  — `casper_gemini.py` calls `load_dotenv()` at import; `balthasar_claude.py` and
+  `melchior_deepseek.py` read `os.environ` directly and assume the caller already loaded
+  `.env`. (b) **Default persona handling** — the new Casper/Balthasar callers default to
+  loading the live `.md` persona when none is passed; Melchior's caller keeps a short stub
+  default. Both are moot once the orchestrator passes personas explicitly and loads `.env`
+  once at startup.
+
+**Nothing run live; no `provision_agents`/eval/live cycle; services stayed stopped.**
+
+## Session 2026-06-06 (later) — `drawdown_from_high_7d` WIRED + CLAUDE.md trimmed/published
+
+- **`drawdown_from_high_7d` now WIRED into `build_world_state()`** — closes the
+  persona/world_state inconsistency that was the HARD PREREQUISITE (`02` item 0★ now
+  DONE). `magi/orchestrator.py:build_world_state` computes it from the trailing-7d
+  candle series (168 × 1h bars via `get_candles('1h', 168)`) on a **running-peak
+  basis** — `peak = max(max(highs), price)` — so the value **clamps to ≤ 0.0** (0.0 =
+  price at/above the 7d high). Emitted as a **signed percent** (e.g. −21.24 = 21.24%
+  below the peak). **`None` fallback** when price is unavailable or no candles exist;
+  any compute error logs a warning and emits `None`. A matching `FIELDS` entry was
+  added to `magi/world_state_schema.py` (`type: float`, **`consumers: ["balthasar"]`**,
+  `balthasar_usage` framed as risk context).
+- **It is a JUDGMENT INPUT only — no threshold / gate / PAUSE / hard-rule keys off it**
+  (per the 2026-06-06 DECISION; fitting `dd7d ≤ −X` to 3 events is the overfitting trap
+  the operator forbids).
+- **Verified:** `python -m magi.validate_schema` → **0 ERROR / 0 WARN PASS at 102
+  declared paths** (was 101); runtime output matches schema; all three personas resolve
+  clean. A one-shot `build_world_state()` on current data emitted
+  `drawdown_from_high_7d = −21.24` (price 1.08669 vs 7d peak 1.37967). NOTE: observer.db
+  1h candles are frozen at the 2026-05-28 shutdown, so the test window is current-price
+  vs the last-recorded 7d high — confirms the math, not a live-updating window (the live
+  feed is the separate tape stack; the MAGI observer is stopped). Services stayed
+  stopped; no `provision_agents` / eval / live cycle run.
+- **Known issue surfaced (NOT fixed):** `validate_schema` /
+  `world_state_schema.py:load_persona` validate the **dead Letta-era
+  `magi/prompts/*_prompt.txt`**, not the live `magi/agents/personas/*.md` — so the
+  orphan-consumer check is toothless for the new field (the clean PASS leaned on the
+  "context"-prefixed usage-hint heuristic, not real persona coverage). Added to `02`'s
+  hand-rolled-orchestrator checklist. Repointing was deliberately NOT done this session.
+- **CLAUDE.md trimmed under the 40k load limit and PUBLISHED.** Removed dead/superseded
+  historical narrative (Letta-era lineup-drift NOTE, the R1-evolution parenthetical, a
+  SUPERSEDED-2026-06-04 inlay, the STATUS migration-tail, and four dead Letta-era §4
+  operational bullets), each replaced with a one-line pointer to this STATE LEDGER — no
+  dangling refs, no KEEP content touched. **42,393 → 38,539 bytes.** Published via
+  `bash /root/magi_docs/sync.sh` (magi-docs commit `8b8c88b`). Dashboard-auth and
+  Council-degradation blocks preserved intact; Letta-flavored wording inside
+  Council-degradation was flagged to the operator, not edited.
+
+## Session 2026-06-06 — Balthasar + `drawdown_from_high_7d` decision-test (OFFLINE; evidence for the council redesign)
+
+A controlled offline test of one redesign question (`04_EXPERIMENTAL_IDEAS.md`
+Session 2026-06-04 makes Balthasar the arbiter and scores his outcomes per-role):
+**does giving Balthasar a `drawdown_from_high_7d` signal move his verdict the
+cautious way on sustained-downtrend world_states, without making him reflexively
+cautious on recoveries / benign books?** This targets the grid-downtrend-bleed
+failure mode (grid recenters into a downtrend and buys the fall). The live system
+was never touched — services stayed stopped, no repo code or persona on disk was
+modified, all work is scratch under `/tmp/phase2_balthasar_v2/`.
+
+- **Design.** 60 XRP world_states reconstructed from `tape/history.db`, stratified
+  by forward price path into TRUE_BLEED (fwd-3d < −0.03) / RECOVERY (dd7d < −0.08 at
+  t AND fwd-3d ≥ 0) / BENIGN, 20 each, on fixed per-stratum stressed books (TRUE_BLEED
+  = `allocation_skew` +0.55 just under the +0.60 PAUSE_LONGS band, both buffers thin
+  but above the $10 floor, buy-heavy 7/3). 4 arms = {live persona, corrected persona}
+  × {without, with drawdown}, 240 forced-`RiskVote` calls to `claude-sonnet-4-6` at
+  temp 0 with faithful R0 reproduction. The "corrected" persona (in-memory only)
+  removes the live "there is no drawdown field" / "Never reason about price direction"
+  lines and grants narrow price-erosion authority (drawdown as risk context alongside
+  skew/buffers, not a mechanical trigger). Spend $2.49 (projection had been $2.59).
+- **Result.** (1) **Signal alone is inert** — live persona + drawdown ≈ live persona
+  alone (TRUE_BLEED net zero, the lone "more" shift uncited; RECOVERY/BENIGN flat).
+  (2) **Signal + persona authority moves it, correctly but weakly** — corrected
+  persona + drawdown vs corrected-without: 3/20 TRUE_BLEED more-cautious, **all 3
+  citing the drawdown**, incl. one `CLEAR/PROCEED → PAUSE_LONGS/HOLD_GEOMETRY`
+  (dd −20.3%, fwd −13.2%) and two `HOLD_GEOMETRY` geometry-veto escalations (both
+  forward-bled); 1 less (noise); 16 unchanged. (3) **No false alarms** — RECOVERY and
+  BENIGN showed zero movement in every arm.
+- **Read / implication.** Magnitude is small: even with both the authority and a
+  severe drawdown, Balthasar left 17/20 stressed scenarios fully `CLEAR/PROCEED`,
+  treating price drawdown as "approaching the skew band" context rather than a
+  first-class trigger. So a drawdown input is worth giving Balthasar IF he becomes the
+  arbiter, but the persona change is necessary (signal alone does nothing) and the
+  evidence is **thin** (3/20). **DECISION 2026-06-06:** drawdown is adopted as a
+  Balthasar **judgment input** he weighs and must cite — **NOT** a fitted
+  `dd7d ≤ −X ⇒ PAUSE` threshold (fitting a hardcoded X to 3 events is the overfitting
+  trap the operator forbids; grid params stay anchored to fees/spacing). The downtrend
+  bleed it targets is a real risk Balthasar now owns. Detail + the three cited shifts
+  are in `04_EXPERIMENTAL_IDEAS.md` Session 2026-06-06.
+- **Persona PROMOTED + wiring DEFERRED (real repo edit, same day).** Following the
+  test, the validated corrected language was promoted to the live
+  `magi/agents/personas/balthasar.md` — **persona text only**: the "there is no
+  drawdown field" / "Never reason about price direction" language was replaced with
+  the price-erosion-authority block (drawdown weighed as risk context alongside
+  skew/buffers, not a mechanical trigger), preserving the deterministic
+  daily-loss-HALT / kill-switch tail, the risk ladder, the worked examples, and the
+  output schema unchanged. Backup at `magi/agents/personas/balthasar.md.bak.20260605`
+  (byte-identical to the pre-edit file). **Deliberately DEFERRED:** the
+  `drawdown_from_high_7d` field is NOT yet wired — `build_world_state()` does not emit
+  it and `magi/world_state_schema.py:FIELDS` has no entry — so the persona now
+  references a field production does not yet emit. This persona/world_state
+  inconsistency is a **HARD PREREQUISITE to close before any live or paper run**, via a
+  wiring step that MUST follow the world_state Maintenance contract (add the field in
+  `build_world_state()` + a matching `FIELDS` entry with Balthasar as consumer).
+  Drawdown stays a **judgment input**, not a fitted `dd7d ≤ −X ⇒ PAUSE` threshold. No
+  `provision_agents` / eval run was triggered (the seats are built off these persona
+  files, services stopped). Tracked in `02_NEXT_BUILD_TASKS.md` item 0★.
+- **`schema_for_tool` HARDENED against the Gemini `additionalProperties` 400 (real
+  code edit, verified — two linked probes).** (1) Re-confirmed Casper's `RegimeVote`
+  emits clean structured output on the native Gemini path (`gemini-2.5-flash`) via
+  both `schema_for_tool` and the literal ADK `output_schema` — 200 OK, valid parse,
+  coherent (RANGING→EXECUTE on a flat synthetic book, TRENDING→STAND_DOWN on a
+  bearish-trend one). Negative controls proved the 400 is still live API-side
+  (`additional_properties` is not a field in Gemini's `response_schema` proto; any
+  schema carrying it 400s) and that `RegimeVote`'s `extra="ignore"` was the *only*
+  thing avoiding it — flipping it to `extra="forbid"` re-armed the 400. (2) Removed
+  that fragility: `magi/agents/schema_tools.py:schema_for_tool` now runs a final
+  `strip_additional_properties` pass that recursively deletes every
+  `additionalProperties` key (top object, nested objects, anyOf branches, inlined
+  sub-objects) before any vendor sees the schema — so no model's `extra=` setting
+  can re-arm the 400. Proof: a deliberately `extra="forbid"` schema (its
+  `model_json_schema()` carries `additionalProperties:false`) now returns **200 + valid
+  output** through the hardened helper; GridVote/RiskVote regression clean and the
+  geometry-iff-RECONFIGURE optional/nullable structure is intact (strip touches only
+  that one key). Backup `magi/agents/schema_tools.py.bak.20260606`. No schema `extra=`
+  changed, no `council.py` wiring, services stopped. `RegimeVote`'s `extra="ignore"`
+  is now belt-and-suspenders, not the sole defense.
+- **Council model lineup for the rebuild RECORDED (documentation only — no code
+  change).** The operator confirmed the NEW intended council seats, distinct from the
+  old Letta lineup: **Casper `gemini-2.5-flash`** (wired), **Balthasar
+  `anthropic/claude-sonnet-4-6`** (wired — Sonnet is the DECIDED tier, which closes
+  the long-open "haiku-4-5 vs sonnet, re-confirm" question for the rebuild; the live
+  Letta agent had run haiku-4-5), and **Melchior `deepseek-v4-pro`** (DECIDED seat,
+  **NOT yet wired** — `council.py` still runs `openai/gpt-4o`; the drop-in wrapper
+  `magi/agents/melchior_deepseek.py` was proven viable in the 2026-06-05 probe but is
+  not connected). So 2 of 3 intended models are live in code; the gpt-4o→deepseek swap
+  is the one outstanding model step. Documented across CLAUDE.md (STATUS COUNCIL
+  LINEUP block + §3), `00` (agents table), `02` item 7, and `03`. No
+  `council.py`/`schemas.py` edit this session.
+
+## Session 2026-06-01 — ADK installed (two-venv split), Casper Gemini-400 bug found+fixed, `adk optimize` scaffold + smoke run
+
+Read-only on the live system (services stayed stopped, no live cycle). All
+inference this session was the offline Casper `adk optimize` smoke run.
+
+### ADK + LiteLlm installed — deliberate two-venv split
+- **Main venv** (`/root/xrp_grid/venv`, Python 3.10): core `google-adk` (2.1.0) +
+  `litellm` (1.83.14) — what the **live council** needs to import and run. This
+  closes the "needs google-adk+litellm installed" precondition from the
+  2026-05-31 migration; the live path can now be imported/run (still NOT run live).
+- **`optimize/.venv`** (separate): `google-adk[eval]` — the heavy tuning stack
+  (gepa 0.1.1, google-cloud-aiplatform 1.154.0 → `vertexai`, pandas, etc.) needed
+  only by `adk optimize`. Isolated **on purpose** so the production trading venv
+  carries no eval/Vertex deps. `vertexai` is a code dependency only — inference
+  still routes through the free-tier `GOOGLE_API_KEY` (no Vertex billing).
+- Verified non-breaking against the existing import surface. Python 3.10 emits
+  FutureWarnings about Google lib EOL (2026-10-04); non-blocking.
+
+### LIVE BUG found + fixed — Casper RegimeVote 400 on native Gemini
+- `magi/agents/schemas.py:RegimeVote` used `ConfigDict(extra="forbid")`, which
+  serializes as `"additionalProperties": false`. The **native Gemini API**
+  (`gemini-2.5-flash`, Casper's model) rejects a `response_schema` containing
+  `additionalProperties` → `400 INVALID_ARGUMENT`. So `council._build_agent(
+  "casper")` would have **400'd on its very first live R0 call**. Latent because
+  the ADK council has never run live. Melchior/Balthasar are unaffected — they go
+  via LiteLlm to OpenAI/Anthropic, which accept (OpenAI requires) the field.
+- **Fix (shipped in code, offline only):** `RegimeVote` → `extra="ignore"`.
+  GridVote/RiskVote KEPT `extra="forbid"`. Validated by proxy — the smoke run made
+  11 successful `gemini-2.5-flash` calls with the identical-field schema. **NOT yet
+  re-tested via a live council cycle.** Verify the live R0 path before any live run.
+
+### `optimize/casper/` — eval-guided persona-tuning scaffold (NEW)
+- `adk optimize` is **prompt/instruction optimization, NOT model fine-tuning**: it
+  runs the stateless RegimeVote agent over the Casper regression cases, scores
+  `position` vs ground truth, and proposes an improved `instruction` (i.e. a
+  rewrite of `casper.md`). It rewrites ONLY the instruction string — never the
+  schema, model, or the other two agents. Does NOT auto-apply: prints the
+  candidate, operator diffs + regression-gates + hand-edits.
+- Scaffold (all under `optimize/casper/`): `agent.py` (root_agent = the live
+  Casper agent; also registers the custom metric + fixes two ADK-optimize gaps —
+  it doesn't register `custom_metrics` and doesn't leave `optimize/` on sys.path),
+  `metrics.py` (`regime_position_match` exact-match metric), `build_evalset.py`
+  (converts `evals/casper/dataset.jsonl` → 8-case ADK evalset), `sampler_config.json`,
+  `optimizer_config.freetier.json`, `README.md` (billing + run sequence + result).
+- **Smoke run (offline, free-tier, $0, exit 0):** `max_metric_calls=10` → 11
+  Gemini calls. Current `casper.md` scores **0.875 (7/8)**; the one miss is
+  casper_005 (ground truth UNCERTAIN). `best_idx=0` — at smoke budget GEPA only
+  fit the seed eval + one reflection, so it kept casper.md byte-for-byte. A real
+  attempt to beat 7/8 needs the bigger free-tier budget (`max_metric_calls=20`).
+- **Billing confirmed:** Casper's candidate model and the default optimizer model
+  are both Gemini → 100% Gemini API, free-tier `GOOGLE_API_KEY`. Vertex is NOT
+  cheaper (per-token from request one, no free tier); the free tier's only limit
+  is rate, which `agent.py`'s 429 backoff rides out.
+
+### AI Studio call logs as an eval-dataset source (operator note)
+- Google AI Studio logs each Gemini call's output for the API key in use. Usable
+  to grow eval coverage from real production calls — BUT logs solve the **input**
+  problem, not the **label** problem: a log row is (world_state → what Casper
+  *said*), not ground truth. Value in order: (1) real input distribution + volume,
+  (2) **hindsight/outcome labeling** — label the correct regime from realized
+  price action at T+6/24h (best for a trading bot, objective), (3) failure mining
+  ("said RANGING, then trended" — directly targets the grid-downtrend-bleed /
+  under-calls-trend issue). Only covers Casper's native-Gemini path; OpenAI/
+  Anthropic dashboards are the equivalent for Melchior/Balthasar.
+
 ## Session 2026-05-31 (later) — ADK migration of the agent-call layer + Melchior verdict redesign
 
-**This is the current authoritative state of the council. It supersedes the Agent
-Studio direction in the earlier 2026-05-31 entry below and the 2026-05-29 scoping.**
+> **DIRECTION SHIFTED 2026-06-06 — this entry is now HISTORICAL.** The decision layer
+> moved from this ADK `council.py` to a **hand-rolled orchestrator** (direct vendor-SDK
+> calls + owned SQLite state; NOT ADK, NOT CrewAI); `council.py` is unchanged and
+> superseded, and the seats are now proven standalone but not wired. For current
+> authoritative state see the **STATE LEDGER** at the top of this file + CLAUDE.md
+> STATUS. The text below records the 2026-05-31 ADK work as it stood then.
+
+This was the authoritative council state as of 2026-05-31. It superseded the Agent
+Studio direction in the earlier 2026-05-31 entry below and the 2026-05-29 scoping.
 Built the native rebuild as a fresh **Google ADK** implementation (not the
 vendor-stateful Agent-Studio/Memory-Bank design the earlier entries assumed).
 Code-complete and offline-validated; NOT run against live models, NOT deployed.
@@ -115,7 +1179,9 @@ Code-complete and offline-validated; NOT run against live models, NOT deployed.
   `LiteLlm("openai/gpt-4o")`, Balthasar `LiteLlm("anthropic/claude-sonnet-4-6")`.
   Keys from env (`GOOGLE_API_KEY`/`OPENAI_API_KEY`/`ANTHROPIC_API_KEY`), never
   hardcoded. ADK imported lazily so importing council.py/orchestrator.py does not
-  require google-adk installed.
+  require google-adk installed. **(Lineup update 2026-06-06: Melchior's intended seat
+  is now `deepseek-v4-pro` — DECIDED, not yet wired; the `gpt-4o` shown here is what
+  code still runs. See the Session 2026-06-06 lineup bullet below + CLAUDE.md STATUS.)**
 - **Melchior redesigned: economic VERDICT, not an action.** GridVote emits
   `verdict ∈ {THESIS_HOLDS, RECONFIGURE, NO_PROFITABLE_GRID}` + optional nested
   `geometry` (present iff RECONFIGURE, enforced by a model validator). Answers one

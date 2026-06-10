@@ -2,7 +2,7 @@
 
 This file loads automatically at the start of every Claude Code session
 in this repo. It encodes operating context and intent. State (what is
-built, what is broken, what is next) lives in the four handoff docs at
+built, what is broken, what is next) lives in the five handoff docs at
 repo root; read those after this one.
 
 Handoff docs to read at session start:
@@ -10,61 +10,105 @@ Handoff docs to read at session start:
 - `01_CURRENT_STATE.md`    — what is built and verified; do-not-re-derive facts
 - `02_NEXT_BUILD_TASKS.md` — work queue
 - `03_INSTRUCTIONS_TO_CLAUDE.md` — workflow rules and forbidden moves
+- `04_EXPERIMENTAL_IDEAS.md` — design directions under consideration (NOT adopted;
+  exploratory holding pen — if it conflicts with `01`/`02`, those win)
 
 CLAUDE.md is intent and discipline. The handoff docs are state. If they
 disagree, the handoff docs win for state; this file wins for how to work.
 
-> **STATUS — AGENT LAYER MIGRATED TO GOOGLE ADK (in code, 2026-05-31); NOT YET RUN LIVE.**
-> MAGI was cleanly shut down 2026-05-28 18:48 UTC: `magi.service` and
-> `magi-dashboard.service` are **stopped + disabled**, all live Kraken orders
-> cancelled, full state snapshotted to `snapshots/letta_shutdown_2026-05-28/`. The
-> services are still stopped.
+> **STATUS — MAGI IS RUNNING ON PAPER (started 2026-06-09 21:04 UTC). LETTA FULLY
+> DECOUPLED. Decision layer = the hand-rolled arbiter orchestrator
+> (`magi/council_v2.py`), live on a GATE-PRIMARY cadence.**
+> `magi.service` and `magi-dashboard.service` are **active + enabled**. The engine is
+> in PAPER mode — the live toggle is disarmed (`.env` `MAGI_LIVE_CONFIRM=NO`,
+> `CONFIRM_LIVE` renamed `CONFIRM_LIVE.disarmed.20260609`), so no real Kraken orders
+> are placed; fills are SIMULATED against real market prices into a paper ledger
+> (Kraken has no demo accounts — the paper layer is our own; real balances are read
+> only for the startup fund-detection gate and price data). The paper run started
+> from a freshly reset book: stale pre-shutdown orders cancelled, paper inventory
+> rebased to the real Kraken balances (~30.0 XRP + ~$27.18), and the scorer built a
+> 5-level 0.75% grid around ~$1.141. The prior LIVE run (2026-05-23 → 2026-05-28
+> shutdown, snapshot in `snapshots/letta_shutdown_2026-05-28/`) keeps its own PnL
+> record, separate from the paper scope (see §4 PnL scoping).
 >
-> Since then the council's agent-call layer has been **rebuilt off Letta onto
-> Google ADK** (see `01_CURRENT_STATE.md` Session 2026-05-31). `magi/council.py`
-> is rewritten: the three agents are native ADK `LlmAgent`s (Casper→Gemini native,
-> Melchior→GPT-4o via LiteLlm, Balthasar→Claude Sonnet via LiteLlm), **stateless
-> per cycle** (`include_contents="none"`), each emitting a Pydantic `output_schema`
-> vote. Melchior was redesigned from an action-selector into an economic-verdict
-> judge (THESIS_HOLDS / RECONFIGURE / NO_PROFITABLE_GRID). The public boundary is
+> The council's agent-call layer was **rebuilt off Letta** and the decision layer is
+> the **HAND-ROLLED arbiter orchestrator** `magi/council_v2.py` (Stage 3, 2026-06-08)
+> — direct vendor-SDK calls + owned SQLite state + per-cycle world_state, sequential
+> six-call choreography (Casper → Melchior → Balthasar openings, Casper+Melchior
+> rebuttal, Balthasar synthesis as arbiter). It is **NOT CrewAI and NOT an ADK
+> framework layer**: CrewAI's only valuable IP was its schema layer, now rebuilt as
+> `magi/agents/schema_tools.py`, and CrewAI's strict pipeline was proven to break the
+> conditional `GridVote.geometry` contract. (An ADK `council.py` exists from the
+> 2026-05-31 migration but is **unchanged and superseded**.)
+> Seats are **stateless per cycle**, each emitting a Pydantic `output_schema` vote;
+> Melchior was redesigned from an action-selector into an economic-verdict judge
+> (THESIS_HOLDS / RECONFIGURE / NO_PROFITABLE_GRID).
+>
+> **COUNCIL LINEUP — authoritative; all three seats WIRED into `council_v2` and
+> RUNNING on paper (2026-06-09):**
+> - **Casper → `gemini-2.5-flash`** (native Gemini).
+> - **Balthasar → `anthropic/claude-sonnet-4-6`** — Sonnet is the DECIDED tier (the
+>   old live Letta agent historically ran `claude-haiku-4-5`).
+> - **Melchior → `deepseek-v4-pro`** (`magi/agents/melchior_deepseek.py`; DeepSeek
+>   Anthropic-compat endpoint, `thinking` disabled).
+>
+> Model names you meet in the *historical* sections below — Casper
+> `gemini-3-flash-preview`, Melchior `gpt-4o`, Balthasar `claude-haiku-4-5` — are the
+> **Letta-era** lineup; do not read them as current.
+>
+> **LIVE vs. EXPERIMENTAL — do not conflate them.** MAGI is trading **ON PAPER** as of
+> 2026-06-09: `magi.service` runs the scheduler → observer → `council_v2` → hard rules
+> → engine chain on the gate-primary cadence; `magi-dashboard.service` serves the MAGI
+> dashboard (gutted of Letta-era panels). The tape-collection stack is STOOD DOWN
+> (data retained; warehouse timers still run). Offline scaffolds (Casper tuning
+> scaffold, the Balthasar drawdown decision-test, `optimize/`) remain experimental and
+> run nowhere. For the precise breakdown read the **STATE LEDGER at the top of
+> `01_CURRENT_STATE.md`** — it is the authoritative live-vs-experimental map. The public boundary is
 > preserved so `orchestrator.py` is unchanged in shape; new agent code lives in
 > `magi/agents/` (schemas + personas).
 >
-> **Two direction changes from the 2026-05-29 scoping, now authoritative:**
+> **Two direction changes from the 2026-05-29 scoping, now authoritative (both
+> EXECUTED):**
 > (1) Agents are **stateless**, NOT vendor-stateful — the "vendor owns memory/
 > self_model/thread history" line is REVERSED. Letta's stateful agent layer caused
 > thread-anchoring, the freshness-retry tax, and self_model corruption; statelessness
-> is the deliberate fix. A controlled, SQLite-sourced, prompt-injected **recall
-> layer** is scoped to restore self-correction (NOT built yet, NOT vendor memory).
-> (2) Cadence is **gate-driven**, not a 4h clock: the always-on free gate decides
-> whether the paid council wakes at all (floor ≈ 1 call/day; ceiling = breach
-> frequency). The 4h timer is only a backstop.
+> is the deliberate fix. The controlled, SQLite-sourced, prompt-injected **Journal
+> recall layer** is BUILT and wired into `council_v2` (committed `cebccb5`,
+> 2026-06-09 — deterministic, config-version-filtered, NOT vendor memory).
+> (2) Cadence is **gate-driven**, not a 4h clock — IMPLEMENTED 2026-06-09 (BU-2):
+> `scheduler.py` fires ONE daily clock-floor council call (`MAGI_DAILY_HOUR_EST = 20`,
+> i.e. 20:00 EST end-of-day assessment, grid or no grid) plus a 25h max-silence
+> backstop (`MAGI_MAX_SILENCE_HOURS`); every call in between comes only from the
+> always-on free gate's wake-class triggers — **T14 / T2 / T11 / T16** (60-min
+> throttle, 15-min dwell, non-trading suppression, plus per-episode guards added
+> 2026-06-10: T2 wakes once per breach episode, the new T16 drawdown trigger wakes
+> once per 3%-wide drawdown rung — a standing breach never re-wakes the council
+> hourly). The Letta-era `MAGI_HOURS_EST = [0,4,8,12,16,20]` 4h
+> schedule is DELETED (a duplicate of the daily hour lives in `dashboard.py:
+> _next_magi_eta` — change both).
 >
-> **This is a CODE migration, offline-validated only.** No model has been invoked,
-> nothing deployed, no live cycle run. Running it needs `google-adk`+`litellm`
-> installed and provider keys in env. Everything below describing the *Letta*
-> council or a *running* system is historical. Do NOT restart services or deploy
-> without explicit operator direction. Pre-migration originals are archived under
-> `archive/pre_adk_migration_2026-05-31/` (+ git HEAD); do NOT cancel the Letta
-> subscription until the rebuild is proven live and snapshots verified usable.
+> **Services RUNNING (paper).** Do not flip to live trading, change cadence
+> constants, or stop/redeploy services without explicit operator direction.
+> Pre-migration originals are archived under `archive/pre_adk_migration_2026-05-31/`;
+> the Letta-era live-path modules removed in the 2026-06-09 decoupling are under
+> `archive/letta_decoupling_2026-06-09/` (config_validator, memory_lifecycle, costs).
+> `LETTA_API_KEY` is commented out in `.env` and the `agent_registry` Letta UUIDs are
+> blanked — nothing on the box can reach Letta Cloud. (The schema-400 /
+> `additionalProperties` guard is a live invariant — see §4 below.)
 
 ## 1. What MAGI is
 
-> Historical as of the 2026-05-28 shutdown above. MAGI **was** live; it is
-> now stopped. The description below is the system as it ran.
+> Updated 2026-06-09: MAGI is RUNNING ON PAPER (see STATUS above). The real-money
+> description below is the system as it ran live 2026-05-23 → 2026-05-28; the same
+> goal and mechanics now apply to the paper validation run.
 
 MAGI is an XRP/USD spot grid bot running on Kraken — **was live 2026-05-23
 → 2026-05-28** (paper⇄live was a single env-var toggle: `MAGI_LIVE_CONFIRM=YES`
 in `.env` plus the `CONFIRM_LIVE` gate file) — with a three-agent LLM council
-on Letta Cloud advising structural decisions. The
-council is Casper (Gemini-3-flash-preview, regime), Melchior (GPT-4o, grid
-microstructure), Balthasar (risk/survival). NOTE (2026-05-26): live Balthasar
-runs `claude-haiku-4-5`, not the `claude-sonnet-4-6` this line long stated —
-and the eval factory still builds him on sonnet, so evals validate a stronger
-model than production. Unresolved: intended downgrade or drift? See
-`01_CURRENT_STATE.md` Session 2026-05-26 and `02_NEXT_BUILD_TASKS.md` item 0.
-Current
-capital under management is ~$67 (≈14 XRP + ~$47 USD). The goal is a
+advising structural decisions (rebuilt off Letta; see the STATUS COUNCIL LINEUP
+block above for the current seats). Real account balances as of the 2026-06-09
+paper reset: ~30.0 XRP + ~$27.18 USD ≈ $61.5 — the paper ledger was rebased to
+exactly these. The goal is a
 profitable adaptive grid: net-positive PnL after Kraken tier-0 fees
 (maker 0.25%, taker 0.40%) with >50% directional accuracy on the bot's
 trade actions, surviving without manual intervention.
@@ -81,16 +125,17 @@ stated goal.
 Three layers, complementary by design.
 
 **Layer 1 — Council judgment.** Three agents vote independently each cycle
-(Round 0). As of 2026-05-31 these are native **Google ADK `LlmAgent`s** (was
-Letta Cloud), stateless per cycle, each emitting a Pydantic `output_schema` vote.
+(Round 0). As of 2026-06-06 the decision layer is a **hand-rolled orchestrator**
+(direct vendor-SDK calls, owned SQLite state, per-cycle world_state, sequence
+gate→Casper→Melchior→Balthasar — NOT CrewAI, NOT an ADK framework); the three seats are
+proven standalone, stateless per cycle, each emitting a Pydantic `output_schema` vote
+built via `schema_for_tool`. (The 2026-05-31 ADK `council.py` is unchanged and
+superseded by this direction; its R1/conflict logic described below carries forward.)
 Round 1 is a synthesis pass where each agent revises after seeing peers' R0; it is
 CONDITIONAL (2026-05-27) — `magi/council.py:should_run_r1` fires it only when a
 genuine position/lever conflict exists AND that conflict is new vs. the prior
 cycle. Aligned cycles and frozen standoffs skip R1 (the hard-rule layer resolves
-both regardless), which bounds council cost. (History: R1 was conflict-gated →
-"always-fires" 2026-05-22 → novelty-gated 2026-05-27. The old `CONFLICT_MATRIX`/
-`detect_conflict` remain in `council.py` for compat but are not the gate;
-`_r0_conflict`, now verdict-aware, is.) The council
+both regardless), which bounds council cost. The council
 exists for cases where multiple defensible answers exist — regime
 classification, when to recentre vs. tighten, when concentration risk has
 crossed a judgment threshold. Judgment is delegated here precisely because it
@@ -123,19 +168,22 @@ model failures. Both are load-bearing.
 ## 3. The council is architectural diversity, not three voices saying the same thing
 
 The three agents run different LLM providers by design, not by
-accident (ADK wiring as of 2026-05-31):
+accident (seats proven standalone; orchestrator hand-rolled, 2026-06-06):
 
 - **Casper / `gemini-2.5-flash` (native Gemini)** — regime classification; tends
-  to favour structural classification. Now stateless per cycle: world_state is
-  injected fresh into the prompt each call (no persistent self_model block).
-- **Melchior / `openai/gpt-4o` (via LiteLlm)** — grid economist. Historically
-  anchored on prior responses / conversation-history persistence in Letta
-  threads; `include_contents="none"` removes that thread state entirely, which is
-  a primary reason the stateless design was chosen. Redesigned to emit an economic
-  VERDICT (THESIS_HOLDS / RECONFIGURE / NO_PROFITABLE_GRID), not an action.
-- **Balthasar / `anthropic/claude-sonnet-4-6` (via LiteLlm)** — risk/survival;
-  defaults risk-conservative. (Live Letta Balthasar historically ran haiku-4-5;
-  the ADK build pins Sonnet — confirm the intended tier before live spend.)
+  to favour structural classification. Stateless per cycle: world_state is
+  injected fresh into the prompt each call (no persistent self_model block). Proven
+  standalone via a read-only probe through `schema_for_tool`.
+- **Melchior / `deepseek-v4-pro`** — grid economist. Proven standalone
+  (`magi/agents/melchior_deepseek.py`, 2026-06-05 probe), called via the DeepSeek
+  Anthropic-compat endpoint with `thinking` explicitly DISABLED. Redesigned to emit an
+  economic VERDICT (THESIS_HOLDS / RECONFIGURE / NO_PROFITABLE_GRID), not an action.
+  (The seat historically ran GPT-4o, which anchored on Letta thread history;
+  statelessness + the model swap remove that.)
+- **Balthasar / `anthropic/claude-sonnet-4-6`** — risk/survival; defaults
+  risk-conservative. Proven standalone. Sonnet is the DECIDED tier for the rebuild (the
+  live Letta Balthasar historically ran `claude-haiku-4-5`). Now also owns
+  downtrend/capital-erosion risk via a corrected persona (see `02` item 0★).
 
 These known biases are the architectural diversity — one agent's blind spot is
 another's signal. When the three genuinely diverge, the verdict-aware
@@ -162,15 +210,32 @@ re-derive these.
   `__main__` guard, imported by nothing, invoked by no service/cron — so it is NOT
   a reason to keep the dual-write. (Prior doc text listing it as a live consumer
   was overstated; see `01_CURRENT_STATE.md` Session 2026-05-29 §7-H.)
-- **Agent layer is ADK as of 2026-05-31** (`magi/council.py` + `magi/agents/`).
-  The Letta facts in this section (agent UUIDs in `agent_registry`,
-  `provision_agents.py` block sync, self_model / recent_outcomes / world_state
-  Letta blocks, the freshness validator, the step/token sweep) are HISTORICAL —
-  they describe the replaced layer. Native agents are built in code from
-  `magi/agents/personas/*.md` (instruction) + `magi/agents/schemas.py`
-  (output_schema); there are no Letta blocks to provision and no vendor-side
-  agent state. `agent_registry` may still back the dashboard AGENT HEALTH chip
-  but no longer maps to Letta UUIDs in the live path.
+- **Agent layer is a HAND-ROLLED orchestrator as of 2026-06-06; the Letta layer is
+  gone.** The decision layer is ~150 lines of direct vendor-SDK calls + owned SQLite
+  state + per-cycle world_state assembly (sequence gate→Casper→Melchior→Balthasar) —
+  NOT CrewAI, NOT an ADK framework. The three seats are proven standalone via probes
+  through `schema_for_tool`; the orchestrator that assembles them is the next build.
+  (The 2026-05-31 ADK `council.py` exists but is unchanged and superseded.) The Letta
+  facts elsewhere in this file (agent UUIDs in `agent_registry`, `provision_agents.py`
+  block sync, self_model / recent_outcomes / world_state Letta blocks, the freshness
+  validator, the step/token sweep) are HISTORICAL — they describe the replaced layer.
+  Seats are built in code from `magi/agents/personas/*.md` (instruction) +
+  `magi/agents/schemas.py` (output_schema) via `magi/agents/schema_tools.py`; there are
+  no Letta blocks to provision and no vendor-side agent state. `agent_registry` may
+  still back the dashboard AGENT HEALTH chip but no longer maps to Letta UUIDs.
+- **Invariants (learned the hard way — do NOT regress).**
+  - **Seat schemas are always built via `magi/agents/schema_tools.py:schema_for_tool()`,
+    never CrewAI `generate_model_description`.** CrewAI's strict pipeline forces every
+    field `required` and strips `null` — it breaks the conditional `GridVote.geometry`
+    contract (geometry present iff verdict==RECONFIGURE). `schema_for_tool` preserves the
+    real optional/nullable shape.
+  - **`schema_for_tool` strips `additionalProperties` centrally**, so the native-Gemini
+    `additionalProperties` 400 stays dead and any seat schema may use `extra="forbid"`
+    safely. **Do not remove that strip.**
+  - **DeepSeek / Melchior: `thinking` is explicitly DISABLED.** v4-pro defaults thinking
+    ON server-side, which 400s under a forced `tool_choice`.
+  - **Spend / action gates are HARD STOPS for the operator to clear — never thresholds
+    the agent self-clears.** Under-ceiling is not a go.
 - **Melchior emits a verdict, not an action** (2026-05-31). `resolve_consensus`
   returns `grid_verdict ∈ {THESIS_HOLDS, RECONFIGURE, NO_PROFITABLE_GRID}`;
   `enforce_hard_rules` translates it (THESIS_HOLDS→MAINTAIN, RECONFIGURE→RECENTRE
@@ -183,12 +248,16 @@ re-derive these.
   for code behavior. Handoff docs and this file describe intent; if
   they disagree with the live state, the live state is current and
   the docs are stale.
-- **Publishing the handoff docs.** The five docs (`CLAUDE.md`,
-  `00`–`03`) are published to the private repo `aye5788/magi-docs` by
+- **Publishing the handoff docs.** The six docs (`CLAUDE.md`,
+  `00`–`04`) are published to the private repo `aye5788/magi-docs` by
   running `bash /root/magi_docs/sync.sh` — it copies the current docs
   out of `/root/xrp_grid`, commits, and pushes `origin main`. That is
   the definitive doc-publish path. `aye5788/xrp_grid` is the code repo
-  only; never push docs there.
+  only; never push docs there. **These published docs have two readers — a future
+  Claude Code session (in-repo) and a claude.ai chat that has ONLY the markdown (no
+  repo/code/DB/tools). Write every doc update to be self-contained for that code-blind
+  reader: state facts and reasoning in the prose, never as "go check the code." See
+  the two-readers rule in `03_INSTRUCTIONS_TO_CLAUDE.md`.**
 - Grid spacing clamps: `MIN_GRID_SPACING_PCT = 0.003`,
   `MAX_GRID_SPACING_PCT = 0.025` (0.3% to 2.5%). Set in `config.py`.
 - **Per-order size is FIXED at `ORDER_SIZE_XRP = 1.65`** (config.py, the
@@ -238,37 +307,27 @@ re-derive these.
   `get_closed_orders` (ClosedOrders) and marks fills with Kraken's real
   price/fee. Inventory is always truth-of-record via `get_balances()`,
   never recomputed from the fee constants.
-- **Restart cost.** Each magi.service restart triggers a startup MAGI
-  cycle, which costs roughly $0.30 in Letta credits (Casper ~$0.05 +
-  Melchior ~$0.13 + Balthasar ~$0.10 at current cadence). Restarts are
-  not free. During iteration-heavy sessions, bundle code changes and
-  restart once at the end rather than restarting after each surgical
-  edit. If verification only requires confirming a code-path change
-  loaded (e.g. ADAM init lines, new log severity), the journal at
-  startup is sufficient — no need to wait for or trigger a cycle.
-  Reserve restart-then-cycle verification for changes that actually
-  need to exercise the council pipeline.
+- **PnL is SCOPE-SPLIT: live vs paper (2026-06-09).** `grid/pnl.py:get_pnl_snapshot`
+  discriminates by order-id shape: Kraken txids (`O…-…-…`) are LIVE fills; internal
+  hex UUIDs are paper fills. `paper=True` returns the PAPER scope — non-txid fills at
+  or after the `system_state['paper_run_started_utc']` cutoff (set at the 2026-06-09
+  paper book reset, so the May paper-era fills stay excluded) — with the identical
+  equity-based model (baseline anchored at the first in-scope fill). The dashboard
+  passes `paper=engine.paper`, and the tile is labeled "Paper P&L" in paper mode.
+  The live record (23 fills, total −$6.95 at scope-split time) is preserved
+  untouched behind the default scope. Do not commingle the scopes — commingling was
+  the original ~$10 PnL overstatement bug.
 - **Dashboard auth** is app-side: a Flask signed-cookie session in
   `dashboard.py` (`/login`, `/logout`, `before_request` gate; password in
   `.env:DASHBOARD_PASSWORD`, `SECRET_KEY` in `.env`; 365-day cookie).
   nginx `auth_basic` was removed — the cloudflared tunnel hits Flask:5000
   directly, so nginx was never in the public path. Token-authenticated
   API calls (`X-Magi-Token`) bypass the login gate for automation.
-- Letta SDK note: `llm_config` is deprecated for `c.agents.update`;
-  use provider-shaped `model_settings`. `parallel_tool_calls` is
-  server-forced to True regardless of what you send.
-- LLM config sync lives in `provision_agents.py:AGENT_CONFIG` and is
-  idempotent. Equal across agents wherever providers expose
-  equivalent knobs; provider-side asymmetries (GPT-4o has no native
-  extended-thinking budget) are documented inline.
-- Letta Evals suites live under `/root/xrp_grid/evals/{casper,melchior,
-  balthasar}/`. Persona regression (Option A) is built and is the gate
-  to run before pushing persona edits via `provision_agents.py`.
-  Runner: `evals/run_all.sh`. Results table: `magi_eval_runs`.
-  Dashboard panel: EVAL HISTORY between ALERTS and Market. Eval venv is
-  Python 3.11 at `evals/.venv/` (uv-managed, separate from MAGI's main
-  Python 3.10 venv). Requires `LETTA_EVALS_PROJECT_ID` set in `.env`
-  pointing at a Letta Cloud project distinct from production.
+- **Letta-era operational facts removed 2026-06-06** (restart cost in Letta
+  credits, the Letta SDK `model_settings` note, `provision_agents.py:AGENT_CONFIG`
+  sync, the Letta Evals suites/`run_all.sh`) described the replaced agent layer.
+  The agent layer is now a hand-rolled orchestrator — see the §1 STATUS block and
+  the STATE LEDGER in `01_CURRENT_STATE.md`; those Letta mechanics no longer apply.
 - **Council-degradation contingency** (closed out 2026-05-20). Three
   hooks share a single fingerprint: an R0 row with
   `conviction == 0.0 AND crux LIKE '(no response)%'` is a degradation
@@ -446,12 +505,18 @@ Discipline that prevents wasted work.
   alternative is a fragile multi-step edit. When shipping code for
   the operator to push, provide the final file, not a snippet plus
   navigation instructions.
-- **Run evals before pushing persona edits.** Before re-running
-  `magi/provision_agents.py` after any persona change, run
-  `/root/xrp_grid/evals/run_all.sh` and confirm all three gates pass.
-  The eval snapshots live self_models at run start, then spins up
-  throwaway agents in the `magi-evals` Letta project — production
-  Casper/Melchior/Balthasar are not touched.
+- **Persona edits — no live eval gate on the rebuilt stack yet.** The old
+  Letta eval harness (`evals/run_all.sh`, throwaway agents in the `magi-evals`
+  Letta project) was retired and **removed with the Letta layer** — do not look
+  for it. Persona text now lives in `magi/agents/personas/*.md` and is edited
+  directly (there is no `provision_agents.py` step — that was Letta
+  provisioning). Discipline before a persona edit: snapshot the file first
+  (dated `.bak`), and keep the schema contract in sync —
+  `world_state_schema.py:FIELDS` ↔ the auto-generated SIGNALS block (see §5
+  above). The only per-agent offline scaffold that currently exists is Casper's
+  forward-realized labeler under `optimize/casper/`; there is no
+  Balthasar/Melchior scaffold and no full-council eval harness on the new stack
+  (that lands with the hand-rolled orchestrator).
 
 ## 6. Forbidden moves
 
@@ -588,7 +653,7 @@ Encoded once so they do not need to be restated each session.
   performative reassurance.
 - **No clarifying questions the docs answer.** Spend up to a minute
   on read-only investigation (grep, file read, SDK query) before
-  asking. If the answer is in `00`–`03` or this file, do not ask.
+  asking. If the answer is in `00`–`04` or this file, do not ask.
 - **The operator notices effort imbalance.** Symmetric work
   (three agents, three personas, three self_models) gets symmetric
   attention. Do not invest more polish in one than the others.
@@ -607,5 +672,6 @@ Encoded once so they do not need to be restated each session.
 | What is next on the work queue | `02_NEXT_BUILD_TASKS.md` |
 | Tone, workflow patterns, forbidden moves (detail) | `03_INSTRUCTIONS_TO_CLAUDE.md` |
 | Why the architecture is what it is, how to work in it | this file |
+| Design directions under consideration (not adopted) | `04_EXPERIMENTAL_IDEAS.md` |
 | Live data | `observer.db` |
-| Live agent state | Letta Cloud (SDK: `letta_client.Letta(api_key=…)`) |
+| Agent layer + model lineup (Letta dropped) | `magi/council.py` + `magi/agents/` |

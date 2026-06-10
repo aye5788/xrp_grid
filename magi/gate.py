@@ -26,6 +26,13 @@ see /tmp/xrp_gate_calibration.md):
                             side 0 orders, other >=1); edge-triggered
   T15 Skew drift          — |skew_delta_since_rebuild| crosses above 0.10
                             (matches Melchior Step 4 RECENTRE); edge-triggered
+  T16 Drawdown rung       — latest 1h close >= 1 full grid-band-width below
+                            the trailing 7d high (level-based detection; the
+                            scheduler dedupes wakes to ONE per integer rung
+                            of drawdown depth — added 2026-06-10 so the
+                            council is convened on the downtrend-bleed
+                            failure mode itself, not only on its geometry
+                            side-effects like T2)
 
 T14/T15 are BOOK-COMPOSITION triggers, evaluated by
 evaluate_book_state_triggers() — called both on the live fill-reconcile
@@ -111,6 +118,46 @@ def t1_velocity_spike(closes_1h: list,
         "close_now": close_now,
         "close_prior": close_prior,
         "candle_ts": closes_1h[0].get("timestamp"),
+    }
+
+
+def t16_drawdown_rung(closes_1h: list, high_7d: Optional[float],
+                      grid_state: Optional[dict]) -> tuple:
+    """Sustained-drawdown trigger: the latest completed 1h close sits at
+    least one full grid-band-width below the trailing 7d high. The rung is
+    floor(drawdown_pct / band_width_pct) — drawdown depth measured in whole
+    grids. Detection is LEVEL-based (fires every eval while the drawdown
+    persists, same observability model as T2); the scheduler's rung-episode
+    guard dedupes the actual council wakes to one per rung, so the council
+    answers the downtrend question once per band-width of deepening, not
+    hourly. Threshold is anchored to grid geometry (spacing x level pairs),
+    not fitted to history: one band-width down means the grid has been
+    pushed through a full ladder of levels since the weekly high — the
+    recentre-into-the-fall regime the system's known bleed mode lives in."""
+    if not closes_1h:
+        return False, {"reason": "no candle history"}
+    if not high_7d or high_7d <= 0:
+        return False, {"reason": "no 7d high"}
+    if not grid_state or grid_state.get("spacing_pct") is None:
+        return False, {"reason": "no grid_state"}
+    try:
+        close = float(closes_1h[0]["close"])
+        spacing = float(grid_state["spacing_pct"])
+        levels = int(grid_state.get("levels") or 5)
+    except (KeyError, TypeError, ValueError):
+        return False, {"reason": "bad inputs"}
+    n_pairs = max(1, levels // 2)
+    band_width_pct = 2 * n_pairs * spacing * 100.0
+    if band_width_pct <= 0:
+        return False, {"reason": "degenerate band width"}
+    dd_pct = max(0.0, (high_7d - close) / high_7d * 100.0)
+    rung = int(dd_pct // band_width_pct)
+    return rung >= 1, {
+        "drawdown_pct": round(dd_pct, 3),
+        "high_7d": round(high_7d, 5),
+        "close": close,
+        "band_width_pct": round(band_width_pct, 3),
+        "rung": rung,
     }
 
 
@@ -835,6 +882,20 @@ def evaluate_gate(db_path: str) -> list:
             fired, details = False, {"error": repr(e)}
             log.warning("T13 raised: %s", e)
         triggers.append(("T13", fired, details))
+
+        # T16: sustained drawdown from the trailing 7d high
+        try:
+            hrow = conn.execute(
+                "SELECT MAX(high) AS h FROM candles WHERE timeframe='1h' "
+                "AND timestamp >= datetime('now', '-7 days')"
+            ).fetchone()
+            high_7d = (float(hrow["h"])
+                       if hrow and hrow["h"] is not None else None)
+            fired, details = t16_drawdown_rung(closes_1h, high_7d, grid_state)
+        except Exception as e:
+            fired, details = False, {"error": repr(e)}
+            log.warning("T16 raised: %s", e)
+        triggers.append(("T16", fired, details))
 
         # --- Persist fire-event rows --------------------------------
         # Write a row for every trigger evaluated this poll. Fired rows

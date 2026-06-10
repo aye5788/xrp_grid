@@ -6,8 +6,14 @@
 > Google ADK** — `magi/council.py` rewritten; three native ADK `LlmAgent`s in
 > `magi/agents/`; **stateless per cycle**; Melchior emits an economic verdict
 > (THESIS_HOLDS / RECONFIGURE / NO_PROFITABLE_GRID). Code-complete, offline-validated;
-> no model invoked, nothing deployed. See `01_CURRENT_STATE.md` "Session 2026-05-31
-> (later) — ADK migration" for the authoritative description.
+> no model invoked, nothing deployed.
+>
+> **DIRECTION SHIFTED 2026-06-06:** the decision layer is now a **hand-rolled
+> orchestrator** (direct vendor-SDK calls + owned SQLite state + per-cycle world_state;
+> NOT CrewAI, NOT an ADK framework). The three seats are **proven standalone but not
+> wired**; that ADK `council.py` is **unchanged and superseded**. The two sentences
+> above are the historical 2026-05-31 record — for current architecture see the **STATE
+> LEDGER** at the top of `01_CURRENT_STATE.md` and the CLAUDE.md STATUS block.
 >
 > **This SUPERSEDES the 2026-05-29 scoping below in two ways:** (1) agents are
 > **STATELESS**, not vendor-stateful — the "vendor owns agent memory" line is
@@ -20,6 +26,15 @@
 > current. Do NOT restart services, deploy, or cancel the Letta subscription
 > without operator direction; pre-migration originals are archived in
 > `archive/pre_adk_migration_2026-05-31/`.
+>
+> **What is actually RUNNING vs. merely built/experimental (updated 2026-06-09):**
+> **MAGI is RUNNING ON PAPER** — `magi.service` is active (scheduler → observer →
+> `council_v2` arbiter → hard rules → engine in PAPER mode, no real Kraken orders) on
+> the gate-primary cadence, and `magi-dashboard.service` serves the MAGI dashboard.
+> The tape-collection stack is stood down (data retained). Letta is fully decoupled
+> (key disarmed, registry UUIDs blanked, live-path call sites deleted). For the
+> authoritative live-vs-experimental map, read the **STATE LEDGER at the top of
+> `01_CURRENT_STATE.md`**.
 
 ## What this system is
 
@@ -50,9 +65,11 @@ Three layers, complementary by design:
 
 1. **Council (judgment)** — three agents vote independently each cycle (Round 0),
    then conditionally synthesise (Round 1, **novelty-gated** since 2026-05-27 — was
-   "always fires"). As of 2026-05-31 these are native ADK `LlmAgent`s (was Letta
-   Cloud). Each owns its vote vocabulary; Casper + Balthasar emit a structural vote
-   field the engine reads via hard rule 0d:
+   "always fires"). As of 2026-06-06 the decision layer is a **hand-rolled orchestrator**
+   (direct vendor-SDK calls + owned SQLite state + per-cycle world_state; NOT CrewAI,
+   NOT an ADK framework); the three seats are proven standalone (was Letta Cloud, then a
+   now-superseded ADK `council.py`). Each owns its vote vocabulary; Casper + Balthasar
+   emit a structural vote field the engine reads via hard rule 0d:
    - Casper → regime: `RANGING | TRENDING | UNCERTAIN` +
      `regime_action: EXECUTE | DEFER_STRUCTURAL | STAND_DOWN`
    - Melchior → economic **verdict**: `THESIS_HOLDS | RECONFIGURE |
@@ -73,10 +90,22 @@ Three layers, complementary by design:
 gate (`magi/gate.py`, deterministic, zero API cost) runs every observer loop and
 decides whether the paid council wakes at all. Floor ≈ 1 council call/day; ceiling
 = how often the grid breaches gate rules. The `MAGI_HOURS_EST = [0,4,8,12,16,20]`
-4h timer is a BACKSTOP, not the primary trigger. (Historical: framed as "every 4
-hours, 6 cycles/day", reduced from hourly 2026-05-18 to fit the $20/mo Letta
-budget — that cost model no longer applies post-Letta.) Cost is tuned via gate
-breach sensitivity, not the cadence constant.
+4h timer is a BACKSTOP, not the primary trigger. **IMPLEMENTED 2026-06-09 (BU-2):**
+`scheduler.py` now fires ONE daily clock-floor call (`MAGI_DAILY_HOUR_EST = 20`,
+20:00 EST, date-deduped) plus a 25h max-silence backstop
+(`MAGI_MAX_SILENCE_HOURS`); the `MAGI_HOURS_EST = [0,4,8,12,16,20]` schedule is
+DELETED (its dashboard ETA duplicate now mirrors the single daily hour). Every call
+in between comes only from gate wake-class triggers — T14 (book one-sided/stranded),
+T2 (allocation-skew breach), T11 (volatility-regime flip), and T16 (drawdown rung,
+added 2026-06-10: drawdown from the 7d high banded into 3%-wide rungs anchored to
+grid geometry, so a *deepening* downtrend convenes the council but a static one
+doesn't) — bounded by a 60-min throttle, 15-min dwell, non-trading suppression, and
+per-episode guards (added 2026-06-10: T2 wakes once per breach episode, T16 once
+per same-or-deeper rung; a standing breach never re-wakes the council hourly).
+(Historical: framed as "every 4 hours, 6 cycles/day",
+reduced from hourly 2026-05-18 to fit the $20/mo Letta budget — that cost model no
+longer applies post-Letta.) Cost is tuned via gate breach sensitivity, not the
+cadence constant.
 
 Agents are **stateless per cycle** (ADK `include_contents="none"`) as of 2026-05-31
 — each call gets persona (instruction) + freshly-injected world_state, no
@@ -86,19 +115,29 @@ api.letta.com whose memory survived across cycles/restarts.) Cross-cycle
 trajectory, etc.); a controlled per-agent recall layer (SQLite→prompt-injection)
 is scoped but not yet built. See `01_CURRENT_STATE.md` Session 2026-05-31 (later).
 
-### The three agents (ADK wiring, 2026-05-31)
-| agent_id | Model (ADK) | Role / vote |
-|---|---|---|
-| casper | `gemini-2.5-flash` (native Gemini) | Regime classifier — `RANGING / TRENDING / UNCERTAIN` + `regime_action` |
-| melchior | `LiteLlm("openai/gpt-4o")` | Grid economist — verdict `THESIS_HOLDS / RECONFIGURE / NO_PROFITABLE_GRID` + geometry |
-| balthasar | `LiteLlm("anthropic/claude-sonnet-4-6")` | Risk / survival — `CLEAR / PAUSE_LONGS / PAUSE_SHORTS / HALT` + `geometry_veto` |
+### The three agents (seats proven standalone; orchestrator hand-rolled, 2026-06-06)
+| agent_id | Model | Status | Role / vote |
+|---|---|---|---|
+| casper | `gemini-2.5-flash` (native Gemini) | proven standalone, not wired | Regime classifier — `RANGING / TRENDING / UNCERTAIN` + `regime_action` |
+| melchior | **`deepseek-v4-pro`** (DeepSeek Anthropic-compat, `thinking` disabled) | proven standalone, not wired | Grid economist — verdict `THESIS_HOLDS / RECONFIGURE / NO_PROFITABLE_GRID` + geometry |
+| balthasar | `anthropic/claude-sonnet-4-6` | proven standalone, not wired | Risk / survival — `CLEAR / PAUSE_LONGS / PAUSE_SHORTS / HALT` + `geometry_veto`; also owns downtrend/capital-erosion risk (corrected persona) |
 
-> Built in `magi/council.py`; instructions from `magi/agents/personas/*.md`; votes
-> forced by `magi/agents/schemas.py` (`RegimeVote` / `GridVote` / `RiskVote`).
-> Balthasar's tier (Sonnet here vs the haiku-4-5 the live Letta agent ran) to be
-> re-confirmed before live spend. (Historical Letta models: casper
-> `google_ai/gemini-3-flash-preview`, melchior `openai/gpt-4o`, balthasar
-> `anthropic/claude-haiku-4-5` with `model_settings` knobs — no longer applicable.)
+> Each seat is proven standalone via a read-only probe through
+> `magi/agents/schema_tools.py:schema_for_tool` (e.g. `magi/agents/melchior_deepseek.py`
+> for DeepSeek); instructions from `magi/agents/personas/*.md`, votes forced by
+> `magi/agents/schemas.py` (`RegimeVote` / `GridVote` / `RiskVote`). **None is wired
+> into an orchestrator yet** — the hand-rolled orchestrator that assembles them (direct
+> vendor-SDK calls + owned SQLite state + per-cycle world_state) is the next build (see
+> `02_NEXT_BUILD_TASKS.md`). Sonnet is the DECIDED Balthasar tier (the live Letta agent
+> ran haiku-4-5); DeepSeek is the DECIDED Melchior seat (the gpt-4o → DeepSeek swap is
+> done as a proof). The 2026-05-31 ADK `council.py` is unchanged and superseded.
+> (Historical Letta models: casper `google_ai/gemini-3-flash-preview`, melchior
+> `openai/gpt-4o`, balthasar `anthropic/claude-haiku-4-5` — no longer applicable.)
+
+> **SUPERSEDED (design) 2026-06-04:** the synthesizer/final-call role moves from Melchior
+> to **Balthasar** (risk-arbiter). Melchior stays the grid economist (advisory); Balthasar
+> synthesizes regime+economics and decides. NOT yet built — see 04_EXPERIMENTAL_IDEAS.md
+> "Session 2026-06-04 — Council redesign". The text above describes the current ADK build.
 
 The three providers are chosen **by design**, not by accident. Each model has
 known biases (Gemini favours structural classification; GPT-4o anchors on
@@ -274,21 +313,95 @@ safety clamps.
     (`learning.py`, `extract_test_cases.py`, two dashboard panels not yet
     migrated). `debate_records` is canonical; do not introduce new
     `magi_decisions` readers.
+- **market_tape.db** SQLite — **separate standalone collector, NOT observer.db.**
+  Lives at `/root/xrp_grid/tape/market_tape.db`; written by the standalone Kraken
+  XRP/USD market-tape collector (own systemd units: `tape-collector.service`,
+  `tape-backup.service` + `tape-backup.timer`). Tables: `ohlc_1m`, `trades`,
+  `spread`, `rollup_bars` (5m/1h/6h/1d derived), `collector_health`, `events`
+  (plus a schema-defined `book_l2` that is currently EMPTY — the `book` channel is
+  off upstream). Imports nothing from `magi/`, `grid/`, `observer.py`,
+  `database.py`, or `scheduler.py`; runs whether MAGI is up or down. Online-backup
+  → gzip → GCS (`gs://xrp-grid-tape-backups-ayn88`). **Documentation-of-record:**
+  `github.com/aye5788/market-tape` (full operational writeup in `tape/README.md`).
+  This is the uncontaminated replay/backtest substrate referenced in
+  `04_EXPERIMENTAL_IDEAS.md` §6. The long-range historical series lives in the
+  SEPARATE **history.db** warehouse documented next; the historical→live stitch is
+  VERIFIED (2026-06-04) — see that bullet.
+- **history.db** SQLite — **the contiguous long-range warehouse, SEPARATE from both
+  observer.db and the live tape** (`/root/xrp_grid/tape/history.db`, ~776 MB). Built
+  by `tape/warehouse.py` as one gap-free 1-minute XRP/USD series: **Bitstamp 2016-12
+  → tape start** (`source=3`; OHLC-only — vwap is a close stand-in, `trades` NULL)
+  stitched to **live Kraken bars** (`source=0` ws / `1` silent-minute backfill / `2`
+  REST-recovered, 2026-06-02→now). ~4.98M `ohlc_1m` bars + permanent `rollup_bars`
+  (5/60/360/1440-min). One table, one `source` flag; Kraken wins any overlap — query
+  as a single series. **Seam VERIFIED (2026-06-04):** Bitstamp last bar 2026-06-02
+  12:22 → Kraken first 12:23, exactly 1 min apart, no gap / no overlap / no dup
+  (`ts_begin` PK). Flow is ONE-WAY from `market_tape.db` via `warehouse-append.timer`
+  (hourly, local, gap-aware over a 7-day reconcile window so out-of-order backfills
+  self-heal — was a strict MAX() watermark that silently skipped them, fixed
+  2026-06-04) + `warehouse-backup.timer` (daily → GCS `…/history/history.db.gz`). As
+  of 2026-06-04 the warehouse also carries the live **trades + spread** tape forward
+  (one-time catch-up 2026-06-04: ~100.9k trades + ~64.6k spread back to collector start
+  2026-06-02), so `rollup_bars` order-flow/spread columns populate for the live span
+  (NULL on the pre-tape Bitstamp span; `book_l2` not captured). Append dedups via
+  INSERT OR IGNORE over the 7-day window; the warehouse does NOT prune (downtime
+  instrument; the live tape keeps its own 60-day prune). Residual: out-of-order spread
+  arrivals below the ts watermark can be missed (acceptable, short-horizon). **Backtests:** OHLCV is continuous across the full
+  ~9.5-year series; vwap / trade-count / order-flow / spread are live-span-only —
+  filter by `source` for those fields. **Derived signals history (`signals_1h`,
+  added 2026-06-07):** the warehouse also stores the dashboard's GRID CONDITIONS
+  metrics as an **hourly time series** — one row per hour, *as of* that hour, holding
+  the overall verdict plus each metric's value+status (realized volatility, regime
+  efficiency-ratio, **drawdown-from-high**, harvest rate, flow imbalance). It is a
+  pure deterministic replay of `tape/conditions.report()` over the stored bars, so it
+  rebuilds at will and can never disagree with what the dashboard renders. **Backfilled
+  2026-06-07** (`python -m tape.warehouse build-signals`): **83,017 hourly rows,
+  2016-12-17 → 2026-06-07** (the first ~24h lacks a full trailing window, skipped); the
+  hourly `warehouse-append` writes new rows going forward (no new service). A `source`
+  flag marks each row backfilled(1)/live(0). **Flow imbalance is the one field NULL
+  before 2026-06-02** — it needs the trade tape (live-era only; 122 populated rows at
+  backfill); the other four signals AND the overall verdict (which excludes flow)
+  reconstruct full-depth across the whole history. (The `drawdown-from-high` metric is new this session — a *directional*
+  downtrend-bleed read added alongside the direction-blind regime ratio on the
+  dashboard, using MAGI's own `drawdown_from_high` definition; see `tape/README.md`.)
+- **Offline corpus sources for agent decision-tests (clarification, 2026-06-06).**
+  Both `observer.db` candles (~8yr **hourly** XRP) and `tape/history.db` (~9.5yr
+  **1-minute** contiguous XRP) are **reconstruction** substrates — you rebuild a past
+  `world_state` from candles. NEITHER is "real live states": MAGI traded live only ~5
+  days (2026-05-23→28) on a ~$67 book, and that decision data (`debate_records`) is
+  **contaminated** (Letta-era) and barred as labels/baseline. **Forward-labeling**
+  (label each reconstructed state by its forward price path — the proven 2026-06-06
+  Balthasar method) is a *labeling method applied to candles*; it works on EITHER
+  source. So the DB choice is **resolution/coverage (hourly vs 1-minute)**, NOT
+  "live-vs-reconstructed" or "unlabeled-vs-labeled" — framing observer.db as "live
+  unlabeled states" vs history.db as "labeled reconstructions" is a false split. (For
+  the downtrend brake specifically, `02` item 0★ treats `drawdown_from_high_7d` as a
+  Balthasar *judgment input* he weighs and cites — NOT a fitted `dd7d ≤ −X ⇒ PAUSE`
+  threshold — and that field is not yet wired, so an offline Balthasar tuning corpus is
+  secondary, not the next step.)
 - **Letta Cloud** (api.letta.com) — agent state, memory blocks, message threads.
   Authenticated via `LETTA_API_KEY` in `/root/xrp_grid/.env`. LLM config
   knobs synced via `magi/provision_agents.AGENT_CONFIG`.
 
 ## Services
-| Service | State since 2026-05-28 shutdown | Pre-shutdown role |
-|---|---|---|
-| `magi.service` | **inactive + disabled** | active (scheduler, observer, MAGI cycles) |
-| `magi-dashboard.service` | **inactive + disabled** | active (Flask :5000; public via cloudflared tunnel → api.ethobs.uk, app-side Flask cookie auth — see `/login`) |
-| `letta.service` | inactive + disabled (self-hosted Docker, dormant for rollback only) | unchanged |
+Verified against `systemctl` 2026-06-06. **The only things RUNNING are the market-tape
+stack** (a separate data-collection concern); **MAGI trading is fully stopped.** See the
+STATE LEDGER at the top of `01_CURRENT_STATE.md` for the full live-vs-experimental map.
 
-Both MAGI services were stopped + disabled on 2026-05-28 for the Letta migration
-and will NOT auto-start on reboot. Do not restart without operator direction.
-(Historical restart command, for reference only:
-`systemctl restart magi.service magi-dashboard.service`.)
+| Service | State NOW (2026-06-06) | Role |
+|---|---|---|
+| `magi.service` | **inactive + disabled** | MAGI trading (scheduler, observer, council cycles) — OFF since the 2026-05-28 shutdown; will NOT auto-start |
+| `magi-dashboard.service` | **active + enabled** | **REPURPOSED** — now serves the *tape monitor* dashboard (Flask :5000, public via cloudflared → api.ethobs.uk, app-side cookie auth), **NOT** the MAGI council/grid |
+| `tape-collector.service` | **active + enabled** | Live Kraken XRP/USD tape collector → `tape/market_tape.db` (standalone; imports nothing from `magi/`) |
+| `warehouse-append.timer` | **active** (hourly) | Appends live tape → `tape/history.db` warehouse |
+| `tape-backup.timer` / `warehouse-backup.timer` | **active** (daily) | gzip → GCS backups of the tape + warehouse |
+| `letta.service` | inactive + disabled | Self-hosted Letta Docker — dormant, kept for rollback only |
+
+Only `magi.service` (the MAGI trading system) is stopped; it was stopped + disabled on
+2026-05-28 for the migration and will NOT auto-start on reboot. `magi-dashboard.service`
+still runs but now drives the **tape monitor**, not MAGI. Do not restart `magi.service`
+without operator direction. (Historical restart command, reference only:
+`systemctl restart magi.service`.)
 
 ## Out of scope / dead code
 - Self-hosted Letta Docker (dormant; `/root/xrp_grid/letta/` and pgdata preserved for rollback)
@@ -358,8 +471,10 @@ schedule is a backstop, not the primary trigger. Target steady state:
   `WAKE_MIN_INTERVAL_MIN`, conditional R1 via `should_run_r1`) continuing to bound
   cost.
 
-This is the architecture the gate-tuning work has been building toward — it is the
-target, not a dial to re-derive from the cost-reduction history.
+This is the architecture the gate-tuning work has been building toward — and as of
+2026-06-09 (BU-2) it is the IMPLEMENTED scheduler behavior, not just the target:
+daily floor 20:00 EST + 25h max-silence backstop + gate wakes, running live on the
+paper bring-up.
 
 ## See also
 

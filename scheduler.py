@@ -34,18 +34,34 @@ log = logging.getLogger('scheduler')
 # OHLC) are well inside rate limits at 6×/h; the rate-limited counter is
 # trading-side only, untouched.
 OBSERVER_INTERVAL_MINUTES = 10
-MAGI_HOURS_EST = [0, 4, 8, 12, 16, 20]   # every 4 hours (6 cycles/day) — ~$13/mo to fit $20 Letta plan
+
+# --- Council cadence: GATE-PRIMARY, clock as backstop (BU-2, 2026-06-09) ---
+# The always-on free gate (magi/gate.py via gate_monitor) decides whether the
+# paid council wakes in between; the clock only guarantees a FLOOR of one
+# council call per day — the end-of-day assessment/recap, grid or no grid —
+# plus a max-silence backstop for the case where the service was down across
+# the daily slot. This replaces the Letta-era MAGI_HOURS_EST=[0,4,8,12,16,20]
+# fixed 4h schedule (6 unconditional cycles/day, priced for the dead $20/mo
+# Letta plan). NOTE: dashboard.py:_next_magi_eta() mirrors the daily hour —
+# update both places if it changes.
+MAGI_DAILY_HOUR_EST = 20      # end-of-day council assessment fires in this EST hour
+MAGI_MAX_SILENCE_HOURS = 25   # force a cycle if none has run in this many hours
 
 # --- Gate wake wire ---------------------------------------------------
 # A gate trigger in WAKE_CLASS_TRIGGERS that fires since the last cycle wakes
-# MAGI OFF-schedule (vs. only annotating the next 4h slot). Throttled to >=
-# WAKE_MIN_INTERVAL_MIN since any MAGI cycle so the Letta spend stays bounded:
-# in calm markets ~$0 extra, in a real event one prompt. Edge-triggered gate
-# functions + consumed_in_cycle marking prevent a standing condition from
-# re-waking. Wake-class is deliberately the urgent subset (book one-sided,
-# grid breach, regime flip); low-urgency triggers (T15 skew drift early-warn,
-# T6/T7 scorer) still wait for the next scheduled or woken cycle.
-WAKE_CLASS_TRIGGERS = ("T14", "T2", "T11")
+# MAGI OFF-schedule (vs. waiting for the daily floor call). Throttled to >=
+# WAKE_MIN_INTERVAL_MIN since any MAGI cycle so vendor spend stays bounded:
+# in calm markets ~$0 extra, in a real event one prompt. Gate detection is
+# level-based (each eval writes a fresh event row), so consumed_in_cycle alone
+# does NOT stop a standing condition from re-waking each throttle window —
+# T2 additionally carries an episode guard (_t2_episode_already_answered,
+# 2026-06-10): a breach the council already ruled on (same direction + band)
+# is dropped instead of re-asked. T16 (drawdown rung, added 2026-06-10)
+# carries the same guard keyed on rung depth — one wake per band-width of
+# drawdown deepening. Wake-class is deliberately the urgent subset (book one-sided,
+# grid breach, regime flip, sustained drawdown); low-urgency triggers (T15 skew
+# drift early-warn, T6/T7 scorer) still wait for the next scheduled or woken cycle.
+WAKE_CLASS_TRIGGERS = ("T14", "T2", "T11", "T16")
 WAKE_MIN_INTERVAL_MIN = 60
 _last_magi_cycle_at = None   # set by run_magi_cycle; drives the wake throttle
 
@@ -61,8 +77,8 @@ _WAKE_BLOCKING_OVERRIDE_PREFIXES = (
     # honored INSIDE the council — Balthasar's synthesis sees regime_action and
     # declines to reconfigure over a live STAND_DOWN (council_v2 downgrades the
     # RECONFIGURE to THESIS_HOLDS) — so the scheduler no longer needs to pre-empt the
-    # wake on it. Wake cadence is still governed by the gate, the 4h backstop, and the
-    # geometry_veto='RISK_BLOCK' column suppressor below.
+    # wake on it. Wake cadence is still governed by the gate, the daily floor +
+    # max-silence backstop, and the geometry_veto='RISK_BLOCK' column suppressor below.
     "[HALT]",
     "[GRID_DEGENERATE]",
     "[COUNCIL_COLLAPSED]",
@@ -260,54 +276,16 @@ def run_observer_cycle():
         log.warning(f"Grid config outcome update failed: {e}")
 
 
-def _update_rotation_counter_and_maybe_rotate(cycle_success: bool) -> None:
-    """Persist the rotation_cycle_counter increment and (on success only)
-    invoke magi.memory_lifecycle.maybe_rotate. Called from run_magi_cycle
-    after a cycle was actually attempted (i.e. guardrails passed).
-
-    Increment fires on success AND on fail so the cadence runs on calendar
-    cycles, not only successful ones. Rotation itself only fires on
-    success — distilling a bad cycle's thread is worse than skipping the
-    rotation, since the thread state may already be inconsistent.
-    """
-    try:
-        from database import get_system_state, set_system_state
-        counter = int(get_system_state('rotation_cycle_counter',
-                                       default='0'))
-        counter += 1
-        set_system_state('rotation_cycle_counter', counter)
-        log.info(
-            "rotation_cycle_counter = %d (cycle %s)",
-            counter, 'succeeded' if cycle_success else 'failed',
-        )
-        if cycle_success:
-            try:
-                from magi.memory_lifecycle import maybe_rotate
-                maybe_rotate(counter)
-            except Exception as e:
-                log.error(f"maybe_rotate({counter}) raised: {e!r}")
-    except Exception as e:
-        log.error(f"rotation counter persistence failed: {e!r}")
-
-
 def run_magi_cycle(trigger='scheduled'):
     """Run full MAGI supervision cycle and apply to grid.
 
-    Counter / rotation lifecycle (after any attempted cycle, i.e. one
-    that passed the guardrail check):
-      - increment rotation_cycle_counter in system_state and persist
-      - on a successful cycle ONLY, call maybe_rotate(counter)
-      - on a failed cycle: increment but do not rotate (don't distil a
-        bad cycle's thread)
-    Guardrail-blocked cycles do not increment — no council ran, no
-    thread accumulated.
-
-    Config-drift validator runs at start AND end of every cycle:
-      - start hook catches drift introduced between provisioning runs
-        (e.g. the 2026-05-20 BYOK runbook bug that reset Balthasar's
-        temperature to 1.0 for ~17h)
-      - end hook catches drift introduced mid-cycle by any mechanism
-      Failure mode: emit critical alert, continue. Never blocks trading.
+    (The Letta-era per-cycle hooks were removed 2026-06-09, BU-1/BU-3:
+    the config-drift validator — it compared live Letta `model_settings`
+    against provision_agents.AGENT_CONFIG, a world that no longer exists;
+    seat model handles are now constants in the seat-callers and per-cycle
+    config is recorded via the debate_records.config_version fingerprint —
+    and the memory-rotation counter hook, which compacted Letta threads /
+    self_model, concepts the stateless seats don't have.)
     """
     log.info(f"--- MAGI CYCLE (trigger={trigger}) ---")
 
@@ -316,13 +294,6 @@ def run_magi_cycle(trigger='scheduled'):
     # fire within WAKE_MIN_INTERVAL_MIN of any prior cycle.
     global _last_magi_cycle_at
     _last_magi_cycle_at = datetime.now(timezone.utc)
-
-    # Pre-cycle config drift check — non-fatal.
-    try:
-        from magi.config_validator import alert_on_config_drift
-        alert_on_config_drift()
-    except Exception as e:
-        log.warning("config_validator pre-cycle check failed: %s", e)
 
     ok, failures = check_all_guardrails()
     if not ok:
@@ -334,7 +305,6 @@ def run_magi_cycle(trigger='scheduled'):
             log.error(f"Cancel-all failed: {e}")
         return
 
-    cycle_success = False
     try:
         result = run_cycle(trigger=trigger)
         if result:
@@ -369,145 +339,23 @@ def run_magi_cycle(trigger='scheduled'):
             if price:
                 engine.update_inventory(price)
             log.info(f"MAGI cycle complete — grid={consensus['grid_action']} risk={consensus['risk_action']}")
-            cycle_success = True
         else:
             log.warning("MAGI cycle returned no result")
     except Exception as e:
         log.exception("MAGI cycle error: %s", e)
 
-    # Counter + rotation hook — runs whether the cycle succeeded or failed.
-    # Wrapped internally so nothing in here can crash the scheduler loop.
-    _update_rotation_counter_and_maybe_rotate(cycle_success)
-
-    # Post-cycle config drift check — non-fatal. Catches mid-cycle drift
-    # introduced by any mechanism (e.g. an out-of-band agents.update).
-    try:
-        from magi.config_validator import alert_on_config_drift
-        alert_on_config_drift()
-    except Exception as e:
-        log.warning("config_validator post-cycle check failed: %s", e)
 
 
-def sweep_letta_steps_for_failures():
-    """Scan recent Letta steps for credit/auth/error stop_reasons that the
-    live council.py hook might have missed (summarization, retries, anything
-    not flowing through the message-create return path).
-
-    Scope: MAGI agents only (casper/melchior/balthasar via agent_registry).
-    Window: from MAX(magi_alerts.timestamp) - 1h, or last 6h on first call.
-    Dedup: insert_alert skips on existing step_id.
-
-    The Letta SDK's c.steps.list() is server-side broken on the `order`
-    parameter (returns 400), so this sweep walks recent runs per agent and
-    pulls their steps via /v1/runs/{run_id}/steps which works correctly.
-    """
-    import os
-    import requests
-    from datetime import timedelta
-    from database import (
-        get_agent_registry_row, get_latest_alert_timestamp, insert_alert,
-    )
-
-    api_key = os.environ.get('LETTA_API_KEY')
-    if not api_key:
-        return
-    headers = {'Authorization': f'Bearer {api_key}'}
-
-    last_ts = get_latest_alert_timestamp()
-    if last_ts:
-        try:
-            lookback_start = datetime.fromisoformat(last_ts) - timedelta(hours=1)
-        except ValueError:
-            lookback_start = datetime.utcnow() - timedelta(hours=6)
-    else:
-        lookback_start = datetime.utcnow() - timedelta(hours=6)
-
-    stop_reason_map = {
-        'insufficient_credits':  ('credit_exhausted', 'critical'),
-        'llm_api_error':         ('provider_error',   'warn'),
-        'invalid_llm_response':  ('provider_error',   'warn'),
-        'error':                 ('unknown_failure',  'warn'),
-    }
-
-    swept = 0
-    alerted = 0
-    for agent_id in ('casper', 'melchior', 'balthasar'):
-        row = get_agent_registry_row(agent_id)
-        if not row:
-            continue
-        letta_id = row.get('letta_agent_id')
-        if not letta_id:
-            continue
-        try:
-            r = requests.get(
-                'https://api.letta.com/v1/runs',
-                headers=headers,
-                params={'agent_id': letta_id, 'limit': 50},
-                timeout=15,
-            )
-            r.raise_for_status()
-            runs = r.json()
-        except Exception as e:
-            log.warning("sweep: runs list failed for %s: %r", agent_id, e)
-            continue
-        for run in runs:
-            try:
-                created = datetime.fromisoformat(
-                    (run.get('created_at') or '').replace('Z', '')
-                )
-            except ValueError:
-                continue
-            if created < lookback_start:
-                continue
-            try:
-                rs = requests.get(
-                    f"https://api.letta.com/v1/runs/{run['id']}/steps",
-                    headers=headers, timeout=15,
-                )
-                rs.raise_for_status()
-                steps = rs.json()
-            except Exception as e:
-                log.warning("sweep: steps list failed for run %s: %r",
-                            run.get('id'), e)
-                continue
-            for step in steps:
-                swept += 1
-                stop = step.get('stop_reason')
-                status = step.get('status')
-                err_data_str = str(step.get('error_data') or '').lower()
-                if '401' in err_data_str or 'unauthorized' in err_data_str \
-                        or 'authentication_error' in err_data_str:
-                    cat, sev = 'auth_failed', 'critical'
-                elif '429' in err_data_str or 'rate limit' in err_data_str:
-                    cat, sev = 'rate_limited', 'warn'
-                elif stop in stop_reason_map:
-                    cat, sev = stop_reason_map[stop]
-                elif status == 'failed':
-                    cat, sev = 'unknown_failure', 'warn'
-                else:
-                    continue
-                inserted = insert_alert(
-                    severity=sev, category=cat,
-                    message=(f"[sweep] stop_reason={stop} status={status} "
-                             f"provider={step.get('provider_name','?')}"
-                             f"/{step.get('provider_category','?')} "
-                             f"error_data={err_data_str[:200]}"),
-                    agent_id=agent_id,
-                    provider_category=step.get('provider_category'),
-                    provider_name=step.get('provider_name'),
-                    step_id=step.get('id'),
-                )
-                if inserted:
-                    alerted += 1
-    log.info("sweep: walked %d steps, %d new alerts", swept, alerted)
-
-
-def should_run_magi(now_est: datetime, last_magi_hour: int) -> bool:
-    """Check if it's time for a MAGI cycle."""
-    current_hour = now_est.hour
-    if current_hour in MAGI_HOURS_EST and current_hour != last_magi_hour:
-        return True
-    return False
+def should_run_magi(now_est: datetime, last_scheduled_date) -> bool:
+    """Daily clock floor: fire the scheduled council call once per EST
+    calendar day, in the MAGI_DAILY_HOUR_EST hour. `last_scheduled_date`
+    is the EST date of the last scheduled fire (datetime.date or None) —
+    the date-based dedupe that stops the call re-firing on every 60s loop
+    tick within the hour. Gate wakes and the max-silence backstop are
+    handled separately in the main loop; this function is ONLY the
+    once-a-day floor."""
+    return (now_est.hour == MAGI_DAILY_HOUR_EST
+            and now_est.date() != last_scheduled_date)
 
 
 def _is_wake_suppressed_nontrading() -> tuple:
@@ -623,6 +471,10 @@ def _wake_dwell_status(trigger_id: str) -> tuple:
                 once dwell accrues (or the condition clears). No credit spend.
       'drop'  — condition is no longer live (a transient breach/flip/one-sided
                 blip that resolved). Caller consumes the event without waking.
+      'drop_answered' — (T2/T16) condition is live but a council cycle already
+                answered this episode (T2: same direction + band; T16: same
+                or deeper drawdown rung). Caller consumes with the
+                'wake_episode_answered' sentinel — one wake per episode.
 
     WAKE_DWELL_MINUTES <= 0 disables the dwell (always 'wake'). Any DB/parse
     failure returns 'wake' — fail toward the prior behaviour rather than
@@ -660,6 +512,9 @@ def _wake_dwell_status(trigger_id: str) -> tuple:
             if trigger_id == "T11":
                 return _dwell_t11(conn, details, age_min,
                                   float(WAKE_DWELL_MINUTES))
+            if trigger_id == "T16":
+                return _dwell_t16(conn, details, age_min,
+                                  float(WAKE_DWELL_MINUTES))
             # Unknown wake trigger — generic age-only dwell.
             if age_min >= WAKE_DWELL_MINUTES:
                 return "wake", (f"age {age_min:.1f}min >= dwell "
@@ -693,12 +548,63 @@ def _grid_band(conn) -> tuple:
         centre * (1.0 - n_pairs * spacing)
 
 
+def _t2_episode_already_answered(conn, direction: str,
+                                 upper: float, lower: float) -> bool:
+    """True when a prior T2 fire for this SAME breach episode — same
+    direction, same grid band — was already consumed by a real council
+    cycle (consumed_in_cycle = 'cyc…', never a suppression sentinel).
+
+    The council has ruled on this exact standing condition; re-waking it
+    every throttle window re-asks the same question for the same answer
+    (the 2026-06-10 04:00/05:00/06:00 triple-wake: two redundant MAINTAIN
+    cycles). One wake per episode. A NEW episode — band rebuilt by a
+    recentre, or the breach flipping direction — has different details and
+    wakes normally. A standing answered breach still gets fresh judgment
+    from the daily floor call, and a dry ladder still trips
+    [GRID_DEGENERATE].
+
+    Fails open (False → wake) on any DB/parse error.
+    """
+    import json as _json
+    import time as _time
+    try:
+        rows = conn.execute(
+            "SELECT details FROM magi_gate_events "
+            "WHERE trigger_id='T2' AND fired=1 "
+            "AND consumed_in_cycle LIKE 'cyc%' "
+            "AND timestamp >= ?",
+            (_time.time() - 48 * 3600,),
+        ).fetchall()
+    except Exception as e:
+        log.warning("_t2_episode_already_answered: DB read failed (%s) — "
+                    "not suppressing", e)
+        return False
+    for r in rows:
+        try:
+            det = _json.loads(r["details"]) if r["details"] else {}
+            if det.get("direction") != direction:
+                continue
+            du, dl = float(det["upper"]), float(det["lower"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        # Stored band values are rounded to 5dp; one spacing step apart is
+        # >= ~0.3%, so a 0.01% relative tolerance separates bands cleanly.
+        if abs(du - upper) < 1e-4 * upper and abs(dl - lower) < 1e-4 * lower:
+            return True
+    return False
+
+
 def _dwell_t2(conn, age_min: float, dwell_min: float) -> tuple:
     """T2 dwell: price must have stayed beyond the SAME grid boundary for
     >= dwell_min, measured on 1m candles (a true continuous dwell, matching
     the operator's 'remains above/below for X minutes'). Falls back to event
     age + latest 1h close when 1m history is too short (startup / REST
-    fallback path, which only writes 1h candles)."""
+    fallback path, which only writes 1h candles).
+
+    A sustained breach additionally passes the episode guard
+    (_t2_episode_already_answered): if a council cycle already consumed a T2
+    fire for this same direction + band, the event is dropped
+    ('drop_answered') instead of re-waking — one wake per breach episode."""
     _, upper, lower = _grid_band(conn)
     if upper is None:
         return "defer", "no grid_state for band"
@@ -709,6 +615,13 @@ def _dwell_t2(conn, age_min: float, dwell_min: float) -> tuple:
         if c < lower:
             return "below"
         return None
+
+    def _wake_or_answered(side: str, wake_reason: str) -> tuple:
+        if _t2_episode_already_answered(conn, side, upper, lower):
+            return "drop_answered", (
+                f"breach {side} already answered by a council cycle for "
+                f"this band — one wake per episode")
+        return "wake", wake_reason
 
     need = max(1, int(round(dwell_min)))  # one 1m candle ~= one minute
     rows = conn.execute(
@@ -722,7 +635,8 @@ def _dwell_t2(conn, age_min: float, dwell_min: float) -> tuple:
         if newest is None:
             return "drop", "breach cleared (latest 1m inside band)"
         if all(s == newest for s in sides):
-            return "wake", f"price {newest} band for >= {need}min (1m)"
+            return _wake_or_answered(
+                newest, f"price {newest} band for >= {need}min (1m)")
         return "defer", (f"breach {newest} not yet sustained {need}min (1m)")
 
     # Fallback: insufficient 1m history.
@@ -736,10 +650,60 @@ def _dwell_t2(conn, age_min: float, dwell_min: float) -> tuple:
     if side is None:
         return "drop", "breach cleared (latest 1h inside band)"
     if age_min >= dwell_min:
-        return "wake", (f"price {side} band, event age {age_min:.0f}min >= "
-                        f"{dwell_min:.0f}min (1h fallback)")
+        return _wake_or_answered(
+            side, (f"price {side} band, event age {age_min:.0f}min >= "
+                   f"{dwell_min:.0f}min (1h fallback)"))
     return "defer", (f"breach {side}, age {age_min:.0f}min < "
                      f"{dwell_min:.0f}min (1h fallback)")
+
+
+def _t16_rung_already_answered(conn, rung: int) -> bool:
+    """One council wake per drawdown rung: True when a prior T16 fire at the
+    SAME or DEEPER rung was consumed by a real council cycle within the last
+    7 days (the signal's own lookback window). A deepening drawdown that
+    crosses into a new rung wakes again; an unchanged answered rung does
+    not. Sentinel consumptions don't count. Fails open (False -> wake)."""
+    import json as _json
+    import time as _time
+    try:
+        rows = conn.execute(
+            "SELECT details FROM magi_gate_events "
+            "WHERE trigger_id='T16' AND fired=1 "
+            "AND consumed_in_cycle LIKE 'cyc%' "
+            "AND timestamp >= ?",
+            (_time.time() - 7 * 86400,),
+        ).fetchall()
+    except Exception as e:
+        log.warning("_t16_rung_already_answered: DB read failed (%s) — "
+                    "not suppressing", e)
+        return False
+    for r in rows:
+        try:
+            det = _json.loads(r["details"]) if r["details"] else {}
+            if int(det.get("rung") or 0) >= rung:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _dwell_t16(conn, details: dict, age_min: float, dwell_min: float) -> tuple:
+    """T16 dwell: drawdown-from-7d-high is a slow signal, so the age dwell
+    is mostly a formality — the real spend control is the rung-episode
+    guard (one council wake per integer rung of drawdown depth)."""
+    rung = int(details.get("rung") or 0)
+    if rung < 1:
+        return "drop", "drawdown recovered above first rung"
+    if _t16_rung_already_answered(conn, rung):
+        return "drop_answered", (
+            f"drawdown rung {rung} already answered by a council cycle — "
+            f"one wake per rung")
+    if age_min >= dwell_min:
+        return "wake", (f"drawdown rung {rung} "
+                        f"({details.get('drawdown_pct')}% from 7d high) "
+                        f"persisted >= {dwell_min:.0f}min")
+    return "defer", (f"drawdown rung {rung}, age {age_min:.0f}min < "
+                     f"{dwell_min:.0f}min")
 
 
 def _dwell_t14(conn, age_min: float, dwell_min: float) -> tuple:
@@ -813,7 +777,7 @@ def _pending_wake_class_trigger():
 
 
 def main():
-    global running
+    global running, _last_magi_cycle_at
 
     log.info("========================================")
     log.info("MAGI XRP Grid Bot — Scheduler Starting")
@@ -846,28 +810,6 @@ def main():
         log.error("GateMonitor failed to start (non-fatal): %s — "
                   "gate will fall back to observer poll cadence", e)
         _gate_monitor = None
-
-    # Memory rotation: surface the current counter so operators can see
-    # where we are in the cadence. Persisted in system_state, incremented
-    # once per attempted MAGI cycle in run_magi_cycle(). Read-only here.
-    try:
-        from database import get_system_state
-        from config import ROTATION_CADENCE
-        rc = int(get_system_state('rotation_cycle_counter', default='0'))
-        if rc <= 0:
-            cycles_to_next = ROTATION_CADENCE
-        else:
-            cycles_to_next = (
-                (ROTATION_CADENCE - (rc % ROTATION_CADENCE))
-                % ROTATION_CADENCE
-            ) or ROTATION_CADENCE
-        log.info(
-            "Memory rotation: counter=%d, cadence=%d — next rotation in "
-            "%d successful cycle(s)",
-            rc, ROTATION_CADENCE, cycles_to_next,
-        )
-    except Exception as e:
-        log.warning(f"Could not read rotation_cycle_counter at startup: {e}")
 
     # Fund detection — only enforced when configured exchange is the trading exchange
     from config import EXCHANGE, MAX_INVENTORY_USD
@@ -952,6 +894,9 @@ def main():
                     f"minutes ago (< 30 min debounce)"
                 )
                 skip_startup = True
+                # Seed the wake-throttle / max-silence baseline from the DB
+                # row — a skipped startup would otherwise leave it None.
+                _last_magi_cycle_at = last_ts
         if not skip_startup:
             run_magi_cycle(trigger='startup')
     except Exception as e:
@@ -960,16 +905,18 @@ def main():
 
     last_observer_time = datetime.now(timezone.utc)
 
-    # Initialize from DB to avoid duplicate cycle on restart.
+    # Initialize the daily-floor dedupe from DB so a restart inside the
+    # daily hour doesn't re-fire a scheduled call that already ran today.
     # Phase 5 writes to debate_records; legacy magi_decisions is sparse and
     # cannot be used as a debounce source.
+    last_scheduled_date = None
     try:
         import pytz
         from database import get_conn
         conn = get_conn()
         row = conn.execute(
             "SELECT timestamp FROM debate_records "
-            "ORDER BY id DESC LIMIT 1"
+            "WHERE trigger='scheduled' ORDER BY id DESC LIMIT 1"
         ).fetchone()
         conn.close()
         if row and row['timestamp']:
@@ -978,41 +925,25 @@ def main():
                 tzinfo=timezone.utc).astimezone(est)
             now_est = datetime.now(timezone.utc).astimezone(est)
             if (last_dt.date() == now_est.date() and
-                    last_dt.hour == now_est.hour):
-                last_magi_hour = last_dt.hour
-                log.info(f"Scheduler restart: MAGI already ran at "
-                         f"{last_dt.strftime('%H:%M')} EST — skipping re-fire")
-            else:
-                last_magi_hour = -1
-        else:
-            last_magi_hour = -1
+                    last_dt.hour >= MAGI_DAILY_HOUR_EST):
+                last_scheduled_date = last_dt.date()
+                log.info(f"Scheduler restart: daily MAGI call already ran "
+                         f"at {last_dt.strftime('%H:%M')} EST today — "
+                         f"not re-firing")
     except Exception as e:
-        log.warning(f"Could not read last MAGI time from debate_records: {e} — defaulting to -1")
-        last_magi_hour = -1
-
-    from config import LETTA_STEPS_SWEEP_INTERVAL_MIN
-    last_sweep_time = datetime.now(timezone.utc) - \
-        timedelta(minutes=LETTA_STEPS_SWEEP_INTERVAL_MIN)  # fire on first tick
+        log.warning(f"Could not read last scheduled MAGI time from "
+                    f"debate_records: {e} — daily-floor dedupe starts empty")
 
     log.info(
         f"Scheduler running — observer every {OBSERVER_INTERVAL_MINUTES}min, "
-        f"MAGI hours (EST) = {MAGI_HOURS_EST}, "
-        f"alert sweep every {LETTA_STEPS_SWEEP_INTERVAL_MIN}min"
+        f"council cadence gate-primary (daily floor at "
+        f"{MAGI_DAILY_HOUR_EST:02d}:00 EST, max-silence backstop "
+        f"{MAGI_MAX_SILENCE_HOURS}h)"
     )
 
     while running:
         now_utc = datetime.now(timezone.utc)
         now_est = now_utc.astimezone(EST)
-
-        # Background alert sweep — every LETTA_STEPS_SWEEP_INTERVAL_MIN minutes
-        if LETTA_STEPS_SWEEP_INTERVAL_MIN > 0:
-            mins_since_sweep = (now_utc - last_sweep_time).total_seconds() / 60
-            if mins_since_sweep >= LETTA_STEPS_SWEEP_INTERVAL_MIN:
-                try:
-                    sweep_letta_steps_for_failures()
-                except Exception as e:
-                    log.error(f"sweep_letta_steps_for_failures raised: {e!r}")
-                last_sweep_time = now_utc
 
         # Observer: run every 60 minutes
         minutes_since_observer = (now_utc - last_observer_time).total_seconds() / 60
@@ -1034,23 +965,34 @@ def main():
                 except Exception as e:
                     log.error(f"Market knowledge recompute failed: {e}")
 
-        # MAGI: fire when the wall-clock hour matches a slot in MAGI_HOURS_EST
-        # and we haven't already fired this hour. Dedupe is the `current_hour
-        # != last_magi_hour` check inside should_run_magi(); rollover from one
-        # entry to the next (including 20 → 0 across midnight) is handled by
-        # that comparison alone. The previous midnight reset
-        # (`if hour==0: last_magi_hour=-1`) ran on every 60-second loop
-        # iteration while the wall-clock was in EST hour 0, causing the cycle
-        # to re-fire minute-by-minute through that whole hour — bug observed
-        # at 2026-05-18 04:00 UTC (=00:00 EDT) producing 47 cycles in 60 min.
-        if should_run_magi(now_est, last_magi_hour):
+        # Council cadence (gate-primary, BU-2 2026-06-09). Priority order:
+        #   1. Daily clock floor — one scheduled call per EST day in the
+        #      MAGI_DAILY_HOUR_EST hour (end-of-day assessment, grid or no
+        #      grid). Dedupe is the per-DATE check in should_run_magi(), so
+        #      it cannot re-fire minute-by-minute within the hour (the
+        #      2026-05-18 47-cycles-in-60-min bug class).
+        #   2. Max-silence backstop — if NO cycle of any kind has run in
+        #      MAGI_MAX_SILENCE_HOURS (e.g. the service was down across the
+        #      daily slot), force one rather than skip a whole day.
+        #   3. Gate wakes — every call in between is decided by the free
+        #      always-on gate (wake-class triggers, throttle + dwell below).
+        if should_run_magi(now_est, last_scheduled_date):
             run_magi_cycle(trigger='scheduled')
-            last_magi_hour = now_est.hour
+            last_scheduled_date = now_est.date()
+        elif (_last_magi_cycle_at is not None
+              and (now_utc - _last_magi_cycle_at).total_seconds() / 3600.0
+              >= MAGI_MAX_SILENCE_HOURS):
+            log.info(
+                "Max-silence backstop: no council cycle in >= %dh — "
+                "forcing one", MAGI_MAX_SILENCE_HOURS,
+            )
+            run_magi_cycle(trigger='backstop_silence')
         else:
             # Off-schedule gate wake: a wake-class trigger fired since the
             # last cycle. Throttled to >= WAKE_MIN_INTERVAL_MIN since ANY
             # MAGI cycle so a depleting book gets the council involved within
-            # the hour instead of waiting up to 4h — without open-ended spend.
+            # the hour instead of waiting up to a day for the floor call —
+            # without open-ended spend.
             throttle_ok = (
                 _last_magi_cycle_at is None
                 or (now_utc - _last_magi_cycle_at).total_seconds() / 60.0
@@ -1090,13 +1032,16 @@ def main():
 
                     if not decided:
                         status, reason = _wake_dwell_status(pending)
-                        if status == "drop":
+                        if status in ("drop", "drop_answered"):
                             log.info(
                                 "gate_wake_dropped: %s — %s; consuming "
                                 "event, no wake", pending, reason,
                             )
                             _consume_wake_gate_event(
-                                pending, "wake_breach_cleared")
+                                pending,
+                                "wake_episode_answered"
+                                if status == "drop_answered"
+                                else "wake_breach_cleared")
                         elif status == "defer":
                             log.info(
                                 "gate_wake_deferred: %s — %s; re-checking "

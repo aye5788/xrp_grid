@@ -2018,7 +2018,7 @@ def run_cycle(trigger: str = "manual", force: bool = False) -> dict:
     # cons in the exact shapes _build_debate_record and enforce_hard_rules consume.
     # (The dead Letta update_world_state push and the ADK parallel-R0 / conditional-R1
     # block are gone — see magi/council_v2.py.)
-    round_0, round_1, cons = run_council(world_state, cycle_id)
+    round_0, round_1, cons = run_council(world_state, cycle_id, trigger=trigger)
     conflict = None  # vestigial _build_debate_record arg (unused by the builder)
     if cons.get("council_error"):
         log.error("Council stood down on seat failure: %s", cons["council_error"])

@@ -149,3 +149,79 @@ def current_trace_id():
     except Exception as e:  # noqa: BLE001
         log.warning("current_trace_id failed: %s", e)
         return None
+
+
+def set_trace_tags(trace_id: str, tags: list):
+    """Set tags on an EXISTING trace via the ingestion API (a `trace-create`
+    event with the same trace id MERGES into the stored trace — this is the
+    documented update path; SDK 4.7.1 has no public trace-update method).
+
+    Tags are the only trace-level field the Metrics API / dashboard widgets
+    can GROUP scores by (metadata is filter-only on traces, invisible to the
+    scores views), so the cycle trigger is mirrored here as `trigger:<class>`.
+    Fire-and-forget like everything in this module.
+    """
+    if not trace_id or not tags:
+        return
+    try:
+        import os
+        import uuid
+        from datetime import datetime, timezone
+        import requests
+        base = (os.environ.get("LANGFUSE_BASE_URL") or "").rstrip("/")
+        pub = os.environ.get("LANGFUSE_PUBLIC_KEY")
+        sec = os.environ.get("LANGFUSE_SECRET_KEY")
+        if not (base and pub and sec):
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        batch = {"batch": [{
+            "id": str(uuid.uuid4()),
+            "type": "trace-create",
+            "timestamp": now,
+            "body": {"id": trace_id, "tags": [str(t) for t in tags]},
+        }]}
+        requests.post(f"{base}/api/public/ingestion", json=batch,
+                      auth=(pub, sec), timeout=3)
+    except Exception as e:  # noqa: BLE001 - tracing never breaks the caller
+        log.warning("set_trace_tags(%s) failed: %s", trace_id, e)
+
+
+def push_trace_scores(trace_id: str, scores: dict, comment: str | None = None):
+    """Attach scores to an EXISTING trace via the public REST API (the SDK's
+    score path needs an active span context; the outcome backfill runs hours
+    after the trace closed, so REST-by-traceId is the right tool).
+
+    `scores` is {name: value}: bool -> BOOLEAN, int/float -> NUMERIC,
+    str -> CATEGORICAL; None values are skipped. Fire-and-forget like
+    everything in this module — a Langfuse outage must never break the
+    observer loop.
+    """
+    if not trace_id or not scores:
+        return
+    try:
+        import os
+        import requests
+        base = (os.environ.get("LANGFUSE_BASE_URL") or "").rstrip("/")
+        pub = os.environ.get("LANGFUSE_PUBLIC_KEY")
+        sec = os.environ.get("LANGFUSE_SECRET_KEY")
+        if not (base and pub and sec):
+            return
+        for name, value in scores.items():
+            if value is None:
+                continue
+            body = {"traceId": trace_id, "name": name}
+            if isinstance(value, bool):
+                body["value"] = 1 if value else 0
+                body["dataType"] = "BOOLEAN"
+            elif isinstance(value, str):
+                body["value"] = value
+                body["dataType"] = "CATEGORICAL"
+            else:
+                body["value"] = float(value)
+                body["dataType"] = "NUMERIC"
+            if comment:
+                body["comment"] = comment
+            requests.post(f"{base}/api/public/scores", json=body,
+                          auth=(pub, sec), timeout=3)
+    except Exception as e:  # noqa: BLE001 - tracing never breaks the caller
+        log.warning("push_trace_scores(%s) failed: %s", trace_id, e)

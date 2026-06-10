@@ -2075,9 +2075,10 @@ def get_agent_accuracy(agent_id, days=7):
                           read counterfactual_graded for those. accuracy_basis_note
                           documents this in the payload.
 
-    accuracy_pct is None when nothing was scored (e.g. no matured rows). Note the
-    only historical caller is the archived dashboard
-    (archive/magi_dashboard_2026-06-02/dashboard.py); there is no live consumer.
+    accuracy_pct is None when nothing was scored (e.g. no matured rows). Live
+    consumers: dashboard.py (_fetch_council_data, paper-run-scoped fractional
+    `days`, and /api/council/accuracy). `days` may be a float — the cutoff is
+    utcnow() - timedelta(days=days).
     """
     if agent_id not in _VALID_AGENT_IDS:
         raise ValueError(f"unknown agent_id: {agent_id!r}")

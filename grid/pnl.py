@@ -73,14 +73,20 @@ def _fifo_match(fills: list) -> tuple:
     return matched_trips, list(buy_queue)
 
 
-def get_pnl_snapshot(current_price: float) -> dict:
+def get_pnl_snapshot(current_price: float, paper: bool = False) -> dict:
     """
-    Compute live-only P&L from filled grid_orders, reconciled against account
-    equity.
+    Compute P&L from filled grid_orders, reconciled against account equity.
 
-    Scope: only Kraken live fills (txid-shaped order_id, see _is_live_order_id)
-    are counted. Pre-live paper fills are excluded — they were inflating the
-    headline by ~$10.
+    Scope (live, default): only Kraken live fills (txid-shaped order_id, see
+    _is_live_order_id) are counted. Pre-live paper fills are excluded — they
+    were inflating the headline by ~$10.
+
+    Scope (paper=True, added 2026-06-09 for the paper bring-up): the inverse —
+    only paper fills (non-txid order_id) AND only those filled at/after the
+    `paper_run_started_utc` system_state cutoff (set at the 2026-06-09 paper
+    book reset), so the pre-live May paper-era fills stay excluded. All other
+    mechanics (FIFO matching, equity baseline anchored at the first in-scope
+    fill) are identical to the live path.
 
     Total P&L is equity-based and marked to current_price:
         total = current_equity - baseline_equity
@@ -108,7 +114,16 @@ def get_pnl_snapshot(current_price: float) -> dict:
         ORDER BY COALESCE(filled_at, timestamp) ASC
     ''').fetchall()
 
-    fills = [dict(r) for r in rows if _is_live_order_id(dict(r).get('order_id'))]
+    if paper:
+        from database import get_system_state
+        cutoff = get_system_state('paper_run_started_utc', default='') or ''
+        fills = [
+            dict(r) for r in rows
+            if not _is_live_order_id(dict(r).get('order_id'))
+            and (dict(r).get('filled_at') or dict(r).get('timestamp') or '') >= cutoff
+        ]
+    else:
+        fills = [dict(r) for r in rows if _is_live_order_id(dict(r).get('order_id'))]
 
     if not fills:
         conn.close()

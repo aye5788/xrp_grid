@@ -44,10 +44,16 @@ What was actually built (authoritative: `01_CURRENT_STATE.md` Session 2026-05-31
 - **Purpose = adaptiveness, not cost** (unchanged). MAGI is an adaptive grid bot
   solving the static-grid weakness (regime-blindness in directional markets). Cost
   was the trigger, not the goal.
-- **Platform:** native **Google ADK `LlmAgent`s** in `magi/council.py` —
-  Casper `gemini-2.5-flash` (native), Melchior `LiteLlm("openai/gpt-4o")`,
-  Balthasar `LiteLlm("anthropic/claude-sonnet-4-6")`. NOT Agent Studio / Responses
-  API / Managed Agents.
+- **Platform:** the decision layer is a **HAND-ROLLED orchestrator** (~150 lines,
+  direct vendor-SDK calls, owned SQLite state, per-cycle world_state, sequence
+  gate→Casper→Melchior→Balthasar) — **NOT CrewAI, NOT an ADK framework**, NOT Agent
+  Studio / Responses API / Managed Agents. CrewAI's only valuable IP was its schema
+  layer, rebuilt as `magi/agents/schema_tools.py`; its strict pipeline broke the
+  conditional `GridVote.geometry` contract. The three seats are **proven standalone**
+  (Casper `gemini-2.5-flash` native, Balthasar `anthropic/claude-sonnet-4-6`, Melchior
+  `deepseek-v4-pro` via DeepSeek's Anthropic-compat endpoint with `thinking` disabled)
+  but **not yet wired** — the orchestrator is the next build. The 2026-05-31 ADK
+  `council.py` is unchanged and superseded.
 - **State ownership:** agents are **STATELESS per cycle** (`include_contents=
   "none"`). Vendors own NOTHING persistent. SQLite owns all memory; a controlled
   per-agent recall layer (deterministic SQLite→prompt-injection) is scoped, not
@@ -64,7 +70,9 @@ What was actually built (authoritative: `01_CURRENT_STATE.md` Session 2026-05-31
 
 - **Vendor mapping (was locked):** Casper→Google (Gemini Agent Platform; Memory
   Bank + Sessions), Melchior→OpenAI (Responses + Conversations), Balthasar→Anthropic
-  (Claude Managed Agents). — NOT used; all three are ADK `LlmAgent`s now.
+  (Claude Managed Agents). — NOT used; the seats are proven-standalone direct-SDK
+  callers assembled by a hand-rolled orchestrator (Casper Gemini-native, Melchior
+  DeepSeek, Balthasar Claude).
 - **State ownership (REVERSED):** the plan was STATEFUL vendor-side (vendor owns
   each agent's memory/self_model/thread history). The build is stateless; agent
   memory is SQLite-sourced and prompt-injected.
@@ -228,9 +236,11 @@ Migration-specific (updated 2026-05-31 — agents are now stateless ADK):
   cycle; per-agent memory is deterministic SQLite→prompt-injection (read-only to the
   agent, bounded). Vendor-side statefulness caused the anchoring + self_model
   corruption we migrated away from — do not reintroduce it.
-- **Re-deriving the vendor mapping as Agent Studio / Responses API / Managed
-  Agents.** The build is native ADK `LlmAgent`s (Casper Gemini-native, Melchior +
-  Balthasar via LiteLlm). The 2026-05-29 platform mapping is historical.
+- **Re-deriving the vendor mapping as Agent Studio / Responses API / Managed Agents,
+  OR re-introducing CrewAI / an ADK framework layer.** The decision layer is a
+  hand-rolled orchestrator over direct vendor-SDK seat-callers (Casper Gemini-native,
+  Melchior DeepSeek, Balthasar Claude); seat schemas go through `schema_for_tool`. The
+  2026-05-29 platform mapping and the ADK `council.py` are historical/superseded.
 - **Reintroducing the retired Melchior action vocabulary** (MAINTAIN/RECENTRE/
   TIGHTEN/WIDEN as his vote). Melchior emits a verdict (THESIS_HOLDS / RECONFIGURE /
   NO_PROFITABLE_GRID); the orchestrator maps it to the engine action.
@@ -244,12 +254,26 @@ Migration-specific (updated 2026-05-31 — agents are now stateless ADK):
 - **MANDATORY — publish docs at end of any session that edits them.** Editing a
   handoff doc on the droplet does NOT publish it; the edit only reaches GitHub
   (and therefore the claude.ai-connected `magi-docs` project) when `sync.sh`
-  runs. Any session that changes `CLAUDE.md` / `00`–`03` MUST run
+  runs. Any session that changes `CLAUDE.md` / `00`–`04` MUST run
   `bash /root/magi_docs/sync.sh` before ending. A `post-commit` git hook in
   `/root/xrp_grid` auto-runs it on doc-touching commits as a safety net, but do
   not rely on the hook — run it explicitly. Symptom of skipping this: the
   connected docs read stale even though you "synced" in claude.ai (claude.ai
   pulls from GitHub; if `sync.sh` never ran, GitHub never changed).
+- **Write the docs for TWO readers — and the second one cannot see the code.** The
+  published docs are read both by a future **Claude Code** session (in-repo — can
+  verify any claim against `council.py`, `observer.db`, the shell) AND by a
+  **claude.ai chat that has ONLY these six markdown files** — no repo, no source, no
+  database, no shell, no tools. Every doc update must therefore leave the docs
+  **self-contained**: a code-blind reader has to understand *what has been done, why,
+  and where we are now* from the prose alone. Concretely — do NOT let "see
+  `council.py`" / "grep for X" / "check the DB" be the *only* statement of a fact;
+  surface the actual value or conclusion in the doc text (e.g. write out the current
+  model wiring, the current state, the reasoning behind each decision). Keep the
+  in-repo pointers too — they help Claude Code — but never make a repo artifact the
+  *sole* carrier of something the claude.ai reader needs. Litmus test before
+  publishing: "If I could only read these six files and nothing else, would I know
+  what's been done and where we stand?"
 - If user memory and a doc disagree, the doc wins.
 - If a doc and the live code disagree, the live code wins (and update the doc).
 - Don't trust training data on Kraken or Letta specifics — both have changed.

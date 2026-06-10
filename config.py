@@ -142,38 +142,14 @@ LIVE_CONFIRMATION_TOKEN = "I_UNDERSTAND_THIS_IS_REAL_MONEY\n"
 LIVE_CONFIRMATION_ENV_VAR = "MAGI_LIVE_CONFIRM"
 LIVE_CONFIRMATION_ENV_VALUE = "YES"
 
-# --- Alerts ---
-# Background sweep period for scanning Letta steps for credit/auth/error
-# stop_reasons that the live hook in council.py might have missed
-# (summarization steps, retries, etc.). Set to 0 to disable.
-LETTA_STEPS_SWEEP_INTERVAL_MIN = 30
-
-# --- Memory rotation (magi/memory_lifecycle.py) ---
-# Cadence is counted in completed MAGI cycles. With MAGI_HOURS_EST =
-# [0,4,8,12,16,20] (6 cycles/day), ROTATION_CADENCE=30 ≈ one rotation
-# every 5 days per agent.
-ROTATION_CADENCE = 30
-
-# Sliding-window percentage passed to client.agents.messages.compact().
-# 0.35 = keep ~35% of the most-recent messages verbatim, summarise the
-# older ~65% into the prompt-driven self_model patterns.
-ROTATION_WINDOW_PCT = 0.35
-
-# Hard ceiling for the self_model block after a merge. Eviction of the
-# lowest-numbered `## Pattern N` block fires repeatedly until the merge
-# fits under this cap; if eviction cannot fit, the merge is refused and
-# the rotation records status='merge_failed' (thread is NOT reset).
-SELF_MODEL_CHAR_CAP = 5000
-
-# Maximum number of new pattern blocks accepted per rotation, enforced
-# both in the DISTILL_PROMPT and in code (extras past this cap are
-# discarded during renumbering).
-MAX_NEW_PATTERNS = 2
+# (Letta-era blocks removed 2026-06-09, BU-3: the LETTA_STEPS_SWEEP
+# alert sweep and the memory-rotation constants — ROTATION_CADENCE /
+# ROTATION_WINDOW_PCT / SELF_MODEL_CHAR_CAP / MAX_NEW_PATTERNS — served
+# magi/memory_lifecycle.py, archived with the rest of the Letta layer.
+# Per-agent CREDIT_REMAINING / DigitalOcean billing constants went with
+# the dashboard Costs panel; spend is traced in Langfuse now.)
 
 # --- Cost tracking ---
+# Operator's LLM spend ceiling. Observability is Langfuse's job; this
+# constant documents the budget the gate-driven cadence is tuned against.
 LLM_MONTHLY_BUDGET_USD = 5.00
-DO_DROPLET_MONTHLY_USD = 6.00
-DO_API_TOKEN = os.getenv("DO_API_TOKEN", "")
-ANTHROPIC_CREDIT_REMAINING = 6.66
-OPENAI_CREDIT_REMAINING = 2.88
-GOOGLE_CREDIT_REMAINING = 9.44

@@ -114,7 +114,7 @@ FIELDS = {
         "type": "float",
         "description": "signed percent drawdown of current price from the trailing-7d (168 x 1h bar) running peak; <= 0.0, where 0.0 = at/above the 7d high and e.g. -5.23 = 5.23% below it. None when price is unavailable or no candles exist",
         "consumers": ["balthasar"],
-        "balthasar_usage": "context — drawdown from the trailing-7d high, weighed as risk context alongside skew and buffers; a judgment input, NOT a mechanical trigger (no threshold or gate keys off it)",
+        "balthasar_usage": "context — drawdown from the trailing-7d high, weighed as risk context alongside skew and buffers; a judgment input for the VOTE (Balthasar applies no mechanical threshold to it). NOTE: the gate's T16 wake trigger (added 2026-06-10) keys off this same quantity to CONVENE the council — one wake per full band-width of drawdown — but convening and voting are separate concerns",
     },
 
     # ---------------- indicators block ----------------

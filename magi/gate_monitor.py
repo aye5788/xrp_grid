@@ -63,6 +63,13 @@ REST_FALLBACK_INTERVAL_SEC = 30.0
 # Periodic ws_health row cadence (in addition to state-change rows)
 WS_HEALTH_HEARTBEAT_SEC = 30.0
 
+# Reconnect-churn alert threshold: a 'reconnecting' state change only writes
+# an alert row when the client has reconnected this many times in the last
+# hour (flapping). Single blips recover in seconds and are visible on the
+# GATE MON chip / ws_health; a sustained outage is alerted critically by the
+# REST-fallback engagement instead.
+WS_FLAP_ALERT_COUNT_1H = 6
+
 # Bounded buffers for 1m bars accumulated in-memory pending 1h aggregation
 ONE_HOUR_BUFFER_CAP = 90  # 1h = 60 minutes; cap with margin for catch-up
 BTC_FETCH_INTERVAL_SEC = 3600.0  # observer.compute_indicators wants BTC 1d
@@ -97,6 +104,8 @@ class GateMonitor:
         self._rest_fallback_thread: Optional[threading.Thread] = None
         self._rest_fallback_active = False
         self._ws_down_since: Optional[float] = None
+        # Reconnect-churn alert dedup (max one flap warn per hour)
+        self._last_flap_alert_at: float = 0.0
 
     # ----- lifecycle -----
 
@@ -189,22 +198,69 @@ class GateMonitor:
         # Promote to 'degraded' label if REST fallback active
         label = "degraded" if (self._rest_fallback_active and new_state != "connected") else new_state
         self._write_ws_health(label, f"state_change: {notes}")
-        if new_state in ("reconnecting", "disconnected"):
+
+        # Alert policy (tightened 2026-06-10 — transient reconnects were
+        # writing one open warn row each and cluttering the dashboard):
+        #   - single 'reconnecting' blips: NO alert row. They recover in
+        #     seconds; the GATE MON chip + ws_health already show them live,
+        #     and a real outage is caught by _engage_rest_fallback's critical
+        #     alert after REST_FALLBACK_GRACE_SEC.
+        #   - flapping ('reconnecting' with reconnect_count_1h >= threshold):
+        #     one warn per hour, not one per reconnect.
+        #   - 'disconnected' (client gave up): critical, unchanged.
+        #   - recovery to 'connected': auto-resolve any open gate_ws_down
+        #     rows — the alert means "WS down NOW", so recovery clears it.
+        if new_state == "connected":
+            self._auto_resolve_ws_alerts()
+            return
+        if new_state == "disconnected":
+            self._insert_ws_alert('critical', new_state, notes)
+        elif new_state == "reconnecting":
+            rc = self._ws_client.reconnect_count_1h if self._ws_client else 0
+            now = time.time()
+            if (rc or 0) >= WS_FLAP_ALERT_COUNT_1H and \
+                    now - self._last_flap_alert_at >= 3600:
+                self._last_flap_alert_at = now
+                self._insert_ws_alert('warn', new_state, notes)
+
+    def _insert_ws_alert(self, severity: str, new_state: str, notes: str):
+        try:
+            from database import insert_alert
+            age = self._ws_client.last_message_age_sec if self._ws_client else None
+            rc = self._ws_client.reconnect_count_1h if self._ws_client else None
+            insert_alert(
+                severity=severity,
+                category='gate_ws_down',
+                message=(
+                    f"gate_monitor WS state={new_state}. "
+                    f"reconnect_count_1h={rc} last_message_age_sec={age}. "
+                    f"notes={notes}"
+                ),
+            )
+        except Exception as e:
+            log.warning("insert_alert(gate_ws_down) failed: %r", e)
+
+    def _auto_resolve_ws_alerts(self):
+        """WS is back — resolve any open gate_ws_down rows so the dashboard
+        ALERTS banner only shows CURRENT problems. History stays in the
+        table (resolved=1 + resolved_at)."""
+        try:
+            import sqlite3 as _sq
+            conn = _sq.connect(self.db_path)
             try:
-                from database import insert_alert
-                age = self._ws_client.last_message_age_sec if self._ws_client else None
-                rc = self._ws_client.reconnect_count_1h if self._ws_client else None
-                insert_alert(
-                    severity='critical' if new_state == 'disconnected' else 'warn',
-                    category='gate_ws_down',
-                    message=(
-                        f"gate_monitor WS state={new_state}. "
-                        f"reconnect_count_1h={rc} last_message_age_sec={age}. "
-                        f"notes={notes}"
-                    ),
+                cur = conn.execute(
+                    "UPDATE magi_alerts SET resolved=1, "
+                    "resolved_at=datetime('now') "
+                    "WHERE category='gate_ws_down' AND resolved=0",
                 )
-            except Exception as e:
-                log.warning("insert_alert(gate_ws_down) failed: %r", e)
+                conn.commit()
+                if cur.rowcount:
+                    log.info("ws recovered — auto-resolved %d open "
+                             "gate_ws_down alert(s)", cur.rowcount)
+            finally:
+                conn.close()
+        except Exception as e:
+            log.warning("auto-resolve gate_ws_down failed: %r", e)
 
     def _on_status(self, status_payload: dict):
         # Just log; subscription gating happens inside KrakenWebSocketClient

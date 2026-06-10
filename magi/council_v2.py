@@ -482,10 +482,15 @@ def _bail(round_0: dict, round_1: dict, trace_id: Optional[str],
 
 # --- public entry ---
 
-def run_council(world_state: dict, cycle_id: str) -> tuple[dict, dict, dict]:
+def run_council(world_state: dict, cycle_id: str,
+                trigger: str | None = None) -> tuple[dict, dict, dict]:
     """Convene the arbiter council over a frozen world_state. Returns
     (round_0, round_1, cons). Never raises — any seat failure resolves to a safe
-    hold. See module docstring for the choreography and the downstream contracts."""
+    hold. See module docstring for the choreography and the downstream contracts.
+
+    `trigger` (optional) is the convene reason ('scheduled' / 'startup' /
+    'gate_wake:T16' / ...) — stamped into the trace metadata so Langfuse can
+    slice gate-triggered cycles from clock cycles without a DB join."""
     round_0: dict = {}
     round_1: dict = {}
     _LAST_RUN_USAGE.clear()  # fresh per-seat usage capture for --cache-debug
@@ -502,8 +507,14 @@ def run_council(world_state: dict, cycle_id: str) -> tuple[dict, dict, dict]:
         cfg_version, cfg_snapshot = None, None
 
     with tracing.trace_cycle(cycle_id, metadata={
-            "config_version": cfg_version, "config_snapshot": cfg_snapshot}):
+            "config_version": cfg_version, "config_snapshot": cfg_snapshot,
+            "trigger": trigger or "unknown",
+            "gate_triggered": bool(trigger and trigger.startswith("gate_wake"))}):
         trace_id = tracing.current_trace_id()
+        # Mirror the trigger as a trace TAG — tags are the only trace field the
+        # Metrics API can GROUP scores by (metadata is filter-only), so this is
+        # what lets dashboard widgets slice council_changed/pnl by trigger class.
+        tracing.set_trace_tags(trace_id, [f"trigger:{trigger or 'unknown'}"])
 
         # Melchior's persona is loaded HERE — inside the trace context, BEFORE any
         # vendor call. The asymmetry vs. Casper/Balthasar is deliberate: their

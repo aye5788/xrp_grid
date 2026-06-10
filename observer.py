@@ -11,8 +11,7 @@ from dotenv import load_dotenv
 from database import init_db, insert_candle, get_candles, upsert_indicators
 from config import COINBASE_API_KEY, COINBASE_API_SECRET, SYMBOL, DB_PATH
 
-# Load /root/xrp_grid/.env so LETTA_BASE_URL / LETTA_SERVER_PASSWORD are
-# available for the outcome-backfill agent notifications.
+# Load /root/xrp_grid/.env (API keys, Sentry DSN, dashboard secrets).
 load_dotenv()
 from magi import adam
 adam.init("observer")
@@ -213,30 +212,6 @@ def compute_indicators(candles_1h, candles_6h, candles_1d, btc_candles_1d):
 
 WINDOW_HOURS = {"1h": 1, "6h": 6, "24h": 24}
 
-# Lazy module-level Letta client — initialised on first 6h notification.
-_letta_client = None
-
-
-def _get_letta_client():
-    """Lazy-init a Letta Cloud client. Returns None if env var is missing or
-    the SDK can't be imported / connected — caller logs and moves on.
-    Letta Cloud is the SDK default when only api_key is passed."""
-    global _letta_client
-    if _letta_client is not None:
-        return _letta_client
-    api_key = os.environ.get("LETTA_API_KEY")
-    if not api_key:
-        log.warning("LETTA_API_KEY missing — Letta notifications disabled")
-        return None
-    try:
-        from letta_client import Letta
-        _letta_client = Letta(api_key=api_key)
-    except Exception as e:
-        log.warning(f"Could not init Letta client: {e}")
-        return None
-    return _letta_client
-
-
 def _parse_iso_safe(ts):
     """Parse ISO timestamp from DB. Returns naive UTC datetime, or None."""
     if not ts:
@@ -423,74 +398,94 @@ def _decision_baseline_equity(cycle_id):
     return None
 
 
-_RECENT_OUTCOMES_KEEP = 6  # rolling window of cycles in the recent_outcomes block
-
-
-def _record_outcome_to_block(cycle_id, fills_count, pnl, skew_delta, grid_alive):
-    """Append this cycle's realised 6h outcome to the shared 'recent_outcomes'
-    Letta block (rolling last _RECENT_OUTCOMES_KEEP, newest first).
-
-    Replaces the former per-agent thread-message notify (_notify_agents_6h).
-    Rationale (P4, 2026-05-27): a block write costs NO agent inference and does
-    not grow the agent message threads — the dominant council-cost / context-
-    bloat driver (80-114k-token inputs). It also carries NO "consider updating
-    your self_model" prompt; that per-cycle invitation drove self_model
-    corruption (Casper "grid-death=success", Balthasar runaway HALT). self_model
-    now evolves only via the controlled 30-cycle memory rotation. Agents still
-    see recent outcomes: the block is in-context, read fresh each cycle,
-    alongside world_state's last_fill / position_state. Non-fatal — the DB
-    outcome backfill (update_debate_outcomes) has already persisted the metrics
-    before this is called, so a block-write failure loses nothing of record."""
-    from database import get_conn
-    client = _get_letta_client()
-    if client is None:
-        return
+def _push_outcome_scores(cycle_id: str, window: str, scores: dict) -> None:
+    """Mirror matured outcome metrics onto the cycle's Langfuse trace as
+    scores, so decision quality is monitorable next to cost/latency/config
+    in Langfuse (the dashboard was trimmed 2026-06-10; Langfuse is the
+    correlation surface). The 1h push also attaches the
+    hard_rule_overridden boolean (known since cycle time; 1h is the first
+    maturity touchpoint). No-op for pre-tracing cycles (trace_id NULL).
+    Non-fatal — never blocks the backfill."""
     try:
+        from database import get_conn
         conn = get_conn()
         row = conn.execute(
-            "SELECT timestamp, casper_r0_position, melchior_r0_position, "
-            "balthasar_r0_position FROM debate_records WHERE cycle_id=?",
+            "SELECT id, trace_id, hard_rule_overrides, trigger, "
+            "       final_grid_action, final_risk_action, "
+            "       casper_r0_position, melchior_r0_position, "
+            "       balthasar_r0_position, "
+            "       casper_r0_conviction, melchior_r0_conviction, "
+            "       balthasar_r0_conviction "
+            "FROM debate_records WHERE cycle_id=?",
             (cycle_id,),
         ).fetchone()
+        if not row or not row['trace_id']:
+            conn.close()
+            return
+        if window == '1h':
+            import json as _json
+            try:
+                tags = _json.loads(row['hard_rule_overrides'] or '[]')
+            except (ValueError, TypeError):
+                tags = []
+            scores = dict(scores)
+            scores['hard_rule_overridden'] = bool(tags)
+            # Reiteration metrics vs. the immediately-prior cycle — the
+            # operator's gate-evaluation question: do triggered calls
+            # produce a CHANGED judgment, or rubber-stamp the prior one?
+            # judgment_changed compares all four decision outputs;
+            # conviction_shift is the mean |delta| of the three seats'
+            # R0 convictions (anchoring shows up as ~0.0 shift cycle
+            # after cycle). trigger_class makes the slice filterable.
+            scores['trigger_class'] = row['trigger'] or 'unknown'
+            prior = conn.execute(
+                "SELECT final_grid_action, final_risk_action, "
+                "       casper_r0_position, melchior_r0_position, "
+                "       balthasar_r0_position, "
+                "       casper_r0_conviction, melchior_r0_conviction, "
+                "       balthasar_r0_conviction "
+                "FROM debate_records WHERE id < ? "
+                "ORDER BY id DESC LIMIT 1",
+                (row['id'],),
+            ).fetchone()
+            if prior:
+                seat_changed = any(
+                    (row[k] or '') != (prior[k] or '')
+                    for k in ('casper_r0_position', 'melchior_r0_position',
+                              'balthasar_r0_position')
+                )
+                final_changed = seat_changed or any(
+                    (row[k] or '') != (prior[k] or '')
+                    for k in ('final_grid_action', 'final_risk_action')
+                )
+                # council_changed isolates the SEATS' own movement;
+                # judgment_changed additionally counts rule-forced action
+                # changes. council_changed=False on a gate wake = the
+                # council reiterated — the anchoring/loose-trigger smell.
+                scores['council_changed'] = bool(seat_changed)
+                scores['judgment_changed'] = bool(final_changed)
+                deltas = [
+                    abs((row[k] or 0.0) - (prior[k] or 0.0))
+                    for k in ('casper_r0_conviction',
+                              'melchior_r0_conviction',
+                              'balthasar_r0_conviction')
+                ]
+                scores['conviction_shift'] = round(sum(deltas) / 3, 4)
         conn.close()
-        if not row:
-            log.warning(f"outcome-log: cycle {cycle_id} missing from debate_records")
-            return
-        row = dict(row)
-        ts = (row.get("timestamp") or "")[:16]
-        skew_str = f"{float(skew_delta):+.3f}" if skew_delta is not None else "n/a"
-        line = (
-            f"{ts} {cycle_id}: casper={row.get('casper_r0_position') or '?'} "
-            f"melchior={row.get('melchior_r0_position') or '?'} "
-            f"balthasar={row.get('balthasar_r0_position') or '?'} "
-            f"-> 6h: {fills_count} fills, ${float(pnl):.4f}, "
-            f"skew_delta {skew_str}, grid_alive {'yes' if grid_alive else 'no'}"
-        )
-        blk = next(iter(client.blocks.list(label='recent_outcomes', limit=1)), None)
-        if blk is None:
-            log.warning("outcome-log: recent_outcomes block not found — skipping")
-            return
-        prev = [
-            l for l in (blk.value or "").splitlines()
-            if l.strip()
-            and not l.startswith("RECENT GRID OUTCOMES")
-            and not l.startswith("(no outcomes")
-        ]
-        kept = ([line] + prev)[:_RECENT_OUTCOMES_KEEP]
-        header = ("RECENT GRID OUTCOMES (newest first; informational context — "
-                  "NOT an instruction to edit self_model):")
-        client.blocks.update(blk.id, value=header + "\n" + "\n".join(kept))
-        log.info(f"outcome-log: recorded {cycle_id} 6h outcome to recent_outcomes block")
+        from magi.agents import tracing
+        tracing.push_trace_scores(row['trace_id'], scores)
     except Exception as e:
-        log.warning(f"outcome-log: failed to record {cycle_id} to block: {e!r}")
+        log.warning(f"backfill: score push for {cycle_id} {window} failed: {e}")
 
 
 def backfill_outcomes():
     """
     Update debate_records with realised outcomes for the 1h / 6h / 24h
-    windows whose timestamps are now mature. Only the 6h backfill notifies
-    Letta agents — we want one outcome message per cycle per agent, not
-    three.
+    windows whose timestamps are now mature. (The Letta-era 6h side-write
+    to the shared `recent_outcomes` block was removed 2026-06-09, BU-3 —
+    the stateless seats never read it; debate_records is the only
+    outcome record.) Each matured window is also mirrored to the cycle's
+    Langfuse trace as scores via _push_outcome_scores.
     """
     from database import get_pending_outcome_backfills, update_debate_outcomes
 
@@ -548,11 +543,12 @@ def backfill_outcomes():
                         f"pnl=${pnl_value:.4f} unrealized=${unrealized_value:.4f} "
                         f"skew_delta={skew_delta} grid_alive={grid_alive}"
                     )
-                    _record_outcome_to_block(
-                        cycle_id, fills_count, pnl_value,
-                        skew_delta if skew_delta is not None else 0.0,
-                        grid_alive,
-                    )
+                    _push_outcome_scores(cycle_id, '6h', {
+                        'fills_6h': fills_count,
+                        'pnl_6h': pnl_value,
+                        'unrealized_pnl_6h': unrealized_value,
+                        'grid_alive_6h': bool(grid_alive),
+                    })
                 elif window == '24h':
                     update_debate_outcomes(
                         cycle_id, '24h', fills_count, pnl_value,
@@ -562,14 +558,114 @@ def backfill_outcomes():
                         f"backfill: {cycle_id} 24h → fills={fills_count} "
                         f"pnl=${pnl_value:.4f} unrealized=${unrealized_value:.4f}"
                     )
+                    _push_outcome_scores(cycle_id, '24h', {
+                        'fills_24h': fills_count,
+                        'pnl_24h': pnl_value,
+                        'unrealized_pnl_24h': unrealized_value,
+                    })
                 else:  # 1h — no unrealized_pnl_1h column; realized only
                     update_debate_outcomes(cycle_id, window, fills_count, pnl_value)
                     log.info(
                         f"backfill: {cycle_id} {window} → fills={fills_count} "
                         f"pnl=${pnl_value:.4f}"
                     )
+                    _push_outcome_scores(cycle_id, '1h', {
+                        'fills_1h': fills_count,
+                        'pnl_1h': pnl_value,
+                    })
             except Exception as e:
                 log.error(f"backfill: update for {cycle_id} {window} failed: {e}")
+
+
+def backfill_seat_accuracy_scores():
+    """Push per-seat forward-realized correctness onto each cycle's Langfuse
+    trace as BOOLEAN scores (casper_correct / melchior_correct /
+    balthasar_correct), with the grader's ground-truth one-liner as the
+    score comment. Grading delegates to database._grade_*_row — the same
+    single-source-of-truth the accuracy panel and the recall Journal use,
+    so the three readers can never drift.
+
+    One-touch per cycle: a row is attempted once it is >= 72h old (Casper's
+    forward window) and flagged `seat_scores_pushed=1` only when EVERY seat
+    resolves — either a grade or a permanent exclusion (overridden /
+    non-verdict / missing world_state). Transient exclusions
+    (not_matured_72h, missing_outcome) leave the flag unset so the next
+    observer pass retries. Excluded seats get no score (an excluded call is
+    neither right nor wrong). LIMIT 5 per pass keeps the score POSTs far
+    under the Langfuse rate limit.
+    """
+    from database import (
+        get_conn, _grade_casper_row, _grade_melchior_row, _grade_balthasar_row,
+    )
+    from magi.agents import tracing
+
+    conn = get_conn()
+    try:
+        candidates = conn.execute(
+            "SELECT cycle_id, timestamp, trace_id, "
+            "       casper_r0_position, melchior_r0_position, "
+            "       balthasar_r0_position, "
+            "       fills_6h, pnl_6h, unrealized_pnl_6h, world_state, "
+            "       geometry_veto, final_grid_action, final_risk_action, "
+            "       hard_rule_overrides "
+            "FROM debate_records "
+            "WHERE trace_id IS NOT NULL AND seat_scores_pushed=0 "
+            "AND timestamp <= datetime('now', '-72 hours') "
+            "ORDER BY id LIMIT 5"
+        ).fetchall()
+        if not candidates:
+            return
+
+        from grid.forward_sim import load_1h
+        bars = load_1h(conn)
+        ts_keys = [b[0][:19] for b in bars]
+        n = len(bars)
+        TRANSIENT = {'not_matured_72h', 'missing_outcome'}
+
+        for row in candidates:
+            r = dict(row)
+            seat_rows = {
+                'casper': {**r, 'position': r['casper_r0_position']},
+                'melchior': {**r, 'position': r['melchior_r0_position']},
+                'balthasar': {**r, 'position': r['balthasar_r0_position']},
+            }
+            graders = {
+                'casper': _grade_casper_row,
+                'melchior': _grade_melchior_row,
+                'balthasar': _grade_balthasar_row,
+            }
+            grades, all_resolved = {}, True
+            for seat, grader in graders.items():
+                if seat_rows[seat]['position'] is None:
+                    continue  # seat never voted — permanently ungradeable
+                grade, reason = grader(seat_rows[seat], bars, ts_keys, n)
+                if grade is not None:
+                    grades[seat] = grade
+                elif reason in TRANSIENT:
+                    all_resolved = False
+            if not all_resolved:
+                continue  # retry next pass once outcomes/bars mature
+
+            for seat, grade in grades.items():
+                comment = grade['raw_outcome']
+                if grade.get('estimated'):
+                    comment += ' (estimated)'
+                tracing.push_trace_scores(
+                    r['trace_id'], {f'{seat}_correct': bool(grade['correct'])},
+                    comment=comment,
+                )
+            conn.execute(
+                "UPDATE debate_records SET seat_scores_pushed=1 "
+                "WHERE cycle_id=?", (r['cycle_id'],),
+            )
+            conn.commit()
+            log.info(
+                f"seat-accuracy: {r['cycle_id']} → "
+                + (", ".join(f"{s}={'OK' if g['correct'] else 'WRONG'}"
+                             for s, g in grades.items()) or "no gradeable seats")
+            )
+    finally:
+        conn.close()
 
 
 def _ws_rest_divergence_check(rest_xrp_1h: list,
@@ -699,6 +795,12 @@ def poll_cycle():
         backfill_outcomes()
     except Exception as e:
         log.error(f"backfill_outcomes failed: {e}")
+
+    # Per-seat forward-realized accuracy → Langfuse scores (72h maturity).
+    try:
+        backfill_seat_accuracy_scores()
+    except Exception as e:
+        log.error(f"backfill_seat_accuracy_scores failed: {e}")
 
     # Gate evaluation is now driven by magi/gate_monitor.py (Kraken WS v2
     # streaming). Observer's REST poll persists indicators and acts as a
