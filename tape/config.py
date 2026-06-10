@@ -132,5 +132,11 @@ HISTORY_DB_PATH = os.path.join(_HERE, "history.db")
 HISTORY_IMPORT_DIR = "/root/hist_import"             # where the Bitstamp yearly CSVs are staged
 HISTORY_BACKUP_REMOTE = f"{BACKUP_BUCKET}/history/history.db.gz"   # single rolling GCS snapshot
 
+# observer.db rides the same daily warehouse-backup run. It is the bot's
+# validation record (debate_records, paper ledger, PnL baselines) — a rolling
+# daily copy caps worst-case loss at 1 day vs. the 7-day DO droplet snapshots.
+OBSERVER_DB_PATH = "/root/xrp_grid/observer.db"
+OBSERVER_BACKUP_REMOTE = f"{BACKUP_BUCKET}/observer/observer.db.gz"   # single rolling GCS snapshot
+
 # --- logging ---
 LOG_LEVEL = "INFO"

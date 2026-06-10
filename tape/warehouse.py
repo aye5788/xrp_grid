@@ -500,14 +500,12 @@ def cmd_refill(args):
 
 # ------------------------------------------------------------------ gcs backup
 
-def cmd_backup(args):
-    """Daily: consistent snapshot of history.db -> gzip -> GCS as a SINGLE rolling
-    object (overwrite, no accumulation). Upload-only, so it's free."""
-    if not os.path.exists(config.HISTORY_DB_PATH):
-        raise SystemExit("history.db does not exist — run `build` first")
-    tmp_db = config.HISTORY_DB_PATH + ".snap.tmp"
-    gz = config.HISTORY_DB_PATH + ".snap.gz"
-    src = sqlite3.connect(config.HISTORY_DB_PATH)
+def _snapshot_to_gcs(db_path, remote, label):
+    """Consistent SQLite snapshot -> gzip -> GCS single rolling object (overwrite,
+    no accumulation). Upload-only, so it's free. Returns True on success."""
+    tmp_db = db_path + ".snap.tmp"
+    gz = db_path + ".snap.gz"
+    src = sqlite3.connect(db_path)
     try:
         dst = sqlite3.connect(tmp_db)
         try:
@@ -523,14 +521,32 @@ def cmd_backup(args):
         if os.path.exists(tmp_db):
             os.remove(tmp_db)
     gsutil = getattr(config, "GSUTIL_BIN", None) or shutil.which("gsutil")
-    rc = subprocess.run([gsutil, "-q", "cp", gz, config.HISTORY_BACKUP_REMOTE],
+    rc = subprocess.run([gsutil, "-q", "cp", gz, remote],
                         capture_output=True, text=True)
     size = os.path.getsize(gz)
     os.remove(gz)
     if rc.returncode != 0:
-        log.error("history backup upload failed: %s", rc.stderr.strip())
+        log.error("%s backup upload failed: %s", label, rc.stderr.strip())
+        return False
+    log.info("%s backup -> %s (%.1f MB)", label, remote, size / 1e6)
+    return True
+
+
+def cmd_backup(args):
+    """Daily: rolling GCS snapshots of history.db AND observer.db (the bot's
+    validation record). Each is attempted even if the other fails."""
+    if not os.path.exists(config.HISTORY_DB_PATH):
+        raise SystemExit("history.db does not exist — run `build` first")
+    ok = _snapshot_to_gcs(config.HISTORY_DB_PATH, config.HISTORY_BACKUP_REMOTE,
+                          "history")
+    if os.path.exists(config.OBSERVER_DB_PATH):
+        ok = _snapshot_to_gcs(config.OBSERVER_DB_PATH,
+                              config.OBSERVER_BACKUP_REMOTE, "observer") and ok
+    else:
+        log.error("observer.db not found at %s — skipped", config.OBSERVER_DB_PATH)
+        ok = False
+    if not ok:
         sys.exit(1)
-    log.info("history backup -> %s (%.1f MB)", config.HISTORY_BACKUP_REMOTE, size / 1e6)
 
 
 # ----------------------------------------------------------------------- status
