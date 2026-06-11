@@ -317,6 +317,18 @@ re-derive these.
   The live record (23 fills, total −$6.95 at scope-split time) is preserved
   untouched behind the default scope. Do not commingle the scopes — commingling was
   the original ~$10 PnL overstatement bug.
+  **Scope is decided in ONE place (2026-06-11):** `grid/pnl.py:current_scope_cutoff()`
+  + `fill_in_current_scope()` — shared by the outcome backfill, the orchestrator's
+  world_state fill recency, the gate's fill-gap trigger, and readiness L3. Never
+  inline the txid check in a new fill reader: an inlined live-only copy in
+  `observer.py` wrote fake zeros into every paper cycle's outcome record (poisoning
+  Journal recall + seat grading) until fixed 2026-06-11. **Live-flip rule:** blank
+  `system_state['paper_run_started_utc']` when arming live — engine live gate 4
+  REFUSES live mode while it is set (fails closed), because every scope-aware
+  reader would otherwise stay in paper scope and live fills would be invisible.
+  Langfuse outcome scores are delivered convergently (per-window
+  `outcome_{w}_scores_pushed` receipts; the observer sweep retries until every
+  score POST confirms 2xx) — a 429/outage delays the mirror, never loses it.
 - **Dashboard auth** is app-side: a Flask signed-cookie session in
   `dashboard.py` (`/login`, `/logout`, `before_request` gate; password in
   `.env:DASHBOARD_PASSWORD`, `SECRET_KEY` in `.env`; 365-day cookie).

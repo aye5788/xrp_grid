@@ -82,6 +82,15 @@ the hourly-rewake bug), the NEW T16 drawdown trigger wakes once per 3%-wide draw
 (verified live same day). Decision quality is now scored onto each cycle's Langfuse trace
 (1h/6h/24h outcomes, council_changed/conviction_shift reiteration metrics, per-seat 72h
 accuracy) with a `trigger:<reason>` tag for slicing. See Session 2026-06-10 below.
+**UPDATE 2026-06-11:** a scoping bug had been writing FAKE ZEROS into every paper cycle's
+1h/6h/24h outcome record (the backfill counted only live-txid fills, and a paper run has
+none) — poisoning Journal recall, Melchior/Balthasar grading, and the Langfuse outcome
+scores. Fixed as a class (shared scope helpers in `grid/pnl.py`; commit `9a264b7`), the 9
+poisoned rows re-backfilled with real values, the Langfuse mirror reconciled, score
+delivery made convergent (per-window delivery receipts + observer retry sweep) and a new
+live gate 4 added — live mode is refused until `system_state['paper_run_started_utc']` is
+blanked (commit `b49f7dc`). No trading damage (the poisoned cycles' decisions were
+unaffected). See Session 2026-06-11 below.
 
 **Live toggle DISARMED 2026-06-09 (later) for the paper bring-up:** `.env` now has
 `MAGI_LIVE_CONFIRM=NO` and the `CONFIRM_LIVE` gate file was renamed to
@@ -263,6 +272,78 @@ credit-burn guard shipped** — see Session 2026-05-25 below. Prior: 2026-05-24 
 `ORDER_SIZE_XRP` constant; live service restarted 12:37 UTC, live mode
 confirmed preserved. See Session 2026-05-24 below. Prior: 2026-05-23 —
 **BOT IS LIVE** — flipped paper→live, live order + fill-reconcile path shipped, fee constants corrected to tier-0 0.25%/0.40%, dashboard auth moved to Flask cookie, renewal READINESS panel removed — see Session 2026-05-23 below. Prior: 2026-05-22 — council restructured to R1-always-fires + two new structural vote fields the engine reads; gate layer with calibrated triggers + Kraken WebSocket v2 substrate shipped; agent state wiped + recreated; freshness validator + retry + warn-alert shipped. See "Session 2026-05-22" entries below).
+
+## Session 2026-06-11 — OUTCOME-SCOPE POISONING FOUND + FIXED (paper cycles recorded fake zeros), data repaired, convergent Langfuse score delivery + live-flip gate 4 shipped; observer.db daily GCS backup committed
+
+**One-paragraph summary.** A live-vs-paper scoping bug was poisoning the paper run's
+own memory: `observer.py:_compute_window_metrics` (the function that backfills each
+council cycle's realized 1h/6h/24h outcomes into `debate_records`) filtered fills with
+the LIVE-only rule — "count only orders whose id is a Kraken txid" — unconditionally,
+so every paper-era cycle recorded **fills=0 / pnl=0 / grid_alive=0** while the paper
+grid was actually filling heavily (51 fills in 24h). Those fake zeros flowed into the
+Journal recall lines injected into the seats' prompts, the Melchior/Balthasar
+accuracy graders (THESIS_HOLDS was being graded *wrong* because "fills_6h=0"), the
+dashboard accuracy panel, and the Langfuse outcome scores. Casper's grader was immune
+(it reads forward price bars only). **No trading damage occurred** — in all 9 poisoned
+cycles the council voted THESIS_HOLDS anyway and both RECENTREs were deterministic
+hard-rules — but the memory/grading layer was learning from fiction. Everything was
+fixed the same day: the scope rule centralized and fixed as a class (commit
+`9a264b7`), the 9 poisoned DB rows re-backfilled with real values, the Langfuse mirror
+reconciled, score delivery made convergent + a new live-flip guard shipped (commit
+`b49f7dc`), and `magi.service` restarted twice (each restart fires one startup council
+cycle ≈ 6 seat calls — operator-approved both times).
+
+**The fix, as a class (commit `9a264b7`).** Scope is now decided in ONE place:
+`grid/pnl.py:current_scope_cutoff()` (reads `system_state['paper_run_started_utc']`,
+set at the 2026-06-09 paper book reset) + `fill_in_current_scope(order_id, filled_at,
+cutoff)` — cutoff set → paper scope (non-txid order id AND filled at/after the
+cutoff); cutoff blank → live scope (Kraken txid only). All current-state readers now
+share it: the outcome backfill (era chosen by each cycle's own timestamp, so May's
+live rows still backfill live-scoped), `magi/orchestrator.py`'s
+hours-since-last-fill / last-fill summary in world_state, `magi/gate.py`'s fill-gap
+trigger, and `magi/readiness.py` L3 (deliberately live-only). The repair order
+matters and is recorded for next time: **code → restart → data** — an earlier
+attempt reset the rows while the old code was still in the running service, and it
+re-zeroed them within minutes.
+
+**Convergent Langfuse score delivery (commit `b49f7dc`).** The score push to Langfuse
+was fire-and-forget (3s timeout, response ignored): any 429/outage at backfill time
+lost the scores forever — exactly how most of this session's corrected re-pushes got
+silently eaten on the first attempt. Now each window carries a delivery receipt
+column (`outcome_{1h,6h,24h}_scores_pushed`); `push_trace_scores` returns a verdict
+(True only if every score POST got HTTP 2xx); the observer's new
+`push_pending_outcome_scores` sweep runs every 10-min pass and retries any
+backfilled-but-unconfirmed window until delivery confirms — the mirror can be
+delayed, never lost. Scores are rebuilt from the `debate_records` row itself (DB =
+single source of truth). Receipts for all 248 already-delivered rows were set
+manually after the reconcile verified the mirror complete.
+
+**Live-flip guard (same commit).** `GridEngine`'s live gate grows **gate 4**: live
+mode is REFUSED while `system_state['paper_run_started_utc']` is non-blank, because
+every scope-aware reader would stay in paper scope and live fills would be invisible
+— the same poisoning in reverse. **The live-flip checklist therefore gains a step:
+blank `paper_run_started_utc` when arming live.** The gate fails closed (unreadable
+marker → refuse live) and logs exactly what to blank. Paper boots never consult it.
+
+**Langfuse reconcile + API facts (learned the hard way).** The 9 paper traces'
+mirror was repaired: 69 corrected scores pushed and verified complete on all 9
+traces. The 84 stale poisoned scores could NOT be deleted same-day: Langfuse Hobby
+caps **score deletions at 50/day** (a separate quota from the 30/min general API;
+confirmed in their rate-limiter source), and earlier blind-retry loops had burned the
+whole day's quota. A detached delete daemon (`/tmp/lf_delete_daemon.py`, restartable,
+header-driven) deletes 50 when the window reopens 15:11 UTC 2026-06-11 and the last
+34 ~15:11 UTC 2026-06-12. Other gotchas now in memory: DELETE returns **202 =
+queued** (async, 10–30 min lag — not a failure); the scores list API **ignores a
+traceId query param** (list globally, group client-side); POST never dedupes. The
+two pre-paper traces from 2026-06-08 bring-up cycles keep their era's scores —
+untouched by design.
+
+**Also this session:** `observer.db` joined the daily GCS backup (rides
+`warehouse-backup.timer`, commit `e5c6cec`, verified uploaded). One real signal
+surfaced by the repaired data: several paper windows show slightly **negative
+realized PnL** (e.g. −$0.031 over a 33-fill 6h window) with positive unrealized —
+not a bug; this is what the paper run exists to measure, worth watching as days
+accumulate.
 
 ## Session 2026-06-10 — Paper-run day 1: T2 hourly-rewake bug FIXED (episode guard), NEW T16 drawdown-rung wake trigger (verified live), dashboard trimmed 19→11, Langfuse promoted to the decision-quality surface (outcome/reiteration/seat-accuracy scores + trigger tags + custom dashboards)
 
