@@ -323,6 +323,16 @@ def init_db():
         # body (fresh DBs) and here (existing observer.db). Written by
         # orchestrator._build_debate_record.
         "ALTER TABLE debate_records ADD COLUMN override_justification TEXT",
+        # outcome_{w}_scores_pushed: per-window Langfuse score-delivery
+        # receipt (2026-06-11). The mirror push used to be fire-and-forget at
+        # backfill time — a 429/outage silently lost the scores forever (how
+        # the 2026-06-10 corrected re-pushes got eaten). The observer's push
+        # sweep now retries any backfilled-but-unconfirmed window every pass
+        # and sets the flag only when push_trace_scores confirms delivery.
+        # Same convergent pattern as seat_scores_pushed.
+        "ALTER TABLE debate_records ADD COLUMN outcome_1h_scores_pushed INTEGER DEFAULT 0",
+        "ALTER TABLE debate_records ADD COLUMN outcome_6h_scores_pushed INTEGER DEFAULT 0",
+        "ALTER TABLE debate_records ADD COLUMN outcome_24h_scores_pushed INTEGER DEFAULT 0",
     ):
         try:
             c.execute(_alter)
@@ -1504,6 +1514,42 @@ def get_pending_outcome_backfills(window):
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_pending_score_pushes(window):
+    """
+    Return cycle_ids whose {window} outcome is backfilled but whose Langfuse
+    score push has not been confirmed (outcome_{window}_scores_pushed=0).
+    Oldest-first. Consumed by observer.push_pending_outcome_scores — the
+    convergent retry sweep that replaced the fire-and-forget push (2026-06-11).
+    """
+    if window not in _VALID_WINDOWS:
+        raise ValueError(f"window must be one of {_VALID_WINDOWS}, got {window!r}")
+    conn = get_conn()
+    rows = conn.execute(
+        f'''SELECT cycle_id FROM debate_records
+            WHERE outcome_{window}_backfilled=1
+              AND outcome_{window}_scores_pushed=0
+            ORDER BY timestamp ASC'''
+    ).fetchall()
+    conn.close()
+    return [r['cycle_id'] for r in rows]
+
+
+def mark_outcome_scores_pushed(cycle_id, window):
+    """Set the delivery receipt after push_trace_scores confirms every score
+    in the window landed (HTTP 2xx). Never set on a failed/partial push —
+    the sweep retries next pass."""
+    if window not in _VALID_WINDOWS:
+        raise ValueError(f"window must be one of {_VALID_WINDOWS}, got {window!r}")
+    conn = get_conn()
+    conn.execute(
+        f"UPDATE debate_records SET outcome_{window}_scores_pushed=1 "
+        f"WHERE cycle_id=?",
+        (cycle_id,),
+    )
+    conn.commit()
+    conn.close()
 
 
 def get_recent_debate_records(limit=20):

@@ -57,16 +57,38 @@ class GridEngine:
             else:
                 gate_3_token = False
                 gate_3_label = "skipped — file does not exist"
+            # Gate 4 (2026-06-11): the paper-run scope marker must be blank.
+            # Every scope-aware reader (outcome backfill, gate fill-gap,
+            # world_state fill recency, PnL) treats a set
+            # system_state['paper_run_started_utc'] as "we are in a paper
+            # run" and filters to paper fills — going live with it still set
+            # re-creates the outcome-poisoning bug in reverse (live fills
+            # invisible to every reader). Blank it as part of the live flip:
+            #   UPDATE system_state SET value='' WHERE key='paper_run_started_utc'
+            # Fails CLOSED: if the marker cannot be read (fresh DB before
+            # init_db), live is refused — verifying scope is a precondition
+            # for trading real capital.
+            try:
+                from database import get_system_state
+                _paper_cutoff = get_system_state('paper_run_started_utc', default='') or ''
+                gate_4_scope = (_paper_cutoff == '')
+                gate_4_label = ("PASS" if gate_4_scope else
+                                f"FAIL (paper_run_started_utc={_paper_cutoff!r} — blank it to go live)")
+            except Exception as e:
+                gate_4_scope = False
+                gate_4_label = f"FAIL (cannot read system_state: {e})"
             log.info(f"Live gate — gate_1_env ({LIVE_CONFIRMATION_ENV_VAR}={LIVE_CONFIRMATION_ENV_VALUE}): {'PASS' if gate_1_env else 'FAIL'}")
             log.info(f"Live gate — gate_2_file ({LIVE_CONFIRMATION_FILE}): {'PASS' if gate_2_file else 'FAIL'}")
             log.info(f"Live gate — gate_3_token: {gate_3_label}")
-            if gate_1_env and gate_2_file and gate_3_token:
-                log.warning("LIVE MODE ACTIVE — all three confirmation gates passed — real orders will be placed")
+            log.info(f"Live gate — gate_4_paper_scope_blank: {gate_4_label}")
+            if gate_1_env and gate_2_file and gate_3_token and gate_4_scope:
+                log.warning("LIVE MODE ACTIVE — all four confirmation gates passed — real orders will be placed")
             else:
                 failed = [name for name, passed in [
                     ("gate_1_env", gate_1_env),
                     ("gate_2_file", gate_2_file),
                     ("gate_3_token", gate_3_token),
+                    ("gate_4_paper_scope", gate_4_scope),
                 ] if not passed]
                 log.error(f"Live mode refused — failed gates: {', '.join(failed)}")
                 raise RuntimeError("Live mode refused — confirmation gates not satisfied. See log for details.")

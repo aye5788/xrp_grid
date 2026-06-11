@@ -192,12 +192,18 @@ def push_trace_scores(trace_id: str, scores: dict, comment: str | None = None):
     after the trace closed, so REST-by-traceId is the right tool).
 
     `scores` is {name: value}: bool -> BOOLEAN, int/float -> NUMERIC,
-    str -> CATEGORICAL; None values are skipped. Fire-and-forget like
-    everything in this module — a Langfuse outage must never break the
-    observer loop.
+    str -> CATEGORICAL; None values are skipped. Never raises — a Langfuse
+    outage must never break the observer loop — but DOES return a delivery
+    verdict (2026-06-11): True iff every score POST got HTTP 2xx, False on
+    any drop (429/5xx/timeout). Callers that need the mirror to converge
+    (observer.push_pending_outcome_scores) persist a receipt only on True
+    and retry next pass; the old fire-and-forget ignored the response and
+    silently lost scores under Langfuse Hobby-tier 429s.
+    Returns True for the no-op cases (no trace_id / no scores / tracing
+    unconfigured) — there is nothing to deliver, so nothing to retry.
     """
     if not trace_id or not scores:
-        return
+        return True
     try:
         import os
         import requests
@@ -205,7 +211,8 @@ def push_trace_scores(trace_id: str, scores: dict, comment: str | None = None):
         pub = os.environ.get("LANGFUSE_PUBLIC_KEY")
         sec = os.environ.get("LANGFUSE_SECRET_KEY")
         if not (base and pub and sec):
-            return
+            return True
+        delivered = True
         for name, value in scores.items():
             if value is None:
                 continue
@@ -221,7 +228,13 @@ def push_trace_scores(trace_id: str, scores: dict, comment: str | None = None):
                 body["dataType"] = "NUMERIC"
             if comment:
                 body["comment"] = comment
-            requests.post(f"{base}/api/public/scores", json=body,
-                          auth=(pub, sec), timeout=3)
+            resp = requests.post(f"{base}/api/public/scores", json=body,
+                                 auth=(pub, sec), timeout=3)
+            if resp.status_code >= 300:
+                delivered = False
+                log.warning("push_trace_scores(%s): %s dropped (HTTP %s)",
+                            trace_id, name, resp.status_code)
+        return delivered
     except Exception as e:  # noqa: BLE001 - tracing never breaks the caller
         log.warning("push_trace_scores(%s) failed: %s", trace_id, e)
+        return False

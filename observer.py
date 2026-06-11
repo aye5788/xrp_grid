@@ -423,14 +423,21 @@ def _decision_baseline_equity(cycle_id):
     return None
 
 
-def _push_outcome_scores(cycle_id: str, window: str, scores: dict) -> None:
-    """Mirror matured outcome metrics onto the cycle's Langfuse trace as
-    scores, so decision quality is monitorable next to cost/latency/config
-    in Langfuse (the dashboard was trimmed 2026-06-10; Langfuse is the
-    correlation surface). The 1h push also attaches the
-    hard_rule_overridden boolean (known since cycle time; 1h is the first
-    maturity touchpoint). No-op for pre-tracing cycles (trace_id NULL).
-    Non-fatal — never blocks the backfill."""
+def _push_outcome_scores(cycle_id: str, window: str) -> bool:
+    """Mirror the cycle's matured {window} outcome metrics onto its Langfuse
+    trace as scores, so decision quality is monitorable next to cost/latency/
+    config in Langfuse (the dashboard was trimmed 2026-06-10; Langfuse is the
+    correlation surface). Score values are built from the debate_records row
+    itself — the DB is the single source of truth, so a retry pushes exactly
+    what was recorded. The 1h push also attaches the hard_rule_overridden
+    boolean (known since cycle time; 1h is the first maturity touchpoint).
+
+    Returns a delivery verdict for the convergent sweep (2026-06-11):
+    True  -> every score landed (or there is nothing to deliver: pre-tracing
+             row with trace_id NULL, missing row) — safe to mark pushed.
+    False -> at least one score was dropped (429/outage) — leave the receipt
+             unset so push_pending_outcome_scores retries next pass.
+    Never raises."""
     try:
         from database import get_conn
         conn = get_conn()
@@ -440,20 +447,41 @@ def _push_outcome_scores(cycle_id: str, window: str, scores: dict) -> None:
             "       casper_r0_position, melchior_r0_position, "
             "       balthasar_r0_position, "
             "       casper_r0_conviction, melchior_r0_conviction, "
-            "       balthasar_r0_conviction "
+            "       balthasar_r0_conviction, "
+            "       fills_1h, pnl_1h, "
+            "       fills_6h, pnl_6h, unrealized_pnl_6h, grid_alive_6h, "
+            "       fills_24h, pnl_24h, unrealized_pnl_24h "
             "FROM debate_records WHERE cycle_id=?",
             (cycle_id,),
         ).fetchone()
         if not row or not row['trace_id']:
             conn.close()
-            return
+            return True
+        if window == '6h':
+            scores = {
+                'fills_6h': row['fills_6h'],
+                'pnl_6h': row['pnl_6h'],
+                'unrealized_pnl_6h': row['unrealized_pnl_6h'],
+                'grid_alive_6h': (bool(row['grid_alive_6h'])
+                                  if row['grid_alive_6h'] is not None else None),
+            }
+        elif window == '24h':
+            scores = {
+                'fills_24h': row['fills_24h'],
+                'pnl_24h': row['pnl_24h'],
+                'unrealized_pnl_24h': row['unrealized_pnl_24h'],
+            }
+        else:  # 1h
+            scores = {
+                'fills_1h': row['fills_1h'],
+                'pnl_1h': row['pnl_1h'],
+            }
         if window == '1h':
             import json as _json
             try:
                 tags = _json.loads(row['hard_rule_overrides'] or '[]')
             except (ValueError, TypeError):
                 tags = []
-            scores = dict(scores)
             scores['hard_rule_overridden'] = bool(tags)
             # Reiteration metrics vs. the immediately-prior cycle — the
             # operator's gate-evaluation question: do triggered calls
@@ -498,9 +526,46 @@ def _push_outcome_scores(cycle_id: str, window: str, scores: dict) -> None:
                 scores['conviction_shift'] = round(sum(deltas) / 3, 4)
         conn.close()
         from magi.agents import tracing
-        tracing.push_trace_scores(row['trace_id'], scores)
+        return tracing.push_trace_scores(row['trace_id'], scores)
     except Exception as e:
         log.warning(f"backfill: score push for {cycle_id} {window} failed: {e}")
+        return False
+
+
+def push_pending_outcome_scores():
+    """Convergent Langfuse mirror sweep (2026-06-11). For every window,
+    re-attempt the score push for each backfilled-but-unconfirmed cycle and
+    set the delivery receipt only when push_trace_scores reports every score
+    landed. Replaces the fire-and-forget push at backfill time, which lost
+    scores irrecoverably whenever Langfuse 429'd (Hobby tier rate-limits the
+    public API at 30 req/min; a burst of maturing windows could silently
+    drop most of its pushes — that is exactly how the 2026-06-10 corrected
+    re-pushes got eaten).
+
+    Runs every observer pass, right after backfill_outcomes, so a freshly
+    matured window still mirrors in the same pass. Capped at 3 cycles per
+    window per pass (≤ ~21 POSTs/pass at ~7 scores max for 1h) to stay
+    under the rate limit in backlog situations; anything dropped converges
+    on later passes. Never raises."""
+    from database import get_pending_score_pushes, mark_outcome_scores_pushed
+    for window in ('1h', '6h', '24h'):
+        try:
+            pending = get_pending_score_pushes(window)
+        except Exception as e:
+            log.error(f"score sweep: get_pending_score_pushes({window}) failed: {e}")
+            continue
+        for cycle_id in pending[:3]:
+            try:
+                if _push_outcome_scores(cycle_id, window):
+                    mark_outcome_scores_pushed(cycle_id, window)
+                    log.info(f"score sweep: {cycle_id} {window} delivered")
+                else:
+                    log.warning(
+                        f"score sweep: {cycle_id} {window} not delivered — "
+                        f"will retry next pass"
+                    )
+            except Exception as e:
+                log.error(f"score sweep: {cycle_id} {window} failed: {e}")
 
 
 def backfill_outcomes():
@@ -509,8 +574,9 @@ def backfill_outcomes():
     windows whose timestamps are now mature. (The Letta-era 6h side-write
     to the shared `recent_outcomes` block was removed 2026-06-09, BU-3 —
     the stateless seats never read it; debate_records is the only
-    outcome record.) Each matured window is also mirrored to the cycle's
-    Langfuse trace as scores via _push_outcome_scores.
+    outcome record.) Mirroring to Langfuse is NOT done here anymore —
+    push_pending_outcome_scores (called right after this in the observer
+    cycle) handles it convergently off the written rows (2026-06-11).
     """
     from database import get_pending_outcome_backfills, update_debate_outcomes
 
@@ -568,12 +634,6 @@ def backfill_outcomes():
                         f"pnl=${pnl_value:.4f} unrealized=${unrealized_value:.4f} "
                         f"skew_delta={skew_delta} grid_alive={grid_alive}"
                     )
-                    _push_outcome_scores(cycle_id, '6h', {
-                        'fills_6h': fills_count,
-                        'pnl_6h': pnl_value,
-                        'unrealized_pnl_6h': unrealized_value,
-                        'grid_alive_6h': bool(grid_alive),
-                    })
                 elif window == '24h':
                     update_debate_outcomes(
                         cycle_id, '24h', fills_count, pnl_value,
@@ -583,21 +643,12 @@ def backfill_outcomes():
                         f"backfill: {cycle_id} 24h → fills={fills_count} "
                         f"pnl=${pnl_value:.4f} unrealized=${unrealized_value:.4f}"
                     )
-                    _push_outcome_scores(cycle_id, '24h', {
-                        'fills_24h': fills_count,
-                        'pnl_24h': pnl_value,
-                        'unrealized_pnl_24h': unrealized_value,
-                    })
                 else:  # 1h — no unrealized_pnl_1h column; realized only
                     update_debate_outcomes(cycle_id, window, fills_count, pnl_value)
                     log.info(
                         f"backfill: {cycle_id} {window} → fills={fills_count} "
                         f"pnl=${pnl_value:.4f}"
                     )
-                    _push_outcome_scores(cycle_id, '1h', {
-                        'fills_1h': fills_count,
-                        'pnl_1h': pnl_value,
-                    })
             except Exception as e:
                 log.error(f"backfill: update for {cycle_id} {window} failed: {e}")
 
@@ -820,6 +871,13 @@ def poll_cycle():
         backfill_outcomes()
     except Exception as e:
         log.error(f"backfill_outcomes failed: {e}")
+
+    # Convergent Langfuse mirror: deliver any backfilled-but-unconfirmed
+    # outcome scores (retries until confirmed; see push_pending_outcome_scores).
+    try:
+        push_pending_outcome_scores()
+    except Exception as e:
+        log.error(f"push_pending_outcome_scores failed: {e}")
 
     # Per-seat forward-realized accuracy → Langfuse scores (72h maturity).
     try:
