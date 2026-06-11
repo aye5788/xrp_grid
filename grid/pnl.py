@@ -16,6 +16,28 @@ def _is_live_order_id(order_id) -> bool:
     return bool(_KRAKEN_TXID.match(str(order_id or '')))
 
 
+def current_scope_cutoff() -> str:
+    """The paper_run_started_utc system_state value, or '' when no paper run is
+    recorded. '' means the current scope is LIVE. Single read point so every
+    fill-reader resolves scope the same way. NOTE: a future flip back to live
+    trading must blank this key (or this rule must gain a successor marker)."""
+    from database import get_system_state
+    return get_system_state('paper_run_started_utc', default='') or ''
+
+
+def fill_in_current_scope(order_id, filled_at, cutoff) -> bool:
+    """True iff a fill belongs to the CURRENT run's scope. cutoff is the value
+    from current_scope_cutoff(): non-empty -> paper scope (non-txid order_id
+    filled at/after the cutoff, same rule as get_pnl_snapshot(paper=True));
+    empty -> live scope (Kraken txid order_ids only). Keeps every current-state
+    fill reader (world_state, gate triggers) on the one discriminator instead
+    of each rolling its own — added 2026-06-10 after an unconditional live-only
+    filter in the outcome backfill poisoned the paper run's seat grading."""
+    if cutoff:
+        return (not _is_live_order_id(order_id)) and (filled_at or '') >= cutoff
+    return _is_live_order_id(order_id)
+
+
 def _fifo_match(fills: list) -> tuple:
     """
     FIFO-match buys to sells from a time-ordered fills list.

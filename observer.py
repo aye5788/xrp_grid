@@ -232,11 +232,26 @@ def _compute_window_metrics(cycle_start, cycle_end, baseline_equity=None):
     Return (fills_count, realized_pnl, unrealized_pnl) for the window
     [cycle_start, cycle_end).
 
-    realized_pnl: FIFO-matched across the full LIVE fills history (so sells in
-    window can match buys from before the window), then summed only for the
-    sells whose fill time fell within the window. Pre-live paper fills are
-    excluded (_is_live_order_id) — otherwise paper sells drain the FIFO buy
-    queue (incl. live buys) and every live sell attributes to $0.
+    SCOPE — decided per cycle from ITS OWN timestamp, mirroring the
+    grid/pnl.py:get_pnl_snapshot scope-split (2026-06-09): cycles that start
+    at/after the `paper_run_started_utc` system_state cutoff count PAPER fills
+    (non-txid order_ids filled at/after the cutoff); earlier cycles keep the
+    LIVE-only txid basis, so the May live record is untouched. Era-by-timestamp
+    is deterministic — correct even when this backfill runs long after the
+    cycle, and repair-safe (re-backfilling an old row re-derives the same
+    scope). The 2026-06-09→06-10 paper cycles were originally written with the
+    live-only filter applied unconditionally, recording 0 fills for a grid that
+    was actually filling — that poisoned the seat graders and the Journal
+    recall; do not regress this to a single unconditional filter. NOTE: if the
+    bot ever flips back to LIVE, blank `paper_run_started_utc` (or record a
+    successor marker and update this scope rule), or post-flip cycles would be
+    misclassified as paper.
+
+    realized_pnl: FIFO-matched across the full in-scope fills history (so sells
+    in window can match buys from before the window), then summed only for the
+    sells whose fill time fell within the window. Out-of-scope fills are
+    excluded from the FIFO queue — otherwise cross-scope sells drain the buy
+    queue and every in-scope sell attributes to $0.
 
     unrealized_pnl: the windowed mark-to-market drift on the held position,
     computed as get_pnl_snapshot's decomposition (total = realized + unrealized,
@@ -247,20 +262,23 @@ def _compute_window_metrics(cycle_start, cycle_end, baseline_equity=None):
     where equity = xrp_held*marked_price + usd_held (inventory.net_position_usd
     already stores xrp_held*price, so equity = net_position_usd + usd_held).
 
-    Same strict live-only basis as realized: unrealized is attributed ONLY when
-    the window saw at least one LIVE fill (fills_count > 0). Every paper window
-    has fills_count == 0 (paper order_ids are filtered by _is_live_order_id), so
-    unrealized is 0.0 in paper — inert by design, never garbage, even on a DB
-    carrying historical live fills. It is also 0.0 when the decision-time
-    baseline (baseline_equity is None) or the window-end equity is unrecoverable
-    — the same no-baseline fallback get_pnl_snapshot uses at grid/pnl.py:149-153.
-    (Trade-off: a fully quiescent live window — held position bleeding with zero
-    fills, e.g. during a HALT — reports 0.0 here, because there is no live/paper
-    flag on inventory rows to gate on instead; the only live discriminator in the
-    system is _is_live_order_id on fills.)
+    Same strict in-scope basis as realized: unrealized is attributed ONLY when
+    the window saw at least one in-scope fill (fills_count > 0). It is also 0.0
+    when the decision-time baseline (baseline_equity is None) or the window-end
+    equity is unrecoverable — the same no-baseline fallback get_pnl_snapshot
+    uses at grid/pnl.py:149-153. (Trade-off: a fully quiescent window — held
+    position bleeding with zero fills, e.g. during a HALT — reports 0.0 here,
+    because there is no live/paper flag on inventory rows to gate on instead;
+    the only scope discriminator in the system is order-id shape + the paper
+    cutoff on fills.)
     """
-    from database import get_conn
+    from database import get_conn, get_system_state
     from grid.pnl import _fifo_match, _is_live_order_id
+
+    # Era of THIS cycle decides the scope (see docstring). ISO-string compare —
+    # the same convention get_pnl_snapshot's paper filter uses.
+    cutoff = get_system_state('paper_run_started_utc', default='') or ''
+    paper_scope = bool(cutoff) and cycle_start.isoformat() >= cutoff
 
     conn = get_conn()
     rows = conn.execute('''
@@ -274,9 +292,16 @@ def _compute_window_metrics(cycle_start, cycle_end, baseline_equity=None):
     fills = []
     for r in rows:
         f = dict(r)
-        if not _is_live_order_id(f.get('order_id')):
-            continue
         ft = f.get('filled_at') or f.get('timestamp')
+        if paper_scope:
+            # Paper era: only paper fills (non-txid) at/after the cutoff —
+            # identical to get_pnl_snapshot(paper=True).
+            if _is_live_order_id(f.get('order_id')) or (ft or '') < cutoff:
+                continue
+        else:
+            # Live era: only Kraken txid fills.
+            if not _is_live_order_id(f.get('order_id')):
+                continue
         f['_dt'] = _parse_iso_safe(ft)
         if f['_dt'] is None:
             continue
@@ -299,8 +324,8 @@ def _compute_window_metrics(cycle_start, cycle_end, baseline_equity=None):
             realized += pnl_per_sell.get(f['order_id'], 0.0)
     realized = round(realized, 4)
 
-    # Unrealized — same live-only basis as realized. Attributed only when the
-    # window saw live trading (fills_count > 0); 0.0 otherwise (inert in paper).
+    # Unrealized — same in-scope basis as realized. Attributed only when the
+    # window saw in-scope trading (fills_count > 0); 0.0 otherwise.
     unrealized = 0.0
     if fills_count > 0 and baseline_equity is not None:
         equity_end = _get_equity_at_or_before(cycle_end)

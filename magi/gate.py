@@ -556,11 +556,22 @@ def _prior_acceptability(conn) -> Optional[bool]:
 
 
 def _hours_since_last_fill(conn) -> Optional[float]:
-    """Hours since the most recent grid_orders.filled_at. None if no fills."""
-    row = conn.execute(
-        "SELECT MAX(filled_at) AS lf FROM grid_orders "
-        "WHERE status='filled' AND filled_at IS NOT NULL"
-    ).fetchone()
+    """Hours since the most recent IN-SCOPE grid_orders.filled_at (current run
+    scope — paper fills during the paper run, live txids otherwise; see
+    grid/pnl.py:fill_in_current_scope). None if no in-scope fills. Scoped
+    2026-06-10 so the fill-drought trigger can never read a cross-scope fill."""
+    from grid.pnl import current_scope_cutoff, fill_in_current_scope
+    cutoff = current_scope_cutoff()
+    rows = conn.execute(
+        "SELECT order_id, filled_at AS lf FROM grid_orders "
+        "WHERE status='filled' AND filled_at IS NOT NULL "
+        "ORDER BY filled_at DESC LIMIT 500"
+    ).fetchall()
+    row = None
+    for r in rows:
+        if fill_in_current_scope(r["order_id"], r["lf"], cutoff):
+            row = r
+            break
     if not row or not row["lf"]:
         return None
     try:

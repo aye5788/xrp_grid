@@ -256,15 +256,18 @@ def gate_L3(conn, ctx) -> dict:
         return _fail('0 windows', '≥12 cyc + 1 fill', label,
                      'No run of 12 consecutive TRENDING & conv≥0.6 cycles')
 
-    # For each qualifying window, check if ≥1 fill happened during it
+    # For each qualifying window, check if ≥1 LIVE fill happened during it.
+    # Live-only like every other gate (this panel asks "deploy real capital?")
+    # — scoped 2026-06-10; the unfiltered count could be satisfied by paper
+    # fills landing inside a TRENDING window.
     for start_ts, end_ts, n in qualifying:
-        row = conn.execute(
-            "SELECT COUNT(*) FROM grid_orders WHERE status='filled' "
+        rows_w = conn.execute(
+            "SELECT order_id FROM grid_orders WHERE status='filled' "
             "AND COALESCE(filled_at, timestamp) >= ? "
             "AND COALESCE(filled_at, timestamp) <= ?",
             (start_ts, end_ts),
-        ).fetchone()
-        if row[0] >= 1:
+        ).fetchall()
+        if sum(1 for r in rows_w if _is_live_order_id(r['order_id'])) >= 1:
             return _pass(
                 f"{len(qualifying)} window(s), longest={max(q[2] for q in qualifying)} cyc",
                 '≥12 cyc + 1 fill',

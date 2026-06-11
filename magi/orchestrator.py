@@ -138,15 +138,33 @@ def _get_latest_market_knowledge():
     }
 
 
-def _hours_since_last_fill() -> float | None:
-    """Hours since the most recent grid_orders fill, or None if no fills exist."""
+def _last_in_scope_fill_row(columns: str):
+    """Most recent filled grid_orders row IN THE CURRENT RUN SCOPE (paper fills
+    during the paper run, Kraken txid fills otherwise — grid/pnl.py:
+    fill_in_current_scope). Scoping added 2026-06-10: the unscoped "most recent
+    fill" read happened to be correct during the paper run only because paper
+    fills were newest; this makes world_state's fill recency immune to
+    cross-scope rows. Scans recent rows newest-first; 500 covers any realistic
+    backlog of out-of-scope rows on top."""
+    from grid.pnl import current_scope_cutoff, fill_in_current_scope
+    cutoff = current_scope_cutoff()
     conn = get_conn()
-    row = conn.execute(
-        "SELECT filled_at FROM grid_orders "
+    rows = conn.execute(
+        f"SELECT {columns} FROM grid_orders "
         "WHERE status='filled' AND filled_at IS NOT NULL "
-        "ORDER BY filled_at DESC LIMIT 1"
-    ).fetchone()
+        "ORDER BY filled_at DESC LIMIT 500"
+    ).fetchall()
     conn.close()
+    for row in rows:
+        if fill_in_current_scope(row['order_id'], row['filled_at'], cutoff):
+            return row
+    return None
+
+
+def _hours_since_last_fill() -> float | None:
+    """Hours since the most recent IN-SCOPE grid_orders fill (current run
+    scope), or None if no in-scope fills exist."""
+    row = _last_in_scope_fill_row("order_id, filled_at")
     if not row or not row['filled_at']:
         return None
     try:
@@ -157,16 +175,13 @@ def _hours_since_last_fill() -> float | None:
 
 
 def _last_fill_summary() -> dict | None:
-    """Summary of the most recent filled order. Used by agents to reason
-    about whether a recent fill represents an open position they should
-    let the grid close, vs. a stale state that warrants RECENTRE."""
-    conn = get_conn()
-    row = conn.execute(
-        "SELECT order_id, side, price, size, fill_price, fee, filled_at "
-        "FROM grid_orders WHERE status='filled' AND filled_at IS NOT NULL "
-        "ORDER BY filled_at DESC LIMIT 1"
-    ).fetchone()
-    conn.close()
+    """Summary of the most recent IN-SCOPE filled order (current run scope).
+    Used by agents to reason about whether a recent fill represents an open
+    position they should let the grid close, vs. a stale state that warrants
+    RECENTRE."""
+    row = _last_in_scope_fill_row(
+        "order_id, side, price, size, fill_price, fee, filled_at"
+    )
     if not row or not row['filled_at']:
         return None
     try:
