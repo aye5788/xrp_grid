@@ -1292,17 +1292,45 @@ HTML_TEMPLATE = """
                onclick='console.log({{ t|tojson }})'
                title="{{ t.trigger_id }} · {{ t.evals }} evals in window · last fired details → console">
             <div class="gate-head">
-              <span class="gate-id">{{ t.trigger_id }}{% if t.trigger_id in ['T14','T2','T11','T16'] %} ★{% endif %}</span>
+              <span class="gate-id">{{ t.trigger_id }}{% if t.trigger_id in ['W1','W2'] %} ★{% endif %}</span>
               <span class="gate-pill">{{ t.fires_24h }}/{{ t.fires_window }}</span>
             </div>
             <div class="gate-value">{{ t.fires_window }} fires</div>
-            <div class="gate-label">{{ 'wakes MAGI' if t.trigger_id in ['T14','T2','T11','T16'] else 'context-only' }}</div>
+            <div class="gate-label">{{ 'wakes MAGI' if t.trigger_id in ['W1','W2'] else 'context-only' }}</div>
           </div>
           {% endfor %}
         </div>
         {% else %}
         <div class="readiness-meta">no gate evaluations recorded in window</div>
         {% endif %}
+      </div>
+    </div>
+    {% endif %}
+
+    {% if exposure_cap %}
+    <div class="readiness-panel">
+      <div class="readiness-section">
+        <div class="readiness-header">
+          <span class="readiness-title">⬢ Exposure Cap</span>
+          <span class="readiness-meta">{{ exposure_cap.threshold }} linked down-rebuilds (≤{{ exposure_cap.link_hours }}h apart) → sells-only · releases on first higher rebuild</span>
+          <span class="readiness-verdict verdict-{{ exposure_cap.colour }}">
+            {% if exposure_cap.engaged %}ENGAGED — buys frozen, sells-only rebuilds
+            {% elif exposure_cap.streak > 0 %}ARMING — streak {{ exposure_cap.streak }}/{{ exposure_cap.threshold }}
+            {% else %}CLEAR — streak 0{% endif %}
+          </span>
+        </div>
+        <div class="gate-grid">
+          <div class="gate-chip {{ 'gate-fail' if exposure_cap.engaged else ('gate-pass' if exposure_cap.streak == 0 else 'gate-na') }}"
+               onclick='console.log({{ exposure_cap|tojson }})'
+               title="down-walk streak · full state → console">
+            <div class="gate-head">
+              <span class="gate-id">DOWN-WALK</span>
+              <span class="gate-pill">{{ exposure_cap.streak }}/{{ exposure_cap.threshold }}</span>
+            </div>
+            <div class="gate-value">{{ 'SELLS-ONLY' if exposure_cap.engaged else 'streak ' ~ exposure_cap.streak }}</div>
+            <div class="gate-label">last rebuild {{ exposure_cap.last_centre or '—' }}{% if exposure_cap.last_age_h is not none %} · {{ exposure_cap.last_age_h }}h ago{% endif %}</div>
+          </div>
+        </div>
       </div>
     </div>
     {% endif %}
@@ -2436,10 +2464,51 @@ def index():
         llm_calls=_fetch_llm_calls_24h_safe(),
         readiness=_fetch_readiness_safe(),
         gate_activity=_fetch_gate_activity_safe(),
+        exposure_cap=_fetch_exposure_cap_safe(),
         grid_status=grid_status,
         # Phase 5: agent council panels (single splat from helper)
         **council_data,
     )
+
+
+def _fetch_exposure_cap_safe():
+    """Down-walk exposure-cap state (Fix 2, 2026-06-11) for the EXPOSURE CAP
+    chip. Reads the system_state keys grid/engine.py maintains; never raises
+    — returns a CLEAR/zero state on any error so the dashboard renders."""
+    try:
+        from datetime import datetime
+        from database import get_system_state
+        from config import DOWN_WALK_CAP_STREAK, DOWN_WALK_LINK_HOURS
+        try:
+            streak = int(get_system_state('down_walk_streak', default='0') or 0)
+        except (TypeError, ValueError):
+            streak = 0
+        last_centre = get_system_state('down_walk_last_centre', default=None)
+        last_ts = get_system_state('down_walk_last_ts', default=None)
+        last_age_h = None
+        if last_ts:
+            try:
+                last_age_h = round(
+                    (datetime.utcnow() - datetime.fromisoformat(last_ts))
+                    .total_seconds() / 3600.0, 1)
+            except (TypeError, ValueError):
+                pass
+        engaged = streak >= DOWN_WALK_CAP_STREAK
+        return {
+            'streak': streak,
+            'threshold': DOWN_WALK_CAP_STREAK,
+            'link_hours': DOWN_WALK_LINK_HOURS,
+            'engaged': engaged,
+            'colour': 'red' if engaged else ('yellow' if streak else 'green'),
+            'last_centre': (f"{float(last_centre):.4f}" if last_centre else None),
+            'last_ts': last_ts,
+            'last_age_h': last_age_h,
+        }
+    except Exception as e:
+        app.logger.warning("exposure cap fetch failed: %r", e)
+        return {'streak': 0, 'threshold': 3, 'link_hours': 48,
+                'engaged': False, 'colour': 'green',
+                'last_centre': None, 'last_ts': None, 'last_age_h': None}
 
 
 def _get_open_alerts_safe():

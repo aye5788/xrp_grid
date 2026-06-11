@@ -178,7 +178,7 @@ _SAFE_DEFAULT_R0 = {
     "melchior": {"verdict": "THESIS_HOLDS", "conviction": 0.0,
                  "key_evidence": [], "crux": "(no response)", "geometry": None},
     "balthasar": {"position": "CLEAR", "conviction": 0.0,
-                  "key_evidence": [], "crux": "(no response)"},
+                  "key_evidence": [], "crux": "(no response)", "stance": "HOLD"},
 }
 
 _REBUTTAL_INSTRUCTION = (
@@ -193,8 +193,15 @@ _REBUTTAL_INSTRUCTION = (
 _SYNTHESIS_INSTRUCTION = (
     "=== SYNTHESIS — YOU ARE THE ARBITER ===\n"
     "Weigh the openings and the rebuttals above and emit your FINAL risk vote. Your "
-    "risk_action and geometry_veto are the council's binding risk outputs for this "
+    "stance, risk_action and geometry_veto are the council's binding outputs for this "
     "cycle; the grid economics stand or fall on Melchior's post-rebuttal verdict.\n"
+    "YOUR stance IS THE COUNCIL'S CAPITAL MANDATE — it is enforced exactly as "
+    "voted: DEPLOY runs Melchior's verdict unchanged; HOLD blocks any rebuild "
+    "(nothing new is deployed, resting orders stay); STAND_ASIDE cancels buys and "
+    "keeps sells working inventory off. Vote the stance from the market evidence "
+    "(regime, tape verdict, drawdown, exposure-cap streak), not from habit — a "
+    "stance held while conditions move is graded as wrong, the same as one "
+    "flipped without cause.\n"
     "YOUR geometry_veto IS THE STRUCTURAL VETO. If Melchior's verdict is RECONFIGURE "
     "and you judge the rebuild unsafe, set geometry_veto=HOLD_GEOMETRY or RISK_BLOCK "
     "and the grid will hold (no rebuild this cycle). If you set geometry_veto=PROCEED "
@@ -229,7 +236,8 @@ def _fmt_melchior(v: Any) -> str:
 
 
 def _fmt_balthasar(v: Any) -> str:
-    return (f"[balthasar] risk_action={v.risk_action} geometry_veto={v.geometry_veto} "
+    return (f"[balthasar] stance={getattr(v, 'stance', 'HOLD')} "
+            f"risk_action={v.risk_action} geometry_veto={v.geometry_veto} "
             f"conviction={v.conviction:.2f}\n  key_evidence: {_ev(v)}\n  crux: {v.crux}")
 
 
@@ -427,7 +435,8 @@ def _balthasar_r0(v: Any) -> dict:
     # 'position' for balthasar). Synthesis values go to cons, not here.
     return {"position": v.risk_action, "conviction": float(v.conviction),
             "key_evidence": list(v.key_evidence or []), "crux": v.crux,
-            "geometry_veto": v.geometry_veto}
+            "geometry_veto": v.geometry_veto,
+            "stance": getattr(v, "stance", "HOLD")}
 
 
 # --- stand-down (fail-safe) consensus ---
@@ -451,6 +460,10 @@ def _safe_hold_cons(trace_id: Optional[str], reason: str,
     column."""
     return {
         "grid_verdict": "THESIS_HOLDS",
+        # Stand-down stance is HOLD, not DEPLOY: a council that failed to
+        # convene must not authorize new capital deployment — keep what is
+        # resting, change nothing (matches the MAINTAIN safe hold).
+        "stance": "HOLD",
         "risk_action": "CLEAR",
         "regime": "UNCERTAIN",
         "regime_action": "EXECUTE",
@@ -755,6 +768,11 @@ def run_council(world_state: dict, cycle_id: str,
 
         cons = {
             "grid_verdict": effective_verdict,    # POST-REBUTTAL verdict, AFTER veto
+            # The arbiter's capital mandate (Fix 3). Translated
+            # deterministically by enforce_hard_rules: DEPLOY -> verdict
+            # pipeline unchanged; HOLD -> no rebuild; STAND_ASIDE -> no buys,
+            # keep sells (risk_action floored at PAUSE_LONGS).
+            "stance": getattr(bs, "stance", "HOLD"),
             "risk_action": bs.risk_action,        # Balthasar synthesis
             "regime": cr.position,                # Casper POST-REBUTTAL
             "regime_action": cr.regime_action,    # Casper POST-REBUTTAL (record-only)
@@ -766,7 +784,8 @@ def run_council(world_state: dict, cycle_id: str,
             "debate_triggered": debate_triggered,
             "deadlock": False,
             "reasoning": (
-                f"arbiter synthesis — regime={cr.position}/{cr.regime_action}, "
+                f"arbiter synthesis — stance={getattr(bs, 'stance', 'HOLD')}, "
+                f"regime={cr.position}/{cr.regime_action}, "
                 f"grid_verdict={mr.verdict}->{effective_verdict}, "
                 f"risk={bs.risk_action}/{bs.geometry_veto}; "
                 f"{shift}.{veto_note} {_sanitize(bs.crux)}"
@@ -779,8 +798,9 @@ def run_council(world_state: dict, cycle_id: str,
             "_fingerprint_council_half": council_half,
         }
         log.info(
-            "[council_v2] %s: regime=%s/%s grid=%s(eff=%s) risk=%s/%s debate=%s",
-            cycle_id, cr.position, cr.regime_action, mr.verdict, effective_verdict,
+            "[council_v2] %s: stance=%s regime=%s/%s grid=%s(eff=%s) risk=%s/%s debate=%s",
+            cycle_id, getattr(bs, "stance", "HOLD"), cr.position, cr.regime_action,
+            mr.verdict, effective_verdict,
             bs.risk_action, bs.geometry_veto, debate_triggered,
         )
         return round_0, round_1, cons

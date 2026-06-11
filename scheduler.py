@@ -48,20 +48,23 @@ MAGI_DAILY_HOUR_EST = 20      # end-of-day council assessment fires in this EST 
 MAGI_MAX_SILENCE_HOURS = 25   # force a cycle if none has run in this many hours
 
 # --- Gate wake wire ---------------------------------------------------
-# A gate trigger in WAKE_CLASS_TRIGGERS that fires since the last cycle wakes
-# MAGI OFF-schedule (vs. waiting for the daily floor call). Throttled to >=
-# WAKE_MIN_INTERVAL_MIN since any MAGI cycle so vendor spend stays bounded:
-# in calm markets ~$0 extra, in a real event one prompt. Gate detection is
-# level-based (each eval writes a fresh event row), so consumed_in_cycle alone
-# does NOT stop a standing condition from re-waking each throttle window —
-# T2 additionally carries an episode guard (_t2_episode_already_answered,
-# 2026-06-10): a breach the council already ruled on (same direction + band)
-# is dropped instead of re-asked. T16 (drawdown rung, added 2026-06-10)
-# carries the same guard keyed on rung depth — one wake per band-width of
-# drawdown deepening. Wake-class is deliberately the urgent subset (book one-sided,
-# grid breach, regime flip, sustained drawdown); low-urgency triggers (T15 skew
-# drift early-warn, T6/T7 scorer) still wait for the next scheduled or woken cycle.
-WAKE_CLASS_TRIGGERS = ("T14", "T2", "T11", "T16")
+# Fix 4 (2026-06-11): wake-class is the W-SERIES — wake QUESTIONS, not
+# detectors. Every T-series trigger is context-only (detected, recorded,
+# shown to the council in triggers_since_last_cycle — never wakes anyone).
+# A W names the council-only question it asks:
+#   W1 — "price left the band and stayed out: corrective recentre or not?"
+#        (fed by T2 detection; T2 dwell + one-wake-per-breach-episode guard)
+#   W2 — "the evidence under your standing stance changed: re-judge it."
+#        (warehouse verdict shift held one bar, or exposure-cap engaged/
+#        released; edge-triggered in gate.py, one wake per shift)
+# The old wake set (T2/T11/T14/T16) was demoted after the 2026-06-11 yield
+# audit: 0/16 gate-woken cycles produced a council-originated change — the
+# rule layer already handled what those detectors saw. Their dwell handlers
+# remain below so stale pre-deploy events drain cleanly.
+# Wakes stay throttled to >= WAKE_MIN_INTERVAL_MIN since any MAGI cycle.
+# Adding a T is cheap instrumentation; adding a W requires naming the
+# council-only question it asks.
+WAKE_CLASS_TRIGGERS = ("W1", "W2")
 WAKE_MIN_INTERVAL_MIN = 60
 _last_magi_cycle_at = None   # set by run_magi_cycle; drives the wake throttle
 
@@ -505,6 +508,21 @@ def _wake_dwell_status(trigger_id: str) -> tuple:
             except (ValueError, TypeError):
                 details = {}
 
+            if trigger_id == "W1":
+                # W1 is the breach wake question fed by T2 detection — the
+                # T2 dwell logic (band check, 1m continuous dwell, one wake
+                # per breach episode) applies verbatim.
+                return _dwell_t2(conn, age_min, float(WAKE_DWELL_MINUTES))
+            if trigger_id == "W2":
+                # W2 is already edge-triggered AND one-bar-held by
+                # construction (gate.py:w2_stance_evidence_shift) — no age
+                # dwell adds information. Wake.
+                return "wake", (f"stance-evidence shift: "
+                                f"{details.get('changes')}")
+            # Legacy wake-class IDs (T2/T11/T14/T16 were demoted to
+            # context-only in Fix 4) — keep their dwell handlers so any
+            # unconsumed pre-deploy event drains correctly on the first
+            # post-deploy pass instead of hitting the generic fallback.
             if trigger_id == "T2":
                 return _dwell_t2(conn, age_min, float(WAKE_DWELL_MINUTES))
             if trigger_id == "T14":
@@ -569,8 +587,11 @@ def _t2_episode_already_answered(conn, direction: str,
     import time as _time
     try:
         rows = conn.execute(
+            # W1 is the breach wake question (Fix 4); T2 rows are the
+            # pre-Fix-4 wake history for the same condition — both count
+            # as "this episode was already answered".
             "SELECT details FROM magi_gate_events "
-            "WHERE trigger_id='T2' AND fired=1 "
+            "WHERE trigger_id IN ('W1', 'T2') AND fired=1 "
             "AND consumed_in_cycle LIKE 'cyc%' "
             "AND timestamp >= ?",
             (_time.time() - 48 * 3600,),
@@ -874,33 +895,98 @@ def main():
     else:
         log.info(f"Resumed {len(engine.paper_orders)} paper orders from DB — skipping fresh grid init")
 
-    # Run initial MAGI cycle (debounced — skip if a cycle ran within 30 min)
+    # Startup council gate (Fix 4, 2026-06-11 — replaces the 30-min
+    # debounce). Every restart used to fire a ~6-call council cycle unless
+    # the prior one was <30 min old; with several restarts a day that was
+    # pure spend with 0 audited yield. A restart now wakes the council ONLY
+    # when something a council cycle could act on actually changed:
+    #   (a) the config fingerprint differs from the last cycle's
+    #       (personas/models/floors changed — the council should re-judge
+    #       under the new configuration), or
+    #   (b) unconsumed fired wake-class (W) events are pending (a real wake
+    #       was in flight when the service stopped), or
+    #   (c) price has left the current grid band (the breach question —
+    #       same condition W1 asks; a restart shouldn't dodge it).
+    # Otherwise: seed the throttle/backstop baseline and stay quiet — the
+    # daily floor and the 25h backstop carry the cadence. Fails open
+    # (wake) on any check error: a broken check must not silence the
+    # council indefinitely.
     try:
         from database import get_conn
+        startup_wake_reason = None
         conn = get_conn()
-        row = conn.execute(
-            "SELECT timestamp FROM magi_decisions ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        conn.close()
-        skip_startup = False
-        if row:
-            last_ts = datetime.fromisoformat(row['timestamp'])
-            if last_ts.tzinfo is None:
-                last_ts = last_ts.replace(tzinfo=timezone.utc)
-            age_min = (datetime.now(timezone.utc) - last_ts).total_seconds() / 60
-            if age_min < 30:
-                log.info(
-                    f"Skipping startup MAGI — last cycle was {age_min:.1f} "
-                    f"minutes ago (< 30 min debounce)"
-                )
-                skip_startup = True
-                # Seed the wake-throttle / max-silence baseline from the DB
-                # row — a skipped startup would otherwise leave it None.
+        try:
+            last = conn.execute(
+                "SELECT timestamp, config_version FROM debate_records "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if last is None:
+                startup_wake_reason = "no prior council cycle on record"
+            else:
+                # Seed throttle/backstop baseline from the DB row
+                # regardless of whether we wake.
+                last_ts = datetime.fromisoformat(last['timestamp'])
+                if last_ts.tzinfo is None:
+                    last_ts = last_ts.replace(tzinfo=timezone.utc)
                 _last_magi_cycle_at = last_ts
-        if not skip_startup:
+
+                # (a) config fingerprint changed
+                try:
+                    # Composes the SAME full version stamped on
+                    # debate_records rows (council half from disk + floor
+                    # half) — see council_v2.current_config_fingerprint.
+                    from magi.council_v2 import current_config_fingerprint
+                    cfg_now, _ = current_config_fingerprint()
+                    if cfg_now and last['config_version'] and \
+                            cfg_now != last['config_version']:
+                        startup_wake_reason = (
+                            f"config changed ({last['config_version']} -> "
+                            f"{cfg_now})")
+                except Exception as e:
+                    log.warning("startup gate: fingerprint check failed "
+                                "(%s) — skipping condition (a)", e)
+
+                # (b) unconsumed fired wake-class events
+                if startup_wake_reason is None:
+                    ph = ",".join("?" for _ in WAKE_CLASS_TRIGGERS)
+                    pend = conn.execute(
+                        f"SELECT trigger_id FROM magi_gate_events "
+                        f"WHERE consumed_in_cycle IS NULL AND fired=1 "
+                        f"AND trigger_id IN ({ph}) LIMIT 1",
+                        tuple(WAKE_CLASS_TRIGGERS),
+                    ).fetchone()
+                    if pend:
+                        startup_wake_reason = (
+                            f"unconsumed wake event {pend['trigger_id']} "
+                            f"pending from before restart")
+
+                # (c) price outside the current grid band
+                if startup_wake_reason is None:
+                    try:
+                        _, b_upper, b_lower = _grid_band(conn)
+                        px = engine.get_current_price()
+                        if (b_upper is not None and px is not None
+                                and (px > b_upper or px < b_lower)):
+                            startup_wake_reason = (
+                                f"price {px} outside grid band "
+                                f"[{b_lower:.4f}, {b_upper:.4f}]")
+                    except Exception as e:
+                        log.warning("startup gate: band check failed (%s) "
+                                    "— skipping condition (c)", e)
+        finally:
+            conn.close()
+
+        if startup_wake_reason:
+            log.info("Startup council gate: WAKING — %s", startup_wake_reason)
             run_magi_cycle(trigger='startup')
+        else:
+            log.info(
+                "Startup council gate: quiet restart — config unchanged, "
+                "no pending wake events, price in band. No startup cycle "
+                "(daily floor / 25h backstop / W-wakes carry the cadence)."
+            )
     except Exception as e:
-        log.warning(f"Startup debounce check failed, running cycle anyway: {e}")
+        log.warning(f"Startup gate check failed, running cycle anyway: {e}")
         run_magi_cycle(trigger='startup')
 
     last_observer_time = datetime.now(timezone.utc)

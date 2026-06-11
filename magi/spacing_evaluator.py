@@ -21,7 +21,11 @@ earlier draft did):
   grid rarely fills, and the variant's score falls accordingly.
 
   pair_profit_pct = spacing - 2 * fee   (per round-trip, after Kraken fees)
-  pair_rt_per_day = (count of qualifying hours / total hours) * 24
+  pair_rt_per_day = (completed swings of amplitude >= 2*i*spacing over the
+                     close path, / 2, normalised to per-day). Swings span
+                     however many hours they take — the old per-hour-range
+                     model scored fee-viable wide spacings at zero fills
+                     and would have deadlocked the grid (caught 2026-06-11).
   pair_pnl_pct    = pair_rt_per_day * pair_profit_pct
 
   Each pair holds 2 * (1/N) = 2/N of grid capital (one buy slot + one sell
@@ -38,31 +42,38 @@ earlier draft did):
   helps when vol can reach those outer pairs. Exactly the "no-babying"
   property the operator asked for.
 
-Acceptability requirement: a variant is `acceptable` iff `spacing > 2*fee`
-(clears the per-round-trip fee floor) AND its total expected daily PnL is
-positive (`total_pnl_pct > 0`, i.e. at least the inner pair(s) fill and the
-grid nets out positive). The earlier rule also required EVERY pair to fill at
-least once in the window; after the 2026-05-23 fee correction
-(`2*TAKER_FEE = 0.008`) that became unreachable in low-vol regimes — the outer
-rungs of any fee-clearing grid never saw the hourly range they needed, so all
-36 variants scored unacceptable and the grid stood down indefinitely. The
-unfilled outer rungs are resting inventory reservations, not a cost, so a
-net-positive grid is acceptable even when its outer pairs are quiet. Per-pair
-liveness is still exposed via `per_level_rt_per_day` for transparency.
-`acceptable=false` variants are appended for traceability but always rank
-behind every acceptable one. Melchior is instructed in her persona to never
-select an unacceptable variant.
+Acceptability requirement (GoodCrypto-frame redesign, 2026-06-11): a variant
+is `acceptable` iff `spacing >= 6*fee_per_side` — the round-trip fee
+(2 maker fills = 2*fee) may consume no more than 1/3 of the gross spacing.
+That is the ONLY gate. The old rule (`spacing > 2*fee` AND
+`total_pnl_pct > 0`) failed two ways: (a) bare 2*fee clearance admitted the
+0.75% grid, which a 9.5y hourly backtest (2016-12 → 2026-06) showed loses in
+9 of 10 years — per-fill fee-positivity is not equity-positivity, because
+trend cycling consumes the thin remainder; (b) gating on the swing-forecast
+PnL let a fill-model blind spot veto economically sound grids — that is
+judgment, and judgment belongs to Melchior/the council. The forecast columns
+(estimated_round_trips_per_day, expected_daily_pnl_pct, per-pair liveness)
+stay in the output as FACTS for the council to weigh, not vetoes. (A still
+earlier rule requiring EVERY pair to fill in-window stays removed: unfilled
+outer rungs are inventory reservations, not a cost.) `acceptable=false`
+variants are appended for traceability but always rank behind every
+acceptable one. Melchior is instructed in her persona to never select an
+unacceptable variant.
 
 Public surface (stable contract):
-  - DEFAULT_VARIANTS: 36 candidates (6 level-counts × 6 spacings).
+  - DEFAULT_VARIANTS: 36 candidates (6 level-counts × 6 spacings); entries
+    below MIN_GRID_SPACING_PCT (the 0.0075 column) are filtered before
+    scoring, so 30 variants survive at the current 1.5% floor.
   - score_variants(...) returns a list[dict], JSON-serializable. Each
     entry has: levels, spacing_pct, profit_per_round_trip_pct,
     per_level_pnl_pct (list), per_level_rt_per_day (list),
     estimated_round_trips_per_day (sum across pairs),
     expected_daily_pnl_pct (grid total, normalised by total capital),
     acceptable (bool), rank (int or None).
-  - Sort: acceptable variants first, ranked by expected_daily_pnl_pct
-    DESC; unacceptable variants appended (still ordered for traceability).
+  - Sort: acceptable variants first; within each bucket by
+    profit_per_round_trip_pct DESC (widest fee-viable gap first), then
+    levels ASC (least capital committed), then spacing. The swing-forecast
+    PnL deliberately does NOT drive rank — see Acceptability above.
 
 Edge cases:
   - Empty candles → []
@@ -80,14 +91,15 @@ from typing import Optional
 # Variant search space. 6 level-counts × 6 spacings = 36 variants.
 # Level range [5, 10] matches the operator's "min ~5, max ~10" guidance —
 # enough room for Melchior to explore, narrow enough that the engine clamp
-# at [4, 12] never has to fight her choice. Spacings span the round-trip
-# fee-clearance boundary (2 * TAKER_FEE = 0.008 after the 2026-05-23 fee
-# correction; the two sub-0.008 spacings stay in the set for diagnostics but
-# can never be acceptable) up to MAX.
+# at [4, 12] never has to fight her choice. Spacings (2026-06-11) span the
+# 6*MAKER_FEE acceptability floor (1.5%) up to MAX (2.5%), the band the 9.5y
+# backtest showed viable. The 0.0075 column documents the old default but is
+# filtered out by the MIN_GRID_SPACING_PCT bound before scoring — it lost in
+# 9 of 10 backtest years and can never be selected.
 DEFAULT_VARIANTS = [
     (levels, spacing)
     for levels in (5, 6, 7, 8, 9, 10)
-    for spacing in (0.005, 0.0075, 0.01, 0.015, 0.02, 0.025)
+    for spacing in (0.0075, 0.015, 0.0175, 0.02, 0.0225, 0.025)
 ]
 
 
@@ -109,13 +121,15 @@ def score_variants(
     try:
         from config import MIN_GRID_SPACING_PCT, MAX_GRID_SPACING_PCT
     except Exception:
-        MIN_GRID_SPACING_PCT, MAX_GRID_SPACING_PCT = 0.003, 0.025
+        MIN_GRID_SPACING_PCT, MAX_GRID_SPACING_PCT = 0.015, 0.025
 
     if not candles_1h:
         return []
 
-    # Compute (high-low)/low for every candle once.
+    # Compute (high-low)/low for every candle once (data-sufficiency
+    # guard), and extract the close path for swing counting.
     hourly_ranges = []
+    closes = []
     for c in candles_1h:
         try:
             hi = float(c['high'])
@@ -125,9 +139,15 @@ def score_variants(
         if lo <= 0 or hi < lo:
             continue
         hourly_ranges.append((hi - lo) / lo)
+        try:
+            cl = float(c['close'])
+            if cl > 0:
+                closes.append(cl)
+        except (KeyError, TypeError, ValueError):
+            pass
 
     total_hours = len(hourly_ranges)
-    have_24h = total_hours >= 24
+    have_24h = total_hours >= 24 and len(closes) >= 24
 
     rt_cost = 2.0 * float(fee_rate_per_side)
 
@@ -169,8 +189,34 @@ def score_variants(
         per_pair_pnl_pct: list = []
         for i in range(1, n_pairs + 1):
             pair_threshold = 2.0 * i * sp
-            pair_qualifying = sum(1 for r in hourly_ranges if r >= pair_threshold)
-            pair_rt = (pair_qualifying / total_hours) * 24.0
+            # Fill model (rewritten 2026-06-11): count completed price
+            # SWINGS of amplitude >= pair_threshold over the close path,
+            # across however many hours each takes. The old model counted
+            # single-hour ranges >= threshold, which structurally scored
+            # wide (fee-viable) spacings at zero fills — hourly ranges
+            # almost never span 2*1.5%, but multi-hour walks do, and the
+            # 9.5y backtest confirms 1.5-2.5% grids fill 5-9x/day. Two
+            # alternating legs (down-then-up) = one round trip, which is
+            # the harvest event the PnL model prices. One-way walks count
+            # at most one leg regardless of depth — deliberately, since
+            # accumulation fills in a trend are not harvest.
+            legs = 0
+            swing_hi = swing_lo = closes[0]
+            dirn = 0
+            for cl in closes[1:]:
+                if cl > swing_hi:
+                    swing_hi = cl
+                if cl < swing_lo:
+                    swing_lo = cl
+                if dirn >= 0 and cl <= swing_hi * (1.0 - pair_threshold):
+                    legs += 1
+                    dirn = -1
+                    swing_hi = swing_lo = cl
+                elif dirn <= 0 and cl >= swing_lo * (1.0 + pair_threshold):
+                    legs += 1
+                    dirn = 1
+                    swing_hi = swing_lo = cl
+            pair_rt = ((legs / 2.0) / total_hours) * 24.0
             # Per-pair PnL as a % of TOTAL grid capital. Each pair holds
             # 2/N of grid capital; the round-trip earns `profit_pct` of
             # the pair's deployed capital. So pair contribution to
@@ -184,21 +230,25 @@ def score_variants(
         total_pnl_pct = round(sum(per_pair_pnl_pct), 6)
         total_rt_per_day = round(sum(per_pair_rt), 4)
 
-        # Acceptability: clear the per-round-trip fee floor (profit_pct > 0,
-        # i.e. spacing > 2*fee) AND have positive expected daily PnL across the
-        # grid. The earlier criterion additionally required EVERY pair to have
-        # filled at least once in the window (all_pairs_active). After the
-        # 2026-05-23 fee correction (2*TAKER_FEE = 0.008) that became
-        # unreachable in low-vol regimes: the outer rungs of any fee-clearing
-        # grid never see the hourly range they need, so all 36 variants scored
-        # unacceptable and the grid stood down indefinitely (GRID_PAUSE via the
-        # orchestrator's NO_ACCEPTABLE_VARIANT rule). A grid whose inner pairs
-        # fill and whose net expected PnL is positive is a working, fee-positive
-        # grid — the unfilled outer rungs are just resting inventory
-        # reservations, not a cost. So require net-positive expected PnL rather
-        # than all-pairs-active. Per-pair liveness stays visible to consumers
-        # via the per_level_rt_per_day list.
-        acceptable = (profit_pct > 0) and (total_pnl_pct > 0)
+        # Acceptability = the fee floor ONLY (GoodCrypto-frame redesign,
+        # 2026-06-11, operator direction): spacing must be at least
+        # 6 * fee_per_side, i.e. the 2-maker-fill round-trip cost (2*fee)
+        # may consume no more than 1/3 of the gross spacing. The old floor
+        # (spacing > 2*fee, any margin) admitted the 0.75% grid, which a
+        # 9.5y hourly backtest (2016-12 → 2026-06) showed loses in 9 of 10
+        # years: per-fill fee-positivity is NOT equity-positivity, because
+        # trend cycling consumes the thin remainder. At >= 6*fee (1.5% at
+        # maker 0.25%) the same backtest is viable, with a broad plateau
+        # through 2.0-3.0%. There is NO PnL-forecast gate: the calculator
+        # computes per-level economics; whether the market suits a grid
+        # right now is JUDGMENT and belongs to Melchior/the council. The
+        # swing-based fill estimate above stays in the output as a FACT for
+        # the council to weigh — it no longer vetoes a variant. (The earlier
+        # all_pairs_active criterion stays removed: outer rungs are
+        # inventory reservations, not a cost; liveness stays visible via
+        # per_level_rt_per_day.)
+        fee_share_floor = 6.0 * float(fee_rate_per_side)
+        acceptable = (sp >= fee_share_floor)
 
         scored.append({
             'levels':                         int(lc),
@@ -215,16 +265,19 @@ def score_variants(
     if not have_24h:
         return scored
 
-    # Sort: acceptable first (bucket 0), unacceptable last (bucket 1);
-    # within each bucket, by expected_daily_pnl_pct DESC. Tie-break on
-    # (spacing ASC, levels ASC) for determinism.
+    # Sort (GoodCrypto-frame redesign, 2026-06-11): acceptable first
+    # (bucket 0), unacceptable last (bucket 1); within each bucket by
+    # profit_per_round_trip_pct DESC (widest fee-viable gap first — the 9.5y
+    # backtest shows a broad viable plateau at 2.0-3.0% and losses below),
+    # then levels ASC (fewest levels = least capital committed; the backtest
+    # validated the few-level shape). The swing-based expected_daily_pnl_pct
+    # deliberately does NOT drive rank anymore: it is information for
+    # Melchior's judgment, not a decider — ranking by a forecast is what
+    # baked the old fill-model's blind spot into every grid choice.
     def sort_key(v):
         bucket = 0 if v['acceptable'] else 1
-        pnl = v['expected_daily_pnl_pct']
-        # None pnls (insufficient data) shouldn't actually appear here
-        # because have_24h is True, but be defensive.
-        pnl_sort = -(pnl if pnl is not None else 0.0)
-        return (bucket, pnl_sort, v['spacing_pct'], v['levels'])
+        return (bucket, -v['profit_per_round_trip_pct'],
+                v['levels'], v['spacing_pct'])
 
     scored.sort(key=sort_key)
     for i, v in enumerate(scored, start=1):

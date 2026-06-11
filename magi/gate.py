@@ -44,6 +44,21 @@ T13) and the 24h drought (T4) do not see.
 Cut triggers (T5, T8, T9, T10) intentionally not implemented — see
 xrp_gate_calibration.md for justification.
 
+W-SERIES (Fix 4, 2026-06-11) — wake QUESTIONS, distinct from the T-series
+detectors above. Every T is context-only: detected, recorded, surfaced to
+the council — never wakes it. A W is the decision to spend a council cycle
+on a question only the council can answer (scheduler.WAKE_CLASS_TRIGGERS):
+  W1  Breach question     — "price left the band and stayed out:
+                            corrective recentre or not?" Fed by T2
+                            detection; dwell + one-wake-per-breach-episode
+                            guard in the scheduler.
+  W2  Stance-evidence     — "the evidence under the standing stance
+      shift                 changed: re-judge it." Warehouse verdict shift
+                            held one full bar, or exposure-cap engaged/
+                            released. Edge-triggered via W2_eval state.
+Rule: adding a T is cheap instrumentation; adding a W requires naming the
+council-only question it asks.
+
 Each trigger function takes the data it needs as arguments and returns
 (fired: bool, details: dict). evaluate_gate() is the top-level entry
 point called by observer.poll_cycle.
@@ -688,6 +703,90 @@ def _write_event(conn, trigger_id: str, fired: bool, details: dict) -> None:
     )
 
 
+# --- W-series: wake questions (Fix 4, 2026-06-11) -----------------------
+# A W is NOT a detector. T-series triggers observe and record (context for
+# the council); a W is the decision to ASK the council a question only it
+# can answer — i.e. to spend a council cycle. Separate IDs keep the audit
+# trail unambiguous: a T row is a detection, a W row is a (candidate) paid
+# wake. Adding a T is cheap instrumentation; adding a W requires naming the
+# council-only question it asks.
+
+def _prior_w2_state(conn) -> Optional[dict]:
+    """Most recent W2_eval edge state ({'verdict':…, 'cap_engaged':…}), or
+    None on first evaluation. Same pattern as T14/T15 edge state."""
+    row = conn.execute(
+        "SELECT details FROM magi_gate_events WHERE trigger_id='W2_eval' "
+        "ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if not row or not row["details"]:
+        return None
+    try:
+        return json.loads(row["details"])
+    except (ValueError, TypeError):
+        return None
+
+
+def w2_stance_evidence_shift(conn) -> tuple:
+    """W2 — "the evidence under the council's standing stance changed:
+    re-judge it." One trigger, two evidence sources, either direction:
+      (a) the warehouse market-conditions verdict (signals_1h
+          green/yellow/red) changed between completed hourly snapshots —
+          i.e. a shift that survived one full bar. A STALE verdict (feed
+          older than 3h — the tape collector is stood down as of
+          2026-06-09) is treated as MISSING evidence: no comparison, no
+          fire. Feed resumption seeds fresh state without firing; the next
+          genuine shift fires normally.
+      (b) the exposure-cap state transitioned (engaged <-> released) —
+          the engine froze or unfroze buys, which is exactly a stance
+          question (confirm STAND_ASIDE / argue it down / re-enter).
+    Edge-triggered via a W2_eval state row, so a standing condition fires
+    once, not hourly. Returns (fired, details)."""
+    verdict = None
+    try:
+        import time as _time
+        h = sqlite3.connect("file:/root/xrp_grid/tape/history.db?mode=ro",
+                            uri=True, timeout=5)
+        row = h.execute(
+            "SELECT ts_begin, verdict FROM signals_1h "
+            "ORDER BY ts_begin DESC LIMIT 1"
+        ).fetchone()
+        h.close()
+        if row and (_time.time() - row[0] / 1000.0) <= 3 * 3600:
+            verdict = row[1]
+    except Exception as e:  # noqa: BLE001 - missing feed = missing evidence
+        log.debug("W2: warehouse verdict read failed (%s) — treating as "
+                  "missing evidence", e)
+
+    cap_engaged = False
+    try:
+        from database import get_system_state
+        from config import DOWN_WALK_CAP_STREAK
+        cap_engaged = (
+            int(get_system_state('down_walk_streak', default='0') or 0)
+            >= DOWN_WALK_CAP_STREAK
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("W2: cap state read failed (%s) — assuming released", e)
+
+    prior = _prior_w2_state(conn)
+    _write_event(conn, "W2_eval", False,
+                 {"verdict": verdict, "cap_engaged": cap_engaged})
+    if prior is None:
+        return False, {"note": "first evaluation — seeding edge state",
+                       "verdict": verdict, "cap_engaged": cap_engaged}
+
+    changes = []
+    if (verdict is not None and prior.get("verdict") is not None
+            and verdict != prior["verdict"]):
+        changes.append(f"verdict {prior['verdict']}->{verdict}")
+    if bool(prior.get("cap_engaged")) != cap_engaged:
+        changes.append("cap engaged" if cap_engaged else "cap released")
+    if changes:
+        return True, {"changes": changes, "verdict": verdict,
+                      "cap_engaged": cap_engaged}
+    return False, {"verdict": verdict, "cap_engaged": cap_engaged}
+
+
 def evaluate_book_state_triggers(db_path: str) -> list:
     """Evaluate the book-composition triggers (T14 one-sided, T15 skew
     drift) against current order-book + inventory state, write event rows
@@ -907,6 +1006,28 @@ def evaluate_gate(db_path: str) -> list:
             fired, details = False, {"error": repr(e)}
             log.warning("T16 raised: %s", e)
         triggers.append(("T16", fired, details))
+
+        # --- W-series wake questions (Fix 4) ------------------------
+        # W1: "price has left the band and stayed out — corrective
+        # recentre, or not?" Fed by the T2 detection above; emitted under
+        # its own ID so a paid wake is never confused with a context-only
+        # detection. The scheduler's dwell + one-wake-per-breach-episode
+        # guard bound the spend.
+        try:
+            _t2 = next(t for t in triggers if t[0] == "T2")
+            w1_fired, w1_details = bool(_t2[1]), dict(_t2[2] or {})
+        except StopIteration:
+            w1_fired, w1_details = False, {}
+        triggers.append(("W1", w1_fired, w1_details))
+
+        # W2: "the evidence under the standing stance changed — re-judge
+        # it." Verdict shift held one bar, or exposure-cap transition.
+        try:
+            w2_fired, w2_details = w2_stance_evidence_shift(conn)
+        except Exception as e:
+            w2_fired, w2_details = False, {"error": repr(e)}
+            log.warning("W2 raised: %s", e)
+        triggers.append(("W2", w2_fired, w2_details))
 
         # --- Persist fire-event rows --------------------------------
         # Write a row for every trigger evaluated this poll. Fired rows

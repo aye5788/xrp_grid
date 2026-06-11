@@ -49,6 +49,7 @@ from database import (
     get_latest_inventory,
     get_latest_magi_decision_id,
     get_open_orders_summary,
+    get_system_state,
     get_trajectory_context,
     insert_debate_record,
     insert_magi_decision,
@@ -71,7 +72,10 @@ HARD_RULES = {
     "daily_loss_limit_pct": 0.15,
     "halt_file": "/root/xrp_grid/HALT",
     "max_grid_spacing_pct": 0.025,
-    "min_grid_spacing_pct": 0.003,
+    "min_grid_spacing_pct": 0.015,   # raised from 0.003 (2026-06-11) — must
+                                     # match config.MIN_GRID_SPACING_PCT; the
+                                     # 9.5y backtest killed sub-1.5% spacing
+                                     # (fees ate 2/3 of gross; lost 9/10 yrs).
 }
 
 # --- Stage-4 item 2b: per-constraint council DISCLOSURE toggles ---
@@ -579,6 +583,77 @@ def _build_constraint_disclosure(usd_held, xrp_value_usd, allocation_skew) -> di
     return out
 
 
+def _tape_verdict_block() -> dict:
+    """Latest market-conditions verdict from the tape warehouse's signals_1h
+    series (tape/history.db) — the anchored green/yellow/red the 9.5y backtest
+    validated as a regime gate (Fix 3, 2026-06-11). Carries age_hours and a
+    stale flag: the warehouse only advances while the tape collector runs
+    (STOOD DOWN since 2026-06-09), so the council must treat a stale verdict
+    as MISSING evidence, never as current truth. Never raises."""
+    out = {"verdict": None, "vol_status": None, "regime_status": None,
+           "drawdown_pct": None, "age_hours": None, "stale": True}
+    try:
+        import sqlite3 as _sq
+        conn = _sq.connect("file:/root/xrp_grid/tape/history.db?mode=ro",
+                           uri=True, timeout=5)
+        row = conn.execute(
+            "SELECT ts_begin, verdict, vol_status, regime_status, drawdown_pct "
+            "FROM signals_1h ORDER BY ts_begin DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        if row:
+            age_h = (datetime.utcnow().timestamp() - row[0] / 1000.0) / 3600.0
+            out.update({
+                "verdict": row[1],
+                "vol_status": row[2],
+                "regime_status": row[3],
+                "drawdown_pct": row[4],
+                "age_hours": round(age_h, 1),
+                # one hourly snapshot of slack + margin: anything older than
+                # 3h means the pipeline is not keeping up.
+                "stale": age_h > 3.0,
+            })
+    except Exception as e:
+        log.warning("tape verdict read failed (emitting stale/None): %s", e)
+    return out
+
+
+def _exposure_cap_block() -> dict:
+    """Down-walk exposure-cap state (Fix 2) for the council's eyes — the same
+    system_state keys grid/engine.py enforces from. Never raises."""
+    from config import DOWN_WALK_CAP_STREAK, DOWN_WALK_LINK_HOURS
+    out = {"streak": 0, "threshold": DOWN_WALK_CAP_STREAK,
+           "link_hours": DOWN_WALK_LINK_HOURS, "engaged": False}
+    try:
+        streak = int(get_system_state('down_walk_streak', default='0') or 0)
+        out["streak"] = streak
+        out["engaged"] = streak >= DOWN_WALK_CAP_STREAK
+    except Exception as e:
+        log.warning("exposure cap read failed (emitting zeros): %s", e)
+    return out
+
+
+def _council_stance_block() -> dict:
+    """The council's current standing stance and how long it has held
+    (Fix 3). Source: system_state keys written by run_cycle after each
+    council decision. hours_in_stance is the anti-anchoring mirror — a seat
+    seeing 'STAND_ASIDE held 90h' can ask whether conditions still justify
+    it. Never raises."""
+    out = {"stance": None, "since_utc": None, "hours_in_stance": None}
+    try:
+        stance = get_system_state('council_stance', default=None)
+        since = get_system_state('council_stance_since', default=None)
+        out["stance"] = stance or None
+        out["since_utc"] = since or None
+        if since:
+            out["hours_in_stance"] = round(
+                (datetime.utcnow() - datetime.fromisoformat(since))
+                .total_seconds() / 3600.0, 1)
+    except Exception as e:
+        log.warning("council stance read failed (emitting None): %s", e)
+    return out
+
+
 def build_world_state() -> dict:
     """Snapshot of all market/portfolio context for the cycle."""
     from grid.engine import GridEngine
@@ -718,6 +793,11 @@ def build_world_state() -> dict:
         # xrp_pct_of_universe, allocation_skew). Single source of truth —
         # both the rule layer and Balthasar's persona read from here.
         "portfolio":                portfolio_block,
+        # Fix 3 (2026-06-11): the three stance-mandate inputs. Each is one
+        # opaque type:"dict" FIELDS entry (inner shape free to evolve).
+        "tape_verdict":             _tape_verdict_block(),
+        "exposure_cap":             _exposure_cap_block(),
+        "council_stance":           _council_stance_block(),
     }
 
     # Gate trip-wire events since the last cycle. List of dicts:
@@ -892,6 +972,11 @@ _CANONICAL_OVERRIDE_TAGS = {
     "[NO_ACCEPTABLE_VARIANT]",
     # Melchior verdict-driven stand-down (NO_PROFITABLE_GRID -> GRID_PAUSE)
     "[NO_PROFITABLE_GRID]",
+    # Council stance mandate (Fix 3, 2026-06-11) — NOT overrides OF the
+    # council; these tag the deterministic ENFORCEMENT of the council's own
+    # stance vote, so a blocked rebuild / forced PAUSE_LONGS is auditable.
+    "[STANCE_HOLD]",
+    "[STANCE_STAND_ASIDE]",
 }
 # AGENT_DEGRADED is emitted templated as "[AGENT_DEGRADED:<agent_id>]". The three
 # valid agent_ids (casper/melchior/balthasar) are enumerated above rather than
@@ -956,6 +1041,12 @@ def enforce_hard_rules(consensus: dict, world_state: dict,
     Precedence ladder — rules run in this order, and a LATER rule may overwrite
     an EARLIER rule's grid_action assignment. That is the precedence design, not
     a bug: survival and integrity rules outrank council judgment.
+        0-pre. STANCE translation (Fix 3) — the arbiter's own mandate, enforced
+               deterministically before the ladder: HOLD blocks a RECENTRE back
+               to MAINTAIN; STAND_ASIDE additionally floors risk_action at
+               PAUSE_LONGS (no buys, keep sells). A later integrity rule may
+               still force a rebuild (e.g. GRID_DEGENERATE), but the PAUSE_LONGS
+               floor survives on risk_action, so the buy-freeze holds.
         -1.  Council-degradation freeze → MAINTAIN (1 agent) / HALT (council collapsed)
         0a/0b/0c. RECENTRE block        → MAINTAIN (GRID_HEALTHY_NO_RECENTRE /
                                           RECENTRE_COOLDOWN / RECENT_POSITION_HOLD)
@@ -963,7 +1054,10 @@ def enforce_hard_rules(consensus: dict, world_state: dict,
         2.   Daily loss limit           → HALT
         3.   Allocation skew ceiling    → HALT
         4/5. USD / XRP buffer floors    → risk_action CLEAR (grid_action untouched)
-        6.   Grid degenerate            → RECENTRE
+        6.   Grid degenerate            → RECENTRE (fires only under stance
+             DEPLOY/none — under HOLD/STAND_ASIDE a one-sided or inactive book
+             is the council's mandate, and this gate doubles as STAND_ASIDE's
+             exit: the first DEPLOY vote restores the full grid)
         7.   PAUSE_INVALID              → risk_action CLEAR
         8.   Geometry injection / no acceptable variant → GRID_PAUSE
     The structural COUNCIL VETO is no longer a rule here (rule 0d was removed in
@@ -993,6 +1087,47 @@ def enforce_hard_rules(consensus: dict, world_state: dict,
         notes.append(
             "[NO_PROFITABLE_GRID] Melchior: no acceptable variant — standing down "
             "(GRID_PAUSE: cancel orders and idle)"
+        )
+
+    # ---- Council STANCE mandate (Fix 3, 2026-06-11) ----
+    # The arbiter's stance (cons['stance'], from Balthasar's synthesis
+    # RiskVote) is the council's capital-deployment mandate. This is the
+    # council's OWN judgment being enforced deterministically — the opposite
+    # of an override of it:
+    #   DEPLOY      -> verdict pipeline unchanged (the mapping above stands).
+    #   HOLD        -> no NEW deployment: a RECENTRE (rebuild) is blocked back
+    #                  to MAINTAIN; GRID_PAUSE (stand-down) still proceeds —
+    #                  cancelling orders deploys nothing.
+    #   STAND_ASIDE -> no buys, keep sells: grid_action MAINTAIN (no rebuild)
+    #                  and risk_action floored at PAUSE_LONGS (the engine's
+    #                  existing cancel-buys-keep-sells path). An explicit
+    #                  HALT from the arbiter outranks the floor.
+    # A MISSING stance (None — pre-Fix-3 rows, legacy replays) is a
+    # passthrough: no stance enforcement here and rule 6 stays open, i.e.
+    # exactly the pre-Fix-3 behavior. The live path always sets a stance
+    # (council_v2 and the safe-hold cons both default HOLD). A GARBAGE
+    # stance string degrades to HOLD — the conservative reading.
+    stance = cons.get("stance")
+    if stance is not None and stance not in ("DEPLOY", "HOLD", "STAND_ASIDE"):
+        log.warning("Unknown council stance %r — treating as HOLD", stance)
+        stance = "HOLD"
+        cons["stance"] = stance
+    if stance == "HOLD" and cons["grid_action"] == "RECENTRE":
+        cons["grid_action"] = "MAINTAIN"
+        overrides.append("[STANCE_HOLD]")
+        notes.append(
+            "[STANCE_HOLD] council stance HOLD — rebuild blocked, no new "
+            "capital deployed (resting orders stay)"
+        )
+    elif stance == "STAND_ASIDE":
+        if cons["grid_action"] == "RECENTRE":
+            cons["grid_action"] = "MAINTAIN"
+        if cons.get("risk_action") not in ("HALT", "PAUSE_LONGS"):
+            cons["risk_action"] = "PAUSE_LONGS"
+        overrides.append("[STANCE_STAND_ASIDE]")
+        notes.append(
+            "[STANCE_STAND_ASIDE] council stance STAND_ASIDE — buys off "
+            "(PAUSE_LONGS), resting sells stay to work inventory off"
         )
 
     inventory = world_state.get("inventory") or {}
@@ -1343,6 +1478,26 @@ def enforce_hard_rules(consensus: dict, world_state: dict,
     # forced RECENTRE here would either churn the grid blindly or fall back
     # to the scorer rank-1; neither is appropriate when we've explicitly
     # frozen on council degradation.
+    #
+    # STANCE GATE (Fix 3, 2026-06-11): this rule fires only under stance
+    # DEPLOY (or when no stance is recorded — pre-Fix-3 behavior preserved).
+    # It was written when nothing else owned "should capital be working", so
+    # the engine had to self-heal a one-sided/inactive book unconditionally.
+    # The council's stance now owns that question: under STAND_ASIDE a
+    # buys-cancelled one-sided book IS the mandate (without this gate, rule 6
+    # would see buy_count=0 the very next cycle, force a RECENTRE and reset
+    # the PAUSE_LONGS to CLEAR — rebuilding the buys the stance just
+    # cancelled, a fee-burning flap); under HOLD a rebuild would deploy new
+    # capital against an explicit no-new-deployment mandate. Both states are
+    # the council's accountable, graded choice. This gate is also the
+    # STAND_ASIDE exit path: the cycle the council votes DEPLOY again, the
+    # rule sees the one-sided book and immediately restores the full grid.
+    _stance_gate = cons.get("stance") in (None, "DEPLOY")
+    if not _stance_gate:
+        notes.append(
+            f"grid-degenerate rule dormant under stance={cons.get('stance')} "
+            f"(one-sided/inactive book is the council's mandate, not damage)"
+        )
     _degraded_freeze_active = any(
         t == "[COUNCIL_COLLAPSED]" or t.startswith("[AGENT_DEGRADED:")
         for t in overrides
@@ -1350,7 +1505,8 @@ def enforce_hard_rules(consensus: dict, world_state: dict,
     if (cons.get("grid_action") != "HALT"
             and cons.get("risk_action") != "HALT"
             and cons.get("grid_action") != "GRID_PAUSE"
-            and not _degraded_freeze_active):
+            and not _degraded_freeze_active
+            and _stance_gate):
         # GRID_PAUSE here means Melchior's NO_PROFITABLE_GRID stand-down — do NOT
         # let the grid-degenerate rule force a RECENTRE over a deliberate
         # stand-down (there is no profitable geometry to rebuild to).
@@ -1437,12 +1593,16 @@ def enforce_hard_rules(consensus: dict, world_state: dict,
     # legitimate reason to pause longs even with a balanced book).
     #
     # Skipped when HALT is in effect, when [USD_BUFFER_FLOOR] / [XRP_BUFFER_FLOOR]
-    # already set the PAUSE (those are legitimate), or when [GRID_DEGENERATE]
+    # already set the PAUSE (those are legitimate), when the council's
+    # STAND_ASIDE stance set it (Fix 3 — a deliberate buy-freeze is legitimate
+    # on ANY book shape; this rule's skew test exists to stop book-BALANCING
+    # misuse, which a stance pause is not), or when [GRID_DEGENERATE]
     # / [RECENTRE_COOLDOWN] already cleared the risk action.
     if (cons.get("grid_action") != "HALT"
             and cons.get("risk_action") in ("PAUSE_LONGS", "PAUSE_SHORTS")
             and "[USD_BUFFER_FLOOR]" not in overrides
-            and "[XRP_BUFFER_FLOOR]" not in overrides):
+            and "[XRP_BUFFER_FLOOR]" not in overrides
+            and "[STANCE_STAND_ASIDE]" not in overrides):
         open_orders_v = world_state.get("open_orders") or {}
         try:
             buy_n_v = int(open_orders_v.get("buy_count") or 0)
@@ -1849,6 +2009,10 @@ def _build_debate_record(cycle_id: str, trigger: str, world_state: dict,
     # New columns for the structural-vote architecture
     record["regime_action"] = cons.get("regime_action")
     record["geometry_veto"] = cons.get("geometry_veto")
+    # Fix 3: the arbiter's capital mandate (DEPLOY/HOLD/STAND_ASIDE). Plain
+    # string -> TEXT column. The forward-outcome grader (stance_correct)
+    # reads this per cycle.
+    record["stance"] = cons.get("stance")
     # Stage-4 item 2a: the arbiter's justification for PROCEEDing over a live Casper
     # regime objection on a RECONFIGURE (None whenever there was no such override).
     # Plain string -> binds straight to the TEXT column; insert_debate_record does
@@ -2093,6 +2257,28 @@ def run_cycle(trigger: str = "manual", force: bool = False) -> dict:
             _mark_gate_events_consumed(cycle_id, world_state.get("timestamp"))
         except Exception as e:
             log.warning("gate consume failed (non-fatal): %s", e)
+
+    # 13c. Fix 3: persist the standing stance. council_stance_since only
+    # advances when the stance CHANGES, so hours_in_stance in the next
+    # cycle's world_state measures how long the mandate has actually held.
+    # SKIPPED on council_error cycles: a crashed council's safe-hold stance
+    # (HOLD) is a fallback, not a decision — letting it overwrite a standing
+    # DEPLOY/STAND_ASIDE and reset the clock would record an outage as a
+    # stance change and poison the time-in-stance anti-anchoring signal
+    # (same failure class as the 2026-06-10 outcome-scope poisoning).
+    if not cons.get("council_error"):
+        try:
+            from database import set_system_state
+            new_stance = cons.get("stance") or "HOLD"
+            prev_stance = get_system_state('council_stance', default=None)
+            if new_stance != prev_stance:
+                set_system_state('council_stance', new_stance)
+                set_system_state('council_stance_since',
+                                 datetime.utcnow().isoformat())
+                log.info("council stance changed: %s -> %s",
+                         prev_stance or "(none)", new_stance)
+        except Exception as e:
+            log.warning("council stance persist failed (non-fatal): %s", e)
 
     # 14. Dual-write to legacy magi_decisions for backward-compat readers:
     #     dashboard.py panels parse hard-rule tags from .notes, learning.py

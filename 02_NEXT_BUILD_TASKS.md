@@ -1,5 +1,41 @@
 # Next Build Tasks
 
+> **DIRECTION 2026-06-11 — MAGI SHUT DOWN; FIVE-FIX REBUILD: Fixes 1–4 BUILT,
+> Fix 5 IS THE QUEUE.** `magi.service` stopped + disabled by operator order after
+> the audit found six accumulated failures (full record: `01_CURRENT_STATE.md`
+> 2026-06-11 banner). The only live build item before the operator decides a
+> restart:
+>
+> ### F5 — OFFLINE ACCEPTANCE TEST (the gate to any restart)
+> Replay 2025→2026 from `tape/history.db` under `optimize/` with the REBUILT
+> configuration (1.5–2.5% spacing band, floor-only acceptability, exposure cap
+> streak-3/48h, stance semantics where simulable) against the OLD configuration.
+> **Pre-committed pass criteria (set before running, never fitted after):** the
+> rebuilt config must end with (a) more money and (b) a smaller worst drawdown
+> than the old config over the same window. Log the run as a Langfuse dataset
+> run so the comparison is auditable. Report PASS/FAIL to the operator —
+> **the operator decides restart; a PASS is not a self-cleared go.**
+>
+> ### RESTART CHECKLIST (when the operator orders it)
+> - Re-enable + start `magi.service` (startup gate is now smart: a restart wakes
+>   the council ONLY if config changed / a W event is pending / price left the
+>   band — disclose the cycle if one fires).
+> - **Bring the tape collector back up** (`tape-collector.service`, stood down
+>   2026-06-09) — without it `tape_verdict` stays stale: W2's verdict half is
+>   silent and the council's stance evidence is degraded (the stale flag keeps
+>   this honest, but the stance system is designed to run with a live verdict).
+> - Restart `magi-dashboard.service` to pick up the EXPOSURE CAP chip + W-series
+>   gate panel markers.
+> - Expected cadence: ~1–3 council calls/day (daily 20:00 EST floor + W wakes)
+>   vs the old ~11/day. Watch the new Langfuse scores: fee_share_7d (healthy
+>   ≤0.33), net_harvest_7d, stance/stance_correct (graded from 72h),
+>   wakes_per_day, cap_buy_fills (must be 0 during cap episodes).
+> - Day 14: `matches_backtest` check — live paper economics vs the 9.5y backtest
+>   expectation for the same config.
+>
+> The PAPER-RUN WATCH ITEMS below predate the shutdown — still the right
+> questions for the NEXT run, now answerable with the new scores.
+
 > **DIRECTION 2026-06-06 — decision layer = HAND-ROLLED orchestrator; seats proven
 > standalone, not wired.** The three council seats (Casper `gemini-2.5-flash`, Balthasar
 > `claude-sonnet-4-6`, Melchior `deepseek-v4-pro`) are each proven standalone via probes

@@ -568,6 +568,98 @@ def push_pending_outcome_scores():
                 log.error(f"score sweep: {cycle_id} {window} failed: {e}")
 
 
+def push_daily_effect_scores():
+    """Once-per-UTC-day Langfuse mirror of the Fix-1 effect metrics
+    (2026-06-11, spacing-floor rebuild): did widening the profit gap actually
+    change the economics, measured in money, not activity?
+
+      fee_share_7d   — fees paid / gross spread captured, trailing 7 days.
+                       The 9.5y backtest showed 0.75% spacing lost because
+                       fees ate ~2/3 of gross; the 6*fee floor targets <=1/3.
+                       Healthy <=0.33; >0.40 sustained means the floor is not
+                       doing its job. Clamped to 1.0 (fees exceeding all gross
+                       is the worst expressible state; the score config is
+                       NUMERIC 0-1).
+      net_harvest_7d — gross spread captured minus ALL fees paid, trailing
+                       7 days, USD. The equity-honest "is the grid earning"
+                       number. 0.0 with no fills is a real (and reportable)
+                       value, not an error.
+
+    Gross is computed by FIFO-matching the current scope's fills with fees
+    zeroed (so each trip's contribution is pure spread capture); fees are
+    summed raw over every in-scope fill in the window — including buys that
+    have not yet round-tripped, deliberately: fees you paid that produced no
+    harvest yet count against you. Scope comes from grid/pnl.py's shared
+    helpers (current_scope_cutoff / fill_in_current_scope), NEVER inlined —
+    an inlined live-only copy in this file is exactly what poisoned the paper
+    run's outcome records (fixed 2026-06-11).
+
+    Delivery is receipt-convergent like push_pending_outcome_scores: the
+    system_state key 'effect_scores_pushed_date' is set to today's UTC date
+    only when push_trace_scores confirms every POST landed (2xx); until then
+    every observer pass retries, so a Langfuse 429/outage delays the mirror
+    but never loses it. Scores attach to the most recent council trace.
+    Never raises."""
+    from database import get_system_state, set_system_state, get_conn
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    try:
+        if (get_system_state('effect_scores_pushed_date', default='') or '') == today:
+            return
+        conn = get_conn()
+        target = conn.execute(
+            "SELECT trace_id FROM debate_records "
+            "WHERE trace_id IS NOT NULL ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if not target:
+            conn.close()
+            return  # no trace exists yet to carry scores; retry next pass
+        rows = conn.execute(
+            "SELECT order_id, side, price, size, fill_price, fee, filled_at "
+            "FROM grid_orders WHERE status='filled' AND filled_at IS NOT NULL "
+            "ORDER BY filled_at ASC"
+        ).fetchall()
+        conn.close()
+
+        from grid.pnl import current_scope_cutoff, fill_in_current_scope, _fifo_match
+        cutoff = current_scope_cutoff()
+        fills = [dict(r) for r in rows
+                 if fill_in_current_scope(r['order_id'], r['filled_at'], cutoff)]
+        # filled_at is naive UTC ISO; build the window edge in the same shape
+        # so the string comparison is valid.
+        window_start = (datetime.now(timezone.utc).replace(tzinfo=None)
+                        - timedelta(days=7)).isoformat()
+
+        fees_7d = sum(float(f['fee'] or 0) for f in fills
+                      if (f['filled_at'] or '') >= window_start)
+        gross_trips, _ = _fifo_match([{**f, 'fee': 0.0} for f in fills])
+        sell_time = {f['order_id']: f['filled_at']
+                     for f in fills if f['side'] == 'sell'}
+        gross_7d = sum(t['contribution'] for t in gross_trips
+                       if (sell_time.get(t['sell_id']) or '') >= window_start)
+
+        scores = {'net_harvest_7d': round(gross_7d - fees_7d, 4)}
+        if gross_7d > 0:
+            scores['fee_share_7d'] = round(min(fees_7d / gross_7d, 1.0), 4)
+        elif fees_7d > 0:
+            scores['fee_share_7d'] = 1.0  # paid fees, captured nothing
+        # else: no fills at all -> fee share undefined, skip the score
+
+        from magi.agents import tracing
+        if tracing.push_trace_scores(
+                target['trace_id'], scores,
+                comment=f"trailing-7d effect metrics ({today})"):
+            set_system_state('effect_scores_pushed_date', today)
+            log.info(
+                f"effect scores: delivered for {today} "
+                f"(net_harvest_7d={scores['net_harvest_7d']}, "
+                f"fee_share_7d={scores.get('fee_share_7d', 'n/a')})"
+            )
+        else:
+            log.warning("effect scores: delivery incomplete — retry next pass")
+    except Exception as e:
+        log.error(f"push_daily_effect_scores failed: {e}")
+
+
 def backfill_outcomes():
     """
     Update debate_records with realised outcomes for the 1h / 6h / 24h
@@ -744,6 +836,149 @@ def backfill_seat_accuracy_scores():
         conn.close()
 
 
+def backfill_stance_grades():
+    """Grade each cycle's arbiter stance (DEPLOY / HOLD / STAND_ASIDE) against
+    the realised 72h forward price path, then mirror the grade to Langfuse.
+
+    Anchored grading rule: the correctness thresholds are derived from the
+    grid's own band width — spacing_pct × max(1, levels//2), i.e. the
+    fractional distance from centre to the outermost rung. That is an
+    exogenous quantity set by fee economics and the level count, NOT a
+    threshold fitted to outcome data. A forward 1h close below
+    decision_price*(1-band) is a down-break (the grid would have bled through
+    its buy rungs); a close above decision_price*(1+band) is an up-run.
+    DEPLOY is correct iff no down-break; STAND_ASIDE is correct iff a
+    down-break happened; HOLD is correct iff there was a down-break OR no
+    up-run (wrong only when price ran up cleanly and standing pat left
+    harvest on the table). Missing/zero spacing falls back to band=0.05
+    (max spacing 2.5% × 2 pairs). The 72h maturity matches the per-seat
+    grading window (backfill_seat_accuracy_scores) so both graders mature
+    together. Requires >= 48 forward 1h bars before grading (window not yet
+    fully covered → retry next pass). Langfuse delivery is receipt-convergent
+    like push_pending_outcome_scores: stance_scores_pushed=1 only when
+    push_trace_scores confirms every POST (2xx); NULL-trace rows are stamped
+    delivered with nothing to push. Cap 3 pushes per pass.
+    """
+    import json
+    from database import get_conn
+    from magi.agents import tracing
+
+    conn = get_conn()
+    try:
+        # --- Part A: grade matured, ungraded stance rows -------------------
+        cutoff = (datetime.utcnow() - timedelta(hours=72)).isoformat()
+        rows = conn.execute(
+            "SELECT id, cycle_id, timestamp, stance, world_state, trace_id "
+            "FROM debate_records "
+            "WHERE stance IS NOT NULL AND stance_correct IS NULL "
+            "AND timestamp <= ? ORDER BY id", (cutoff,)
+        ).fetchall()
+
+        for row in rows:
+            r = dict(row)
+            try:
+                ws = json.loads(r['world_state'])
+                decision_price = float(ws['price'])
+            except (TypeError, ValueError, KeyError):
+                log.warning(
+                    f"stance-grade: {r['cycle_id']} — missing/unparseable "
+                    f"world_state price; skip (not marked graded)"
+                )
+                continue
+
+            gs = ws.get('grid_state') or {}
+            try:
+                spacing = float(gs.get('spacing_pct') or 0)
+                levels = int(gs.get('levels') or 0)
+            except (TypeError, ValueError):
+                spacing, levels = 0.0, 0
+            if spacing > 0:
+                band = spacing * max(1, levels // 2)
+            else:
+                band = 0.05  # fallback: max spacing 2.5% × 2 pairs
+
+            start = _parse_iso_safe(r['timestamp'])
+            if start is None:
+                log.warning(f"stance-grade: bad timestamp for {r['cycle_id']} — skip")
+                continue
+            end_iso = (start + timedelta(hours=72)).isoformat()
+            # candles.timestamp is ISO text like debate_records.timestamp;
+            # lexicographic comparison is order-correct at 1h granularity
+            # (the date/hour prefix dominates; suffix-format differences
+            # like '+00:00' only matter on an exact-second tie, which
+            # hour-aligned candles vs microsecond decision stamps never hit).
+            closes = [c['close'] for c in conn.execute(
+                "SELECT close FROM candles WHERE timeframe='1h' "
+                "AND timestamp > ? AND timestamp <= ? ORDER BY timestamp",
+                (r['timestamp'], end_iso)
+            ).fetchall()]
+            if len(closes) < 48:
+                continue  # window not fully covered yet; retry next pass
+
+            down_break = min(closes) < decision_price * (1 - band)
+            up_run = max(closes) > decision_price * (1 + band)
+            stance = r['stance']
+            if stance == 'DEPLOY':
+                correct = not down_break
+            elif stance == 'STAND_ASIDE':
+                correct = down_break
+            elif stance == 'HOLD':
+                correct = down_break or not up_run
+            else:
+                log.warning(
+                    f"stance-grade: {r['cycle_id']} — unknown stance "
+                    f"{stance!r}; skip (not marked graded)"
+                )
+                continue
+
+            conn.execute(
+                "UPDATE debate_records SET stance_correct=? WHERE id=?",
+                (1 if correct else 0, r['id']),
+            )
+            conn.commit()
+            log.info(
+                f"stance-grade: {r['cycle_id']} stance={stance} "
+                f"price={decision_price} band={band:.4f} "
+                f"down_break={down_break} up_run={up_run} → "
+                f"{'OK' if correct else 'WRONG'}"
+            )
+
+        # --- Part B: convergent Langfuse delivery of graded rows ------------
+        pending = conn.execute(
+            "SELECT id, cycle_id, stance, stance_correct, trace_id "
+            "FROM debate_records "
+            "WHERE stance_correct IS NOT NULL AND stance_scores_pushed=0 "
+            "ORDER BY id LIMIT 3"
+        ).fetchall()
+        for row in pending:
+            r = dict(row)
+            if not r['trace_id']:
+                # No trace to score — nothing to deliver; stamp the receipt
+                # so the row never clogs the sweep.
+                conn.execute(
+                    "UPDATE debate_records SET stance_scores_pushed=1 "
+                    "WHERE id=?", (r['id'],),
+                )
+                conn.commit()
+                continue
+            if tracing.push_trace_scores(r['trace_id'], {
+                'stance': r['stance'],                       # str → CATEGORICAL
+                'stance_correct': bool(r['stance_correct']),  # bool → BOOLEAN
+            }):
+                conn.execute(
+                    "UPDATE debate_records SET stance_scores_pushed=1 "
+                    "WHERE id=?", (r['id'],),
+                )
+                conn.commit()
+            else:
+                log.warning(
+                    f"stance-grade: Langfuse push unconfirmed for "
+                    f"{r['cycle_id']} — retry next pass"
+                )
+    finally:
+        conn.close()
+
+
 def _ws_rest_divergence_check(rest_xrp_1h: list,
                               tolerance_pct: float = 0.001) -> None:
     """Compare the most-recent COMPLETED REST 1h candle against the
@@ -879,11 +1114,25 @@ def poll_cycle():
     except Exception as e:
         log.error(f"push_pending_outcome_scores failed: {e}")
 
+    # Daily Fix-1 effect metrics (fee_share_7d / net_harvest_7d) onto the
+    # latest council trace — receipt-convergent, once per UTC day.
+    try:
+        push_daily_effect_scores()
+    except Exception as e:
+        log.error(f"push_daily_effect_scores failed: {e}")
+
     # Per-seat forward-realized accuracy → Langfuse scores (72h maturity).
     try:
         backfill_seat_accuracy_scores()
     except Exception as e:
         log.error(f"backfill_seat_accuracy_scores failed: {e}")
+
+    # Arbiter stance forward-outcome grading + convergent Langfuse mirror
+    # (72h maturity, band-anchored thresholds; see backfill_stance_grades).
+    try:
+        backfill_stance_grades()
+    except Exception as e:
+        log.error(f"backfill_stance_grades failed: {e}")
 
     # Gate evaluation is now driven by magi/gate_monitor.py (Kraken WS v2
     # streaming). Observer's REST poll persists indicators and acts as a

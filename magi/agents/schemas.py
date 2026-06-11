@@ -145,6 +145,19 @@ class RiskVote(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    stance: Literal["DEPLOY", "HOLD", "STAND_ASIDE"] = Field(
+        description=(
+            "The council's capital-deployment mandate (Fix 3, 2026-06-11) — as "
+            "arbiter you own it. DEPLOY: the market warrants grid capital; "
+            "Melchior's verdict pipeline runs unchanged (maintain or rebuild). "
+            "HOLD: keep what is already resting but commit NO new capital — a "
+            "RECONFIGURE will not rebuild while HOLD stands. STAND_ASIDE: "
+            "structural downtrend / capital-erosion risk — buy orders are "
+            "cancelled and no buys are placed; resting sells stay to work "
+            "inventory off. This is the stance the orchestrator translates "
+            "deterministically; it is graded against forward outcomes."
+        )
+    )
     risk_action: Literal["CLEAR", "PAUSE_LONGS", "PAUSE_SHORTS", "HALT"] = Field(
         description="Balthasar's risk posture for this cycle."
     )

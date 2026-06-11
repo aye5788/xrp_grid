@@ -75,17 +75,24 @@ disagree, the handoff docs win for state; this file wins for how to work.
 > is the deliberate fix. The controlled, SQLite-sourced, prompt-injected **Journal
 > recall layer** is BUILT and wired into `council_v2` (committed `cebccb5`,
 > 2026-06-09 — deterministic, config-version-filtered, NOT vendor memory).
-> (2) Cadence is **gate-driven**, not a 4h clock — IMPLEMENTED 2026-06-09 (BU-2):
+> (2) Cadence is **gate-driven**, not a 4h clock — IMPLEMENTED 2026-06-09 (BU-2),
+> REDESIGNED 2026-06-11 (Fix 4, after the wake-yield audit found 0/16
+> gate-woken cycles produced a council-originated change):
 > `scheduler.py` fires ONE daily clock-floor council call (`MAGI_DAILY_HOUR_EST = 20`,
-> i.e. 20:00 EST end-of-day assessment, grid or no grid) plus a 25h max-silence
+> 20:00 EST end-of-day assessment, grid or no grid) plus a 25h max-silence
 > backstop (`MAGI_MAX_SILENCE_HOURS`); every call in between comes only from the
-> always-on free gate's wake-class triggers — **T14 / T2 / T11 / T16** (60-min
-> throttle, 15-min dwell, non-trading suppression, plus per-episode guards added
-> 2026-06-10: T2 wakes once per breach episode, the new T16 drawdown trigger wakes
-> once per 3%-wide drawdown rung — a standing breach never re-wakes the council
-> hourly). The Letta-era `MAGI_HOURS_EST = [0,4,8,12,16,20]` 4h
-> schedule is DELETED (a duplicate of the daily hour lives in `dashboard.py:
-> _next_magi_eta` — change both).
+> **W-series wake QUESTIONS** — **W1** (price left the band and stayed out:
+> corrective recentre or not? fed by T2 detection, one wake per breach episode)
+> and **W2** (the evidence under the standing stance changed — warehouse verdict
+> shift held one bar, or exposure-cap engaged/released: re-judge the stance).
+> All T-series triggers (T1–T16) are now CONTEXT-ONLY detectors — recorded and
+> shown to the council, never waking it. 60-min throttle, 15-min dwell and
+> non-trading suppression still apply. The startup cycle is gated too: a restart
+> wakes the council only if the config fingerprint changed, an unconsumed W event
+> is pending, or price is outside the grid band — otherwise quiet (kills the
+> restart-spend). Rule: adding a T is cheap instrumentation; adding a W requires
+> naming the council-only question it asks. (The daily hour is duplicated in
+> `dashboard.py:_next_magi_eta` — change both.)
 >
 > **Services RUNNING (paper).** Do not flip to live trading, change cadence
 > constants, or stop/redeploy services without explicit operator direction.
@@ -258,8 +265,44 @@ re-derive these.
   repo/code/DB/tools). Write every doc update to be self-contained for that code-blind
   reader: state facts and reasoning in the prose, never as "go check the code." See
   the two-readers rule in `03_INSTRUCTIONS_TO_CLAUDE.md`.**
-- Grid spacing clamps: `MIN_GRID_SPACING_PCT = 0.003`,
-  `MAX_GRID_SPACING_PCT = 0.025` (0.3% to 2.5%). Set in `config.py`.
+- Grid spacing clamps: `MIN_GRID_SPACING_PCT = 0.015`,
+  `MAX_GRID_SPACING_PCT = 0.025` (1.5% to 2.5%). Set in `config.py`.
+  The floor was raised from 0.3% on 2026-06-11: floor = 6×`MAKER_FEE`,
+  so the round-trip fee (2 maker fills) never exceeds 1/3 of the gross
+  spacing. Basis: a 9.5-year hourly backtest (2016-12 → 2026-06,
+  tape/history.db, fresh $61.50 book per year, 0.25% maker both sides)
+  — 0.75% spacing lost in 9 of 10 years because fees ate ~2/3 of gross;
+  1.5–2.5% is the viable band. Mirrored in
+  `orchestrator.py:HARD_RULES["min_grid_spacing_pct"]` — change both.
+- **Exposure cap (down-walk streak, Fix 2 2026-06-11).** The grid's worst
+  failure mode is recentering INTO a downtrend (each rebuild steps lower and
+  buys the fall). `grid/engine.py:initialise_grid` tracks consecutive
+  downward rebuilds in `system_state` (`down_walk_streak`, linked within
+  `DOWN_WALK_LINK_HOURS = 48`); at `DOWN_WALK_CAP_STREAK = 3` the rebuild
+  goes SELLS-ONLY (anchor forced to sell, buy arms suppressed) until a
+  rebuild lands at a HIGHER centre, which resets the streak — self-releasing,
+  no tunable release threshold. A drawdown "brake" was tested against the
+  9.5y history and REJECTED (drawdown ≥6%-from-7d-high is 60% of all hours;
+  post-streak returns are mean-reverting) — do not re-propose it. Dashboard
+  chip: EXPOSURE CAP.
+- **Council stance mandate (Fix 3, 2026-06-11).** The arbiter's synthesis
+  RiskVote carries `stance ∈ {DEPLOY, HOLD, STAND_ASIDE}` — the council's
+  capital mandate, translated deterministically in `enforce_hard_rules`
+  (step 0-pre): DEPLOY → verdict pipeline unchanged; HOLD → rebuild blocked
+  (no new capital); STAND_ASIDE → MAINTAIN + risk floored at PAUSE_LONGS
+  (buys cancelled, sells keep working inventory off). The GRID_DEGENERATE
+  rule is stance-gated (fires only under DEPLOY/none) — under STAND_ASIDE a
+  one-sided book is the mandate, not damage, and the first DEPLOY vote is
+  the exit (rule 6 restores the full grid). Standing stance + time-in-stance
+  persist in `system_state` (`council_stance`, `council_stance_since`;
+  NOT updated on council_error cycles — a crashed council is not a stance
+  decision). world_state carries three stance inputs: `tape_verdict`
+  (signals_1h green/yellow/red with age/stale — STALE while the tape
+  collector is stood down; stale = missing evidence, never negative
+  evidence), `exposure_cap`, `council_stance`. Stance is recorded per cycle
+  (`debate_records.stance`) and graded at 72h maturity
+  (`observer.backfill_stance_grades`, thresholds anchored to grid band
+  width) → Langfuse scores `stance` / `stance_correct`.
 - **Per-order size is FIXED at `ORDER_SIZE_XRP = 1.65`** (config.py, the
   Kraken XRP minimum). Operator directive 2026-05-24: every grid order —
   buy, sell, and the executed anchor — is exactly 1.65 XRP, never more,
@@ -288,15 +331,20 @@ re-derive these.
   `2*MAKER_FEE = 0.50%` — NOT taker. All three scorer call sites
   (`scheduler.py` first-boot, `orchestrator.py` Melchior world_state +
   current-config, `gate.py`) pass `GRID_LEVEL_FEE_PER_SIDE`. Do not revert
-  to `TAKER_FEE` here: taker pinned the tightest selectable spacing at 1.0%
-  and made the grid stand down in low vol; maker unlocks the fee-positive
-  0.75% grid (validated: ~3–6× more fills on live candles, all net-positive).
+  to `TAKER_FEE` here (taker wrongly priced the recurring round-trip at
+  0.80%). **CORRECTED 2026-06-11:** the old claim here — "maker unlocks the
+  fee-positive 0.75% grid (validated: ~3–6× more fills on live candles, all
+  net-positive)" — was FALSE at the equity level. That "validation" counted
+  per-fill fee-positivity, not equity outcomes; the 9.5-year hourly backtest
+  showed the 0.75% grid loses in 9 of 10 years because fees consume ~2/3 of
+  gross and trend cycling eats the remainder. Acceptability is now the
+  fee-share floor ONLY: spacing ≥ 6×`MAKER_FEE` = 1.5% (fees ≤ 1/3 of gross
+  per round trip), and the scorer's fill FORECAST no longer gates
+  acceptability — it is informational evidence for Melchior's judgment
+  (GoodCrypto-frame redesign; see `magi/spacing_evaluator.py` docstring).
   The one-time anchor IS a taker market order, but it is an amortized setup
   cost handled in `engine._execute_anchor`, deliberately outside the
-  per-level fee-positivity model. This is also why "Melchior should author
-  spacing" is the wrong frame — the deterministic scorer owns fee-positive
-  spacing (GPT-4o can't reliably author geometry); the lever is the scorer's
-  fee input, which was the actual miscalibration.
+  per-level fee-positivity model.
 - **Live execution path** (shipped 2026-05-23): `engine._execute_anchor`
   places a real Kraken market order via `KrakenExchange.add_market_order`,
   polls `query_order` (QueryOrders) for fill, reconciles inventory from

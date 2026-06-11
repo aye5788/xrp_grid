@@ -333,6 +333,25 @@ def init_db():
         "ALTER TABLE debate_records ADD COLUMN outcome_1h_scores_pushed INTEGER DEFAULT 0",
         "ALTER TABLE debate_records ADD COLUMN outcome_6h_scores_pushed INTEGER DEFAULT 0",
         "ALTER TABLE debate_records ADD COLUMN outcome_24h_scores_pushed INTEGER DEFAULT 0",
+        # stance: Fix 3 (2026-06-11). The arbiter's capital mandate for the
+        # cycle — DEPLOY / HOLD / STAND_ASIDE (RiskVote.stance, Balthasar
+        # synthesis). Written by orchestrator._build_debate_record; read by
+        # the forward-outcome stance grader and the time-in-stance
+        # world_state block. NULL on pre-Fix-3 rows.
+        "ALTER TABLE debate_records ADD COLUMN stance TEXT",
+        # stance_correct: forward-realized grade of the stance against the
+        # 72h price path (observer.backfill_stance_grades). NULL until the
+        # grader runs (row not yet 72h mature, or pre-stance row); 1/0 after.
+        # Thresholds are anchored to the grid band (spacing × half the level
+        # count), not fitted — see the grader docstring.
+        "ALTER TABLE debate_records ADD COLUMN stance_correct INTEGER",
+        # stance_scores_pushed: Langfuse delivery receipt for the stance /
+        # stance_correct scores — same convergent pattern as
+        # outcome_{w}_scores_pushed: set to 1 only when push_trace_scores
+        # confirms every POST landed (2xx); the observer sweep retries
+        # unconfirmed rows every pass. NULL-trace rows are stamped 1 with
+        # nothing to deliver.
+        "ALTER TABLE debate_records ADD COLUMN stance_scores_pushed INTEGER DEFAULT 0",
     ):
         try:
             c.execute(_alter)
@@ -1522,6 +1541,10 @@ def get_pending_score_pushes(window):
     score push has not been confirmed (outcome_{window}_scores_pushed=0).
     Oldest-first. Consumed by observer.push_pending_outcome_scores — the
     convergent retry sweep that replaced the fire-and-forget push (2026-06-11).
+    Rows with NULL trace_id are excluded: they can never deliver (no trace to
+    score), and because the caller processes only the head of the oldest-first
+    queue each pass, an undeliverable NULL-trace row at the front would
+    permanently clog the sweep for every row behind it.
     """
     if window not in _VALID_WINDOWS:
         raise ValueError(f"window must be one of {_VALID_WINDOWS}, got {window!r}")
@@ -1530,6 +1553,7 @@ def get_pending_score_pushes(window):
         f'''SELECT cycle_id FROM debate_records
             WHERE outcome_{window}_backfilled=1
               AND outcome_{window}_scores_pushed=0
+              AND trace_id IS NOT NULL
             ORDER BY timestamp ASC'''
     ).fetchall()
     conn.close()

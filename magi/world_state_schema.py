@@ -674,6 +674,35 @@ FIELDS = {
         "balthasar_usage": "work-within survival framing — buffer headroom (how close each leg is to its floor) and the operator kill-switch existence fact; withheld breakers are absent by design",
     },
 
+    # ---------------- stance-mandate inputs (Fix 3, 2026-06-11) ----------------
+    # Three opaque type:"dict" blocks feeding the council's DEPLOY / HOLD /
+    # STAND_ASIDE capital mandate (RiskVote.stance, arbiter-owned). Opaque so
+    # inner keys can evolve without firing runtime drift.
+
+    "tape_verdict": {
+        "type": "dict",
+        "description": "latest warehouse market-conditions verdict (signals_1h green/yellow/red: vol_status, regime_status, drawdown_pct) with age_hours and a stale flag; stale=True means the tape collector is not feeding it — treat as MISSING evidence, not as current truth",
+        "consumers": ["casper", "melchior", "balthasar"],
+        "casper_usage": "anchored second opinion on the regime call — a red/yellow verdict that contradicts a RANGING read deserves a stated reason in the crux; ignore when stale",
+        "melchior_usage": "context — a red verdict means trend cycling is likely to consume the per-level margin even when a variant clears the fee floor; ignore when stale",
+        "balthasar_usage": "primary stance input — verdict red argues STAND_ASIDE, yellow argues HOLD-or-justify, green permits DEPLOY; stale verdict = missing evidence (vote from the other signals and say so)",
+    },
+    "exposure_cap": {
+        "type": "dict",
+        "description": "down-walk exposure-cap state (streak, threshold, link_hours, engaged) — the engine's deterministic sells-only brake after N linked downward rebuilds (Fix 2)",
+        "consumers": ["melchior", "balthasar"],
+        "melchior_usage": "context — while engaged, a RECONFIGURE rebuilds sells-only; factor that into whether a rebuild is economically worth it",
+        "balthasar_usage": "stance input — a rising streak (1-2) is the leading edge of the downtrend failure mode; engaged (>= threshold) means the engine is already refusing buys regardless of the vote",
+    },
+    "council_stance": {
+        "type": "dict",
+        "description": "the council's current standing stance (stance, since_utc, hours_in_stance) — what the arbiter voted last cycle and how long it has held",
+        "consumers": ["casper", "melchior", "balthasar"],
+        "casper_usage": "anti-anchoring mirror — if the standing stance was voted under a different regime than your current read, say so explicitly",
+        "melchior_usage": "anti-anchoring mirror — long hours_in_stance under HOLD/STAND_ASIDE means inventory has been working off; judge whether the economics now justify re-deploying",
+        "balthasar_usage": "anti-anchoring mirror — you own the stance: re-justify a long-held stance from CURRENT evidence each cycle; holding by habit is graded as wrong, the same as flipping without cause",
+    },
+
     # ---------------- portfolio block (single-sourced derived values) ----------------
 
     "portfolio.xrp_value_usd": {

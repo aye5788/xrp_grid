@@ -1,5 +1,57 @@
 # MAGI — Current State
 
+> **2026-06-11 — MAGI SHUT DOWN BY OPERATOR ORDER; FIVE-FIX REBUILD EXECUTED (Fixes
+> 1–4 BUILT + VERIFIED OFFLINE; Fix 5 acceptance test PENDING). NOT RESTARTED.**
+> The session began as an LLM-cost investigation and became a forced audit that
+> uncovered six accumulated failures the prior sessions' audits never surfaced
+> (operator verdict: effectively deceived). `magi.service` was stopped + disabled
+> mid-session on operator order. What was then built, each step verified with an
+> artifact (see "Session 2026-06-11 — outcome-scope poisoning…" git context and the
+> session entry below):
+> - **Fix 1 — profit gap.** A 9.5-year hourly backtest (2016-12→2026-06,
+>   tape/history.db, fresh $61.50 book/year, 0.25% maker both sides) proved the
+>   0.75% grid loses in 9 of 10 years (fees ate ~2/3 of gross). Spacing floor
+>   raised to 6×maker = 1.5% (config + HARD_RULES); `magi/spacing_evaluator.py`
+>   redesigned GoodCrypto-frame: acceptability = fee floor ONLY, swing-counter
+>   fill FORECAST (multi-hour legs, replacing the single-hour-range model that
+>   would have deadlocked wide grids), rank by per-round-trip margin. Verified:
+>   30/30 variants acceptable, rank-1 = 5 levels @2.50% (+2.0%/round trip).
+>   Daily effect scores fee_share_7d / net_harvest_7d push to Langfuse
+>   receipt-convergently (first real reading: trailing-7d fees $0.31 vs gross
+>   $0.16 — net −$0.14, the old spacing's failure measured in money).
+> - **Fix 2 — exposure cap.** 3 linked downward rebuilds (≤48h apart) → sells-only
+>   rebuilds until a higher-centre rebuild resets. 8/8 streak scenarios pass;
+>   dashboard EXPOSURE CAP chip. (Drawdown brake tested against history and
+>   REJECTED — mean-reverting.)
+> - **Fix 3 — stance mandate.** Arbiter RiskVote gains required
+>   `stance ∈ {DEPLOY, HOLD, STAND_ASIDE}`; deterministic translation (HOLD = no
+>   rebuild; STAND_ASIDE = no buys, keep sells via PAUSE_LONGS floor);
+>   GRID_DEGENERATE stance-gated (DEPLOY-only — kills a fee-burning
+>   cancel/rebuild flap found in review, and doubles as STAND_ASIDE's exit);
+>   3 new world_state blocks (tape_verdict w/ stale flag, exposure_cap,
+>   council_stance) — no schema drift; all three personas updated (stance
+>   doctrine + stale-fact corrections: 1.5% floor, real balances ~30 XRP+$27,
+>   paper-validation framing; dated .bak.20260611 backups). Safe-hold cycles do
+>   NOT overwrite the standing stance (council_error guard). Operator-reviewed
+>   line by line; implications analysis drove amendments (HOLD requires NAMED
+>   evidence; stale verdict ≠ negative evidence).
+> - **Fix 4 — wake redesign.** Wake-yield audit: 0/16 gate-woken cycles produced a
+>   council-originated change. ALL T-triggers (T1–T16) demoted to context-only
+>   detectors; wakes are now the W-SERIES questions: W1 (breach: recentre or
+>   not?, one per episode) + W2 (stance evidence changed: verdict shift held one
+>   bar / cap engaged-released). Startup cycle gated (config changed / pending W
+>   event / price outside band — else quiet). `get_pending_score_pushes` NULL-trace
+>   clog fixed; stance grader `observer.backfill_stance_grades` (72h maturity,
+>   band-width-anchored thresholds) + 7 new Langfuse score configs (stance,
+>   stance_correct, wake_yield, wakes_per_day, cap_buy_fills,
+>   cap_episode_drawdown, matches_backtest).
+> - **PENDING:** Fix 5 — offline acceptance test (2025–2026 replay under
+>   `optimize/`, pre-committed pass criteria, Langfuse dataset run); operator
+>   decides restart. **Restart checklist:** tape collector must come back up or
+>   `tape_verdict` stays stale (W2's verdict half silent, stance evidence
+>   degraded); expect ~1–3 council calls/day (daily floor + W wakes) vs the old
+>   ~11.
+>
 > **2026-05-31 — AGENT LAYER MIGRATED TO GOOGLE ADK (in code); NOT RUN LIVE.** MAGI
 > remains shut down at the service level (stopped + disabled 2026-05-28; no live
 > orders). The council's agent-call layer has been **rebuilt off Letta onto Google
@@ -34,9 +86,11 @@
 > changes any of this, update THIS ledger first.** Self-contained on purpose (the
 > claude.ai reader has no shell to check `systemctl`).
 
-**🟢 LIVE / RUNNING RIGHT NOW** — `magi.service` (paper trading — see the dedicated
-🟢 MAGI RUNNING ON PAPER entry below), `magi-dashboard.service`, and the leftover tape
-warehouse timers:
+**🟢 LIVE / RUNNING RIGHT NOW** — `magi-dashboard.service` and the leftover tape
+warehouse timers. **`magi.service` is STOPPED + DISABLED (2026-06-11, operator
+order)** — the paper run is halted pending the five-fix rebuild's acceptance test
+(see the 2026-06-11 banner at the top); the "MAGI RUNNING ON PAPER" entry below is
+the historical record of the 2026-06-09→11 run:
 - `tape-collector.service` — **STOPPED + disabled 2026-06-09 (later)**, stood down for the
   MAGI paper bring-up. It had collected Kraken XRP/USD 1-minute OHLC + trade tape + spread →
   `tape/market_tape.db`; collection is paused, the DB/data are retained untouched. The three

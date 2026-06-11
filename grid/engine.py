@@ -13,6 +13,7 @@ from config import (
     DB_PATH, EXCHANGE,
     LIVE_CONFIRMATION_FILE, LIVE_CONFIRMATION_TOKEN,
     LIVE_CONFIRMATION_ENV_VAR, LIVE_CONFIRMATION_ENV_VALUE,
+    DOWN_WALK_CAP_STREAK, DOWN_WALK_LINK_HOURS,
 )
 from database import (
     insert_grid_state, get_current_grid_state,
@@ -784,11 +785,15 @@ class GridEngine:
             return False
         return True
 
-    def _execute_anchor(self, current_price: float) -> Optional[float]:
+    def _execute_anchor(self, current_price: float,
+                        force_side: Optional[str] = None) -> Optional[float]:
         """Execute a single market order at current spot — the 'anchor' that
         gates the rest of the grid. Direction follows inventory skew: SELL
-        if XRP-heavy, BUY if USD-heavy. Sized as one rung of the eventual
-        ladder so its capital weight matches the arms.
+        if XRP-heavy, BUY if USD-heavy — unless `force_side` is given
+        (exposure cap, Fix 2: a capped rebuild forces 'sell' so the skew
+        rule can never route a buy through the anchor while buys are
+        frozen). Sized as one rung of the eventual ladder so its capital
+        weight matches the arms.
 
         Returns the fill price (current spot in paper mode), or None if
         the anchor couldn't be sized or executed. Arms are placed only
@@ -815,7 +820,8 @@ class GridEngine:
             return None
 
         skew = (xrp_value - usd_held) / total
-        side = 'sell' if skew > 0 else 'buy'
+        side = force_side if force_side in ('buy', 'sell') \
+            else ('sell' if skew > 0 else 'buy')
 
         # Size matches a single rung of the eventual ladder. compute_order_size
         # divides the chosen side's inventory by the per-side rung count, so the
@@ -986,6 +992,59 @@ class GridEngine:
         )
         return float(fill_price)
 
+    # --- Exposure cap: down-walk streak (Fix 2, 2026-06-11) ---
+
+    def _down_walk_assess(self, prospective_centre: float) -> int:
+        """The down-walk streak this rebuild WOULD have if it lands at
+        `prospective_centre`. Pure read — nothing is persisted until the
+        rebuild actually succeeds (_down_walk_commit). Rules:
+          - lower centre than the last rebuild, within DOWN_WALK_LINK_HOURS
+            of it → streak + 1 (the chain extends);
+          - lower centre but the last rebuild is older than the linkage
+            window → streak restarts at 1 (unrelated rebuilds don't chain);
+          - higher centre → 0 (the cap is self-releasing — an up-walk is
+            the release, no threshold to tune);
+          - equal centre → streak unchanged if linked, else 0;
+          - no prior rebuild recorded → 0.
+        """
+        from database import get_system_state
+        try:
+            prior_streak = int(get_system_state('down_walk_streak',
+                                                default='0') or 0)
+        except (TypeError, ValueError):
+            prior_streak = 0
+        last_centre = get_system_state('down_walk_last_centre', default=None)
+        last_ts = get_system_state('down_walk_last_ts', default=None)
+        if not last_centre or not last_ts:
+            return 0
+        try:
+            last_centre = float(last_centre)
+            age_hours = (
+                datetime.utcnow() - datetime.fromisoformat(last_ts)
+            ).total_seconds() / 3600.0
+        except (TypeError, ValueError):
+            return 0
+        linked = age_hours <= float(DOWN_WALK_LINK_HOURS)
+        if prospective_centre < last_centre:
+            return (prior_streak + 1) if linked else 1
+        if prospective_centre > last_centre:
+            return 0
+        return prior_streak if linked else 0
+
+    def _down_walk_commit(self, streak: int, centre: float):
+        """Persist the streak state after a SUCCESSFUL rebuild. centre is the
+        anchor's actual fill price (the grid's real new centre), not the
+        pre-anchor spot the assessment used — the two differ by at most the
+        anchor's slippage, which is noise at grid-band scale."""
+        from database import set_system_state
+        try:
+            set_system_state('down_walk_streak', str(int(streak)))
+            set_system_state('down_walk_last_centre', repr(float(centre)))
+            set_system_state('down_walk_last_ts',
+                             datetime.utcnow().isoformat())
+        except Exception as e:
+            log.error(f"down-walk streak persist failed: {e}")
+
     def initialise_grid(self, centre: Optional[float] = None,
                          spacing_pct: Optional[float] = None,
                          sell_level_bias: float = 1.0,
@@ -1030,12 +1089,61 @@ class GridEngine:
             f"Initialising grid (anchor-first) — target centre={centre} "
             f"spacing={spacing_pct*100:.2f}% levels={self.level_count}"
         )
+
+        # Exposure cap (Fix 2): assess the down-walk streak against current
+        # spot BEFORE touching the book — the anchor can be a BUY, and a
+        # capped rebuild must produce zero buy fills of any kind. Spot is
+        # the honest proxy for the new centre at decision time (the anchor
+        # fills at ~spot); the actual fill price is what gets persisted.
+        current_spot = self.get_current_price() or centre
+        walk_streak = self._down_walk_assess(current_spot)
+        cap_engaged = walk_streak >= DOWN_WALK_CAP_STREAK
+        if cap_engaged:
+            xrp_avail = float(self.paper_inventory.get('xrp') or 0.0)
+            if xrp_avail < ORDER_SIZE_XRP:
+                # Nothing to sell and buys are frozen → this rebuild can do
+                # nothing. Abort BEFORE cancel_all_orders so the existing
+                # grid (sells included) stays on the book untouched.
+                log.error(
+                    "[EXPOSURE_CAP] down-walk streak %d ≥ %d but only %.4f "
+                    "XRP held (< one %.2f rung) — rebuild aborted, existing "
+                    "grid left intact",
+                    walk_streak, DOWN_WALK_CAP_STREAK, xrp_avail,
+                    ORDER_SIZE_XRP,
+                )
+                try:
+                    from database import insert_alert
+                    insert_alert(
+                        'warn', 'exposure_cap_no_sell_inventory',
+                        f"Capped rebuild aborted: streak {walk_streak}, "
+                        f"{xrp_avail:.4f} XRP < one rung",
+                    )
+                except Exception:
+                    pass
+                return False
+            log.warning(
+                "[EXPOSURE_CAP] down-walk streak %d ≥ %d — SELLS-ONLY "
+                "rebuild: anchor forced to SELL, buy arms suppressed. "
+                "Releases on the first rebuild at a higher centre.",
+                walk_streak, DOWN_WALK_CAP_STREAK,
+            )
+            try:
+                from database import insert_alert
+                insert_alert(
+                    'warn', 'exposure_cap_engaged',
+                    f"Down-walk streak {walk_streak}: sells-only rebuild at "
+                    f"~{current_spot}",
+                )
+            except Exception:
+                pass
+
         self.cancel_all_orders()
 
         # Stage 1: anchor. Use current spot, not the target centre, because
         # the anchor is an actual trade and must clear against the live book.
-        current_spot = self.get_current_price() or centre
-        anchor_fill_price = self._execute_anchor(current_spot)
+        anchor_fill_price = self._execute_anchor(
+            current_spot, force_side='sell' if cap_engaged else None,
+        )
         if anchor_fill_price is None:
             log.error(
                 "Initialise_grid: anchor execution failed — NO arm orders "
@@ -1068,6 +1176,17 @@ class GridEngine:
             buy_level_bias=buy_level_bias,
         )
 
+        if cap_engaged:
+            # Sells-only: the buy side of the ladder is suppressed entirely.
+            # Filtering here (not inside build_grid_levels) keeps the cap's
+            # whole enforcement surface in this method.
+            n_dropped = sum(1 for l in levels if l['side'] == 'buy')
+            levels = [l for l in levels if l['side'] == 'sell']
+            log.info(
+                f"[EXPOSURE_CAP] {n_dropped} buy arm(s) suppressed — "
+                f"placing {len(levels)} sell arm(s) only"
+            )
+
         if not levels:
             log.warning("Grid empty after inventory trim — no buys or sells coverable with current holdings")
             return False
@@ -1075,7 +1194,7 @@ class GridEngine:
         n_buys = sum(1 for l in levels if l['side'] == 'buy')
         n_sells = sum(1 for l in levels if l['side'] == 'sell')
         half = self.level_count // 2
-        if n_buys != n_sells or n_buys < half:
+        if not cap_engaged and (n_buys != n_sells or n_buys < half):
             log.warning(
                 f"Grid asymmetric — placing {n_buys} buys + {n_sells} sells "
                 f"(XRP held insufficient for full sell ladder)"
@@ -1088,9 +1207,16 @@ class GridEngine:
                 placed += 1
             time.sleep(0.1)  # Rate limit buffer
 
+        cap_note = (f" [EXPOSURE_CAP sells-only, streak {walk_streak}]"
+                    if cap_engaged else "")
         insert_grid_state(centre, spacing_pct, self.level_count,
-                          notes=f"Grid initialised — {placed} orders placed")
-        log.info(f"Grid initialised — {placed}/{len(levels)} orders placed")
+                          notes=f"Grid initialised — {placed} orders placed"
+                                f"{cap_note}")
+        log.info(f"Grid initialised — {placed}/{len(levels)} orders placed{cap_note}")
+
+        # Exposure cap: the rebuild succeeded — persist the streak state
+        # against the anchor's real fill price.
+        self._down_walk_commit(walk_streak, centre)
 
         # ONE GRID INVARIANT — after init, the open-order count must equal
         # the number we just placed. If higher: leaked orders from a prior

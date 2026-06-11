@@ -37,10 +37,32 @@ MAX_GRID_SPACING_PCT = 0.025   # Hard ceiling: 2.5%. SAFETY CLAMP ONLY —
                                 # never used as the actual spacing value.
                                 # Scorer variants above this are filtered;
                                 # agent geometry above this is clamped down.
-MIN_GRID_SPACING_PCT = 0.003   # Hard floor: 0.3%. SAFETY CLAMP ONLY —
-                                # never used as the actual spacing value.
-                                # Scorer variants below this are filtered;
-                                # agent geometry below this is clamped up.
+MIN_GRID_SPACING_PCT = 0.015   # Hard floor: 1.5% (raised from 0.3%,
+                                # 2026-06-11). Floor = 6 * MAKER_FEE so
+                                # fees never exceed 1/3 of gross per
+                                # round trip. 9.5y backtest (2016-12 →
+                                # 2026-06, hourly): 0.75% spacing lost
+                                # in 9/10 years (fees ate 2/3 of gross);
+                                # 1.5-2.5% is the viable band. SAFETY
+                                # CLAMP ONLY — never used as the actual
+                                # spacing value. Scorer variants below
+                                # this are filtered; agent geometry
+                                # below this is clamped up.
+# --- Exposure cap (down-walk streak, added 2026-06-11, Fix 2) ---
+# The grid's worst historical failure mode is recentering INTO a sustained
+# downtrend — each rebuild steps the ladder lower and buys the fall. The
+# 9.5y backtest (2016-12 → 2026-06 hourly, fresh $61.50 book per year)
+# showed a deterministic cap outperforms a drawdown "brake": after
+# DOWN_WALK_CAP_STREAK consecutive downward rebuilds (each within
+# DOWN_WALK_LINK_HOURS of the prior, so unrelated rebuilds days apart don't
+# chain), the next rebuild places SELLS ONLY — no buy anchor, no buy arms —
+# until a rebuild lands at a HIGHER centre, which resets the streak to 0.
+# Self-releasing by construction: no release threshold to tune. Tracked in
+# system_state (down_walk_streak / down_walk_last_centre / down_walk_last_ts)
+# and enforced in grid/engine.py:initialise_grid.
+DOWN_WALK_CAP_STREAK = 3
+DOWN_WALK_LINK_HOURS = 48
+
 # GRID_PAUSE: cancel orders and wait, triggered by regime gate in
 # magi/orchestrator.check_regime_gate(). Different from HALT: does not trip
 # kill switch, re-evaluates each cycle and releases automatically when the
