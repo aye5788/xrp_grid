@@ -849,6 +849,18 @@ HTML_TEMPLATE = """
       }
       .gate-na .gate-pill   { color: var(--magi-text-dim); }
       .gate-na .gate-value  { color: var(--magi-text-dim); }
+      /* W-series wake triggers (Fix 4, 2026-06-11): cyan = "this trigger
+         can wake the council off-schedule". T-series chips stay on the
+         green(fired)/dim(quiet) palette — they are context-only detectors
+         and never wake MAGI. */
+      .gate-wake {
+        border-color: var(--magi-cyan);
+      }
+      .gate-wake .gate-id    { color: var(--magi-cyan); }
+      .gate-wake .gate-pill  { color: var(--magi-cyan); }
+      .gate-wake .gate-value { color: var(--magi-cyan); }
+      .gate-wake .gate-label { color: var(--magi-cyan-fill); }
+      .gate-wake.gate-quiet  { opacity: 0.75; }
 
       /* MAGI hero block: triangle of 3 agents around central MAGI core,
          plus a "CODE / STATUS" side panel. Matches the iconic NGE MAGI
@@ -1282,21 +1294,22 @@ HTML_TEMPLATE = """
       <div class="readiness-section">
         <div class="readiness-header">
           <span class="readiness-title">⬢ Gate Activity</span>
-          <span class="readiness-meta">trailing {{ (gate_activity.window_hours // 24) }}d · fires shown 24h/window · ★ = wakes MAGI off-schedule</span>
+          <span class="readiness-meta">trailing {{ (gate_activity.window_hours // 24) }}d · fires shown 24h/window · cyan ★ W = wakes MAGI off-schedule · T = context-only (shown to council, never wakes it)</span>
           <span class="readiness-meta">off-schedule wakes: {{ gate_activity.wakes.last_24h }} (24h) · {{ gate_activity.wakes.window }} (window)</span>
         </div>
         {% if gate_activity.triggers %}
         <div class="gate-grid">
           {% for t in gate_activity.triggers %}
-          <div class="gate-chip {{ 'gate-pass' if t.fires_window else 'gate-na' }}"
+          {% set is_wake = t.trigger_id in ['W1','W2'] %}
+          <div class="gate-chip {{ ('gate-wake' + ('' if t.fires_window else ' gate-quiet')) if is_wake else ('gate-pass' if t.fires_window else 'gate-na') }}"
                onclick='console.log({{ t|tojson }})'
                title="{{ t.trigger_id }} · {{ t.evals }} evals in window · last fired details → console">
             <div class="gate-head">
-              <span class="gate-id">{{ t.trigger_id }}{% if t.trigger_id in ['W1','W2'] %} ★{% endif %}</span>
+              <span class="gate-id">{{ t.trigger_id }}{% if is_wake %} ★{% endif %}</span>
               <span class="gate-pill">{{ t.fires_24h }}/{{ t.fires_window }}</span>
             </div>
             <div class="gate-value">{{ t.fires_window }} fires</div>
-            <div class="gate-label">{{ 'wakes MAGI' if t.trigger_id in ['W1','W2'] else 'context-only' }}</div>
+            <div class="gate-label">{{ 'WAKES COUNCIL' if is_wake else 'context-only' }}</div>
           </div>
           {% endfor %}
         </div>
