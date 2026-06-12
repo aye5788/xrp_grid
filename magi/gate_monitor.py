@@ -499,7 +499,7 @@ class GateMonitor:
             last_age = self._ws_client.last_message_age_sec
             rc = self._ws_client.reconnect_count_1h
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.db_path, timeout=30.0)
             conn.execute(
                 "INSERT INTO ws_health (timestamp, state, "
                 "last_heartbeat_age_sec, reconnect_count_1h, "

@@ -1,5 +1,22 @@
 # Next Build Tasks
 
+> **DIRECTION 2026-06-12 — RESTARTED ON PAPER; THE QUEUE IS NOW WATCHING, NOT
+> BUILDING.** F5 ran (PASS on its pre-committed criteria, then DEMOTED by the
+> operator to skeleton-floor evidence — the replay cannot model the judgment
+> layer; the paper run IS the acceptance test). The reactivation audit's 4
+> blockers + 3 degraded items are FIXED and the restart checklist below was
+> executed in full (all three services up; the startup council cycle fired on
+> the config-fingerprint change as disclosed; first cycle: stance DEPLOY,
+> THESIS_HOLDS→MAINTAIN, no overrides). Full record: `01_CURRENT_STATE.md`
+> 2026-06-12 banner. **Live queue now = the PAPER-RUN WATCH ITEMS below + the
+> day-14 `matches_backtest` check.** Remaining build items are hygiene-only
+> (01 banner "Still open" list). The next *decision* point is the operator's,
+> on evidence: stance grades (first matures ~2026-06-15 evening), seat accuracy
+> vs the 50% line, fee_share_7d ≤ 0.33, net_harvest_7d, readiness gates.
+>
+> The 2026-06-11 direction below is retained as the record of what was
+> specified; its F5 task and restart checklist are DONE.
+
 > **DIRECTION 2026-06-11 — MAGI SHUT DOWN; FIVE-FIX REBUILD: Fixes 1–4 BUILT,
 > Fix 5 IS THE QUEUE.** `magi.service` stopped + disabled by operator order after
 > the audit found six accumulated failures (full record: `01_CURRENT_STATE.md`

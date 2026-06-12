@@ -1057,7 +1057,10 @@ def enforce_hard_rules(consensus: dict, world_state: dict,
         6.   Grid degenerate            → RECENTRE (fires only under stance
              DEPLOY/none — under HOLD/STAND_ASIDE a one-sided or inactive book
              is the council's mandate, and this gate doubles as STAND_ASIDE's
-             exit: the first DEPLOY vote restores the full grid)
+             exit: the first DEPLOY vote restores the full grid. Also dormant
+             while the exposure cap is engaged: a forced RECENTRE under the
+             cap rebuilds sells-only, so it can never cure buy_count=0 —
+             it would just flap, paying a taker anchor per council cycle)
         7.   PAUSE_INVALID              → risk_action CLEAR
         8.   Geometry injection / no acceptable variant → GRID_PAUSE
     The structural COUNCIL VETO is no longer a rule here (rule 0d was removed in
@@ -1498,6 +1501,24 @@ def enforce_hard_rules(consensus: dict, world_state: dict,
             f"grid-degenerate rule dormant under stance={cons.get('stance')} "
             f"(one-sided/inactive book is the council's mandate, not damage)"
         )
+    # EXPOSURE-CAP GATE (2026-06-12): the rule is also dormant while the
+    # down-walk exposure cap is engaged. Under an engaged cap the rebuild is
+    # forced sells-only (buy arms suppressed, taker SELL anchor), so a forced
+    # RECENTRE here can never restore buy_count>0 — it would just flap: fire
+    # on buy_count=0 every council cycle, pay a taker anchor each time, and
+    # land back at buy_count=0. The sells-only book is the cap's mandate, not
+    # damage. This gates only the FORCED recentre — a council-voted
+    # RECONFIGURE still flows through, and W2 wakes the council on cap
+    # engage/release, so the exit stays with the judgment layer (a
+    # higher-centre rebuild releases the cap and re-arms this rule).
+    _cap = world_state.get("exposure_cap") or {}
+    _cap_gate = not _cap.get("engaged")
+    if not _cap_gate:
+        notes.append(
+            f"grid-degenerate rule dormant under engaged exposure cap "
+            f"(streak={_cap.get('streak')}) — the sells-only book is the "
+            f"cap's mandate, not damage"
+        )
     _degraded_freeze_active = any(
         t == "[COUNCIL_COLLAPSED]" or t.startswith("[AGENT_DEGRADED:")
         for t in overrides
@@ -1506,7 +1527,8 @@ def enforce_hard_rules(consensus: dict, world_state: dict,
             and cons.get("risk_action") != "HALT"
             and cons.get("grid_action") != "GRID_PAUSE"
             and not _degraded_freeze_active
-            and _stance_gate):
+            and _stance_gate
+            and _cap_gate):
         # GRID_PAUSE here means Melchior's NO_PROFITABLE_GRID stand-down — do NOT
         # let the grid-degenerate rule force a RECENTRE over a deliberate
         # stand-down (there is no profitable geometry to rebuild to).

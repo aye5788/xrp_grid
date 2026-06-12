@@ -1100,14 +1100,17 @@ class GridEngine:
         cap_engaged = walk_streak >= DOWN_WALK_CAP_STREAK
         if cap_engaged:
             xrp_avail = float(self.paper_inventory.get('xrp') or 0.0)
-            if xrp_avail < ORDER_SIZE_XRP:
-                # Nothing to sell and buys are frozen → this rebuild can do
-                # nothing. Abort BEFORE cancel_all_orders so the existing
-                # grid (sells included) stays on the book untouched.
+            if xrp_avail < 2 * ORDER_SIZE_XRP:
+                # A capped rebuild spends one rung as the taker SELL anchor
+                # and needs at least one more for a resting sell arm. Below
+                # two rungs the rebuild would cancel the book, taker-sell
+                # the last rung, and end with ZERO orders. Abort BEFORE
+                # cancel_all_orders so the existing grid (sells included)
+                # stays on the book untouched.
                 log.error(
                     "[EXPOSURE_CAP] down-walk streak %d ≥ %d but only %.4f "
-                    "XRP held (< one %.2f rung) — rebuild aborted, existing "
-                    "grid left intact",
+                    "XRP held (< anchor + one %.2f rung) — rebuild aborted, "
+                    "existing grid left intact",
                     walk_streak, DOWN_WALK_CAP_STREAK, xrp_avail,
                     ORDER_SIZE_XRP,
                 )
@@ -1116,7 +1119,7 @@ class GridEngine:
                     insert_alert(
                         'warn', 'exposure_cap_no_sell_inventory',
                         f"Capped rebuild aborted: streak {walk_streak}, "
-                        f"{xrp_avail:.4f} XRP < one rung",
+                        f"{xrp_avail:.4f} XRP < anchor + one rung",
                     )
                 except Exception:
                     pass

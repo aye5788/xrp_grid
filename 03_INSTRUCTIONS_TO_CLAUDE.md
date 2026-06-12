@@ -98,6 +98,35 @@ What was actually built (authoritative: `01_CURRENT_STATE.md` Session 2026-05-31
   startup without a cycle firing — don't wait for a cycle to confirm
   them.
 
+### Rules established 2026-06-12 (post-audit session — binding)
+- **Money-path wording precision.** `ORDER_SIZE_XRP = 1.65` is sacrosanct.
+  When describing any money-path change, phrase quantities as what they are
+  ("two rungs of 1.65", "abort threshold"), never as bare amounts that could
+  read as sizing, and state explicitly what does NOT change. An ambiguous
+  phrasing ("needs 3.30 XRP instead of 1.65") was read as an order-size
+  change and broke trust — on a money path, the reading is the offense.
+- **Own it, don't defend.** When the operator questions integrity or trust,
+  answer the direct question plainly in the first sentence, own the pattern,
+  and offer falsifiable checks (cross-model verification, artifacts) — never
+  a structured defense brief, however accurate. This failure happened twice
+  before being named.
+- **Scope is validation, not yield.** Judge all results against the three
+  documented criteria — net-positive after fees, >50% directional accuracy,
+  surviving unattended — on the deliberately small book. Never frame
+  progress against returns or imply the small size is the problem.
+- **External audit protocol.** Any submitted audit (the operator may
+  anonymize the source deliberately, as a test) gets per-claim verification
+  against code/logs/DB: accept what verifies regardless of source, reject
+  only with a reproducible artifact, and welcome adversarial cross-model
+  loops as the operator's control. (2026-06-12 Gemini audit: 7 findings →
+  2 real, 1 known, 2 wrong, 1 impossible, 1 by-design; 2 of its 4
+  recommendations would have damaged the system.)
+- **Track, then escalate.** A fix that knowingly accepts a minor failure
+  mode ships with (a) a code comment at the site naming the concrete
+  escalation fix and (b) a queryable per-occurrence signal — warn-level
+  `magi_alerts` rows with a dedicated category. First instance:
+  `seat_scores_delivery_incomplete`.
+
 ### When the operator pushes back
 - **Engage seriously. Do not capitulate.** When the operator says "this is
   wrong" or "you're missing something," the default response is NOT to

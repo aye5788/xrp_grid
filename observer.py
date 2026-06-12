@@ -756,9 +756,12 @@ def backfill_seat_accuracy_scores():
     One-touch per cycle: a row is attempted once it is >= 72h old (Casper's
     forward window) and flagged `seat_scores_pushed=1` only when EVERY seat
     resolves — either a grade or a permanent exclusion (overridden /
-    non-verdict / missing world_state). Transient exclusions
-    (not_matured_72h, missing_outcome) leave the flag unset so the next
-    observer pass retries. Excluded seats get no score (an excluded call is
+    non-verdict / missing world_state) — AND every score POST confirms 2xx
+    (convergent delivery, 2026-06-12: a Langfuse 429/outage delays the
+    mirror, never loses it; dropped deliveries are tracked as warn-level
+    magi_alerts under 'seat_scores_delivery_incomplete'). Transient
+    exclusions (not_matured_72h, missing_outcome) leave the flag unset so
+    the next observer pass retries. Excluded seats get no score (an excluded call is
     neither right nor wrong). LIMIT 5 per pass keeps the score POSTs far
     under the Langfuse rate limit.
     """
@@ -814,14 +817,40 @@ def backfill_seat_accuracy_scores():
             if not all_resolved:
                 continue  # retry next pass once outcomes/bars mature
 
+            pushed_ok = True
             for seat, grade in grades.items():
                 comment = grade['raw_outcome']
                 if grade.get('estimated'):
                     comment += ' (estimated)'
-                tracing.push_trace_scores(
+                ok = tracing.push_trace_scores(
                     r['trace_id'], {f'{seat}_correct': bool(grade['correct'])},
                     comment=comment,
                 )
+                pushed_ok = pushed_ok and ok
+            if not pushed_ok:
+                # Convergent delivery (2026-06-12): receipt withheld, the
+                # next pass re-grades (deterministic) and re-pushes. On a
+                # PARTIAL failure the retry duplicates the already-delivered
+                # seats' scores — benign (same value, boolean averages
+                # unchanged). Tracked via the magi_alerts row below; if the
+                # dashboard shows this category becoming regular, the fix is
+                # per-seat receipt columns (casper/melchior/balthasar
+                # _scores_pushed) so retries only re-push the failed seat.
+                log.warning(
+                    f"seat-accuracy: {r['cycle_id']} score delivery "
+                    f"incomplete (Langfuse 429/outage?) — receipt withheld, "
+                    f"retrying next pass"
+                )
+                try:
+                    from database import insert_alert
+                    insert_alert(
+                        'warn', 'seat_scores_delivery_incomplete',
+                        f"cycle {r['cycle_id']}: seat-accuracy score POST "
+                        f"dropped (429/outage) — retrying next observer pass",
+                    )
+                except Exception:
+                    pass
+                continue
             conn.execute(
                 "UPDATE debate_records SET seat_scores_pushed=1 "
                 "WHERE cycle_id=?", (r['cycle_id'],),
@@ -1143,6 +1172,34 @@ def poll_cycle():
         _ws_rest_divergence_check(xrp_1h)
     except Exception as e:
         log.warning(f"ws_rest_divergence_check failed (non-fatal): {e}")
+
+    # Gate-eval dead-man's switch (2026-06-12): gate evaluation is driven
+    # by gate_monitor's WS thread. If that thread failed to start or died,
+    # no W-events are written and the council's wake path silently
+    # disappears (the prior comment claiming the observer still ran the
+    # gate was false — 2026-06-12 audit). If no gate evaluation has
+    # landed a row in the last 2h (normal cadence is at least hourly),
+    # run evaluate_gate from this poll. Downstream wake handling is
+    # unchanged — throttle, dwell and non-trading suppression still
+    # apply in the scheduler.
+    try:
+        from database import get_conn
+        conn = get_conn()
+        row = conn.execute(
+            "SELECT MAX(timestamp) AS ts FROM magi_gate_events"
+        ).fetchone()
+        conn.close()
+        if row is None or row['ts'] is None or \
+                (time.time() - float(row['ts'])) > 2 * 3600:
+            from magi.gate import evaluate_gate
+            from config import DB_PATH
+            fired = evaluate_gate(DB_PATH)
+            log.warning(
+                "Gate fallback: no gate evaluation in >2h — ran "
+                "evaluate_gate from observer poll (fired=%s)", fired
+            )
+    except Exception as e:
+        log.error(f"Gate fallback evaluation failed (non-fatal): {e}")
 
 def run_daemon(interval_seconds=3600):
     """Run observer as daemon, polling every interval."""

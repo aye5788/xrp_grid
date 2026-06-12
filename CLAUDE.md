@@ -16,7 +16,15 @@ Handoff docs to read at session start:
 CLAUDE.md is intent and discipline. The handoff docs are state. If they
 disagree, the handoff docs win for state; this file wins for how to work.
 
-> **STATUS — MAGI IS RUNNING ON PAPER (started 2026-06-09 21:04 UTC). LETTA FULLY
+> **STATUS — MAGI IS RUNNING ON PAPER (paper run started 2026-06-09 21:04 UTC;
+> STOPPED 2026-06-11 by operator order for the five-fix rebuild; RESTARTED
+> 2026-06-12 after a full reactivation audit cleared 4 blockers — rule-6
+> exposure-cap gating, sub-floor book guard at startup, capped-rebuild
+> 2-rung abort threshold, gate-event contamination cleanup — plus 3 degraded
+> items: gate scorer-state candles carry `close` so T6/T7 detect again,
+> gate-eval dead-man's switch in observer.poll_cycle, seat-accuracy Langfuse
+> scores delivered convergently; observer.db converted to WAL + 30s busy
+> timeouts; pytz dropped from scheduler). LETTA FULLY
 > DECOUPLED. Decision layer = the hand-rolled arbiter orchestrator
 > (`magi/council_v2.py`), live on a GATE-PRIMARY cadence.**
 > `magi.service` and `magi-dashboard.service` are **active + enabled**. The engine is

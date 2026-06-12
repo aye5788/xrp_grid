@@ -820,9 +820,11 @@ def main():
     # Start the always-on gate monitoring service. Wires Kraken WS v2
     # to magi/gate.py predicate evaluation. Falls back to REST polling
     # if WS is unavailable. See magi/gate_monitor.py for design notes.
-    # Failure to start is non-fatal — gate evaluation reverts to the
-    # observer poll path (which was the pre-WS gate path, still wired
-    # in observer.poll_cycle as a safety check).
+    # Failure to start is non-fatal — observer.poll_cycle carries a
+    # dead-man's switch (added 2026-06-12): if no gate evaluation has
+    # written a magi_gate_events row in >2h, the hourly observer poll
+    # runs evaluate_gate itself, so W-wakes survive a dead monitor at
+    # degraded (hourly) latency.
     try:
         from magi.gate_monitor import start_in_background as _start_gate_monitor
         _gate_monitor = _start_gate_monitor()
@@ -859,6 +861,42 @@ def main():
 
     # Run initial observer poll
     run_observer_cycle()
+
+    # Sub-floor book guard (2026-06-12): the spacing floor (config
+    # MIN_GRID_SPACING_PCT, raised 0.3%→1.5% on 2026-06-11) clamps NEW
+    # geometry only — a restored book built under the old floor would
+    # otherwise resume verbatim and trade sub-floor spacing forever.
+    # Paper mode: cancel the stale book and fall through to first-boot
+    # geometry (which builds at the compliant scorer rank-1; the existing
+    # pause-flag check below still takes precedence over the rebuild).
+    # Live mode: do NOT auto-cancel real Kraken orders — alert critical
+    # and resume; disposing of a live book is the operator's call.
+    # This guard lives HERE and not in engine.load_state() because the
+    # dashboard also calls load_state() — a render must never cancel orders.
+    if engine.paper_orders:
+        from config import MIN_GRID_SPACING_PCT
+        from database import get_current_grid_state, insert_alert
+        _gs = get_current_grid_state() or {}
+        _sp = _gs.get('spacing_pct')
+        if _sp is not None and _sp < MIN_GRID_SPACING_PCT:
+            if engine.paper:
+                log.warning(
+                    "Startup: restored book spacing %.4f is below the "
+                    "hard floor %.4f — cancelling stale paper book and "
+                    "rebuilding at compliant geometry",
+                    _sp, MIN_GRID_SPACING_PCT,
+                )
+                engine.cancel_all_orders()
+            else:
+                insert_alert(
+                    severity='critical',
+                    category='subfloor_book_resumed',
+                    message=(
+                        f"LIVE book restored with spacing {_sp:.4f} below "
+                        f"floor {MIN_GRID_SPACING_PCT:.4f} — resuming "
+                        f"unchanged; operator must decide disposal"
+                    ),
+                )
 
     # Initialise grid only if no orders were restored from DB.
     # If load_state() restored an existing order book, resume that book instead
@@ -997,7 +1035,6 @@ def main():
     # cannot be used as a debounce source.
     last_scheduled_date = None
     try:
-        import pytz
         from database import get_conn
         conn = get_conn()
         row = conn.execute(
@@ -1006,10 +1043,9 @@ def main():
         ).fetchone()
         conn.close()
         if row and row['timestamp']:
-            est = pytz.timezone('US/Eastern')
             last_dt = datetime.fromisoformat(row['timestamp']).replace(
-                tzinfo=timezone.utc).astimezone(est)
-            now_est = datetime.now(timezone.utc).astimezone(est)
+                tzinfo=timezone.utc).astimezone(EST)
+            now_est = datetime.now(timezone.utc).astimezone(EST)
             if (last_dt.date() == now_est.date() and
                     last_dt.hour >= MAGI_DAILY_HOUR_EST):
                 last_scheduled_date = last_dt.date()

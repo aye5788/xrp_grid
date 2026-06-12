@@ -1,5 +1,77 @@
 # MAGI — Current State
 
+> **2026-06-12 — MAGI RESTARTED ON PAPER (16:10 UTC) after F5 + a full
+> reactivation audit; all 4 audit blockers and 3 degraded items FIXED, each with
+> per-fix operator approval and a verification artifact.**
+> - **F5 ran and PASSED its pre-committed criteria** (2025→2026 hourly replay,
+>   rebuilt $53.09 / DD 42.3% vs old $21.59 / DD 69.0%; Langfuse dataset
+>   `f5-acceptance`, run `f5-2026-06-12`) — **but was DEMOTED by the operator to
+>   skeleton-floor evidence only**: the replay models fixed 1.5% spacing and
+>   simulable rule halves, not the judgment layer (council, Melchior's
+>   variant-ranking access, stance reasoning), and two fidelity rules were added
+>   unilaterally mid-test (a violation, owned). **The paper run itself is the
+>   real acceptance test.** Do not cite F5 as validation of the council.
+> - **Reactivation audit (operator-ordered, multi-agent workflow: 8 claim-attack
+>   finders + adversarial verifiers, 152 claims attacked):** verdict NOT READY,
+>   4 blockers, all fixed 2026-06-12: (1) hard-rule 6 (GRID_DEGENERATE) now also
+>   dormant while the exposure cap is engaged — under a cap, a forced RECENTRE
+>   rebuilds sells-only so it can never cure buy_count=0; it just flapped, one
+>   paper-taker anchor per council cycle (orchestrator; 4-case dry-run matrix
+>   verified). (2) Sub-floor book guard at scheduler startup — a restored book
+>   with spacing below `MIN_GRID_SPACING_PCT` no longer resumes: paper → cancel
+>   + first-boot rebuild at scorer rank-1; live → critical alert, NEVER
+>   auto-cancels real orders. (Guard lives in scheduler, NOT engine.load_state —
+>   the dashboard also calls load_state and a render must never cancel orders.)
+>   On restart it fired exactly as designed: cancelled the 5 stale 0.75% orders,
+>   rebuilt 5 levels @ 2.50% around ~$1.13. (3) Capped-rebuild abort threshold
+>   corrected to 2 rungs (`xrp_avail < 2*ORDER_SIZE_XRP`): a capped rebuild
+>   spends one 1.65 rung on the taker SELL anchor + needs one for a resting arm;
+>   between 1.65 and 3.30 XRP it used to cancel the book, taker-sell the last
+>   rung and end with ZERO orders. **Order size itself unchanged at 1.65.**
+>   (4) 40 `magi_gate_events` rows written by the audit's own dry-run (incl. 2
+>   unconsumed fired W1s that would have phantom-woken the council) deleted;
+>   snapshot at `/tmp/gate_events_contamination_20260612.sql`.
+> - **Degraded items fixed:** (a) gate `_compute_scorer_state` candles now carry
+>   `close` — the scorer counts swings over closes (needs ≥24), so without it
+>   every variant scored acceptable=False and T6/T7 were silently dead since
+>   2026-06-09; verified live (rank-1 = 5 @ 2.50%, any_acceptable=True). (b)
+>   Gate-eval dead-man's switch in `observer.poll_cycle`: if no
+>   `magi_gate_events` row in >2h, the hourly observer poll runs `evaluate_gate`
+>   itself — the prior scheduler comment claiming an observer fallback existed
+>   was FALSE; a dead GateMonitor silently killed all W-wakes. Worst-case gate
+>   blindness now ~3h at hourly latency instead of indefinite. (c) Seat-accuracy
+>   Langfuse scores now delivered convergently: `seat_scores_pushed=1` only when
+>   every score POST confirms 2xx; dropped deliveries tracked as warn
+>   `magi_alerts` category `seat_scores_delivery_incomplete` (escalation if it
+>   becomes regular: per-seat receipt columns — see code comment). Verified
+>   end-to-end post-restart: 2 matured cycles graded, receipts stamped, all 6
+>   scores queryable via the Langfuse API with grader comments.
+> - **Infra (from an operator-submitted EXTERNAL audit, Gemini-authored,
+>   source-anonymized as a test):** observer.db converted to WAL +
+>   `synchronous=NORMAL` + 30s busy timeouts at all three runtime connect sites
+>   (a real `database is locked` had hit gate_monitor 2026-06-09); pytz dropped
+>   from scheduler (ZoneInfo only). Audit scorecard after per-claim code
+>   verification: 7 findings → 2 real, 1 already-known, 2 wrong, 1
+>   impossible-as-written, 1 by-design; its recommendations 2 and 4 were
+>   REJECTED — rec 2 (RECENTRE under STAND_ASIDE) would undo Fix 3, rec 4
+>   (recentre shadow sim on MAINTAIN) would corrupt the shadow comparison.
+> - **Restart (operator-approved, full checklist):** `magi.service` +
+>   `tape-collector.service` enabled + started, `magi-dashboard.service`
+>   restarted onto rebuilt code. Startup council gate woke on the config
+>   fingerprint change (disclosed spend); first cycle clean: **stance DEPLOY
+>   (the first stance ever recorded)**, THESIS_HOLDS → MAINTAIN, risk CLEAR, no
+>   hard-rule overrides; arbiter named its own exit conditions (skew > +0.60 or
+>   buffer < ~$5 → PAUSE_LONGS/HOLD). 72h stance-grading clock running.
+> - **New BINDING working rules** recorded in `03_INSTRUCTIONS_TO_CLAUDE.md`
+>   ("Rules established 2026-06-12"): money-path wording precision; own it,
+>   don't defend; scope is validation not yield; external-audit protocol;
+>   track-then-escalate.
+> - **Still open (hygiene, non-blocking):** tape/conditions.py 0.75% constants
+>   (fix when touching tape analytics); dashboard `_configured_live` omits
+>   engine live gate 4; TEMP DEBUG block `engine.py` simulate_fills; dead-ETH
+>   root crons; `validate_schema` points at dead Letta-era persona paths;
+>   untracked `optimize/f5_acceptance/`. Nothing committed — operator pushes.
+
 > **2026-06-11 — MAGI SHUT DOWN BY OPERATOR ORDER; FIVE-FIX REBUILD EXECUTED (Fixes
 > 1–4 BUILT + VERIFIED OFFLINE; Fix 5 acceptance test PENDING). NOT RESTARTED.**
 > The session began as an LLM-cost investigation and became a forced audit that

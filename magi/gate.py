@@ -479,14 +479,19 @@ def _compute_scorer_state(conn) -> dict:
     from config import GRID_LEVEL_FEE_PER_SIDE
 
     candles = conn.execute(
-        "SELECT timestamp, high, low FROM candles "
+        "SELECT timestamp, high, low, close FROM candles "
         "WHERE timeframe='1h' ORDER BY timestamp DESC LIMIT ?",
         (SCORER_LOOKBACK_HOURS,),
     ).fetchall()
     if not candles:
         return {"rank1": None, "rank1_pnl": None,
                 "deployed_pnl": None, "any_acceptable": False}
-    candles_list = [{"high": r["high"], "low": r["low"]} for r in candles]
+    # Chronological order + close path: the scorer counts swings over
+    # closes (>=24 required) — without 'close' every variant scored
+    # acceptable=False forever and T6/T7 never fired (dead 2026-06-09
+    # -> 2026-06-12).
+    candles_list = [{"high": r["high"], "low": r["low"], "close": r["close"]}
+                    for r in reversed(candles)]
     scored = score_variants(
         current_price=0.0,
         candles_1h=candles_list,
@@ -803,7 +808,7 @@ def evaluate_book_state_triggers(db_path: str) -> list:
     Non-blocking: own try/except per trigger; opens and commits its own
     connection (no overlap with evaluate_gate's connection)."""
     fired_ids: list = []
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30.0)
     conn.row_factory = sqlite3.Row
     try:
         open_buys, open_sells = _open_order_counts(conn)
@@ -858,7 +863,7 @@ def evaluate_gate(db_path: str) -> list:
     the observer loop.
     """
     fired_ids: list = []
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30.0)
     conn.row_factory = sqlite3.Row
     try:
         # --- Gather observation state -------------------------------

@@ -8,7 +8,17 @@ logger = logging.getLogger(__name__)
 
 
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
+    # timeout + WAL (2026-06-12): three threads write observer.db
+    # (scheduler, GateMonitor, Flask IPC) — a real 'database is locked'
+    # hit gate_monitor's ws_health insert on 2026-06-09. WAL lets readers
+    # and one writer overlap; journal_mode persists in the DB file, so
+    # the PRAGMA is a no-op after first conversion. synchronous=NORMAL
+    # is the recommended WAL pairing (corruption-safe; only the last
+    # commits are at risk on power loss). The daily GCS backup uses the
+    # sqlite3 .backup() API, which is WAL-safe.
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.row_factory = sqlite3.Row
     return conn
 
