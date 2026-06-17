@@ -879,8 +879,8 @@ HTML_TEMPLATE = """
         grid-template-columns: 1fr 1fr 1fr;
         grid-template-rows: auto auto;
         grid-template-areas:
-          ".       melchior  .        "
-          "casper  core      balthasar";
+          ".       balthasar .        "
+          "casper  core      melchior ";
         gap: 14px;
         padding: 24px;
         background: #050505;
@@ -1399,7 +1399,6 @@ HTML_TEMPLATE = """
     }
     </script>
 
-    <h2>Recent Orders</h2>
     <details>
         <summary style="cursor:pointer; color:#88aaff;">
             {% if recent_orders %}Recent Orders ({{ recent_orders|length }} rows){% else %}Recent Orders (none yet){% endif %}
@@ -1437,8 +1436,59 @@ HTML_TEMPLATE = """
         {% endif %}
     </details>
 
-    <details style="margin-bottom:10px;" id="d-council-accuracy">
-    <summary style="cursor:pointer; color:#88aaff; font-size:0.9em;">▸ Council Accuracy — paper run (click to expand)</summary>
+    <details style="margin-bottom:10px;" id="d-council-log" open>
+    <summary style="cursor:pointer; color:#88aaff; font-size:0.9em;">▸ Council Log — recent cycles (click to collapse)</summary>
+    <!-- ── Council Log: every recent cycle, deep-linked to its Langfuse
+         trace (full prompts/responses live there, not here) ────────── -->
+    <h2>Council Log</h2>
+    {% if council_log_rows %}
+    <table style="margin-top:10px;">
+        <tr>
+            <th>Time</th>
+            <th>Trigger</th>
+            <th>Casper</th>
+            <th>Melchior</th>
+            <th>Balthasar</th>
+            <th>Debate</th>
+            <th>Grid</th>
+            <th>Risk</th>
+            <th>Hard rules</th>
+            <th>Fills 6h</th>
+            <th>Trace</th>
+        </tr>
+        {% for d in council_log_rows %}
+        <tr>
+            <td style="color:#888;">{{ d.timestamp | et }}</td>
+            <td style="color:#ffaa00; font-size:0.8em;">{{ d.trigger or '—' }}</td>
+            <td style="font-size:0.8em;">{{ d.casper_r0_position or '—' }}</td>
+            <td style="font-size:0.8em;">{{ d.melchior_r0_position or '—' }}</td>
+            <td style="font-size:0.8em;">{{ d.balthasar_r0_position or '—' }}</td>
+            <td>{% if d.debate_triggered %}<span class="debate-flag-yes">YES</span>{% else %}<span class="debate-flag-no">no</span>{% endif %}</td>
+            <td class="{{ d.final_grid_action }}">{{ d.final_grid_action or '—' }}</td>
+            <td>{{ d.final_risk_action or '—' }}</td>
+            <td style="color:#ff8866; font-size:0.78em;">{{ d.override_tags|join(', ') if d.override_tags else '—' }}</td>
+            <td>{{ d.fills_6h if d.fills_6h is not none else '—' }}</td>
+            <td>
+                {% if d.trace_url %}
+                <a href="{{ d.trace_url }}" target="_blank" rel="noopener"
+                   style="color:#66ccff; text-decoration:underline;">trace →</a>
+                {% else %}<span style="color:#444;">—</span>{% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    <div style="color:#666; margin-top:10px;">No council cycles recorded yet.</div>
+    {% endif %}
+    </details>
+
+    <details style="margin-bottom:10px;" id="d-paper-analytics">
+    <summary style="cursor:pointer; color:#88aaff; font-size:0.9em;">▸ Paper-run analytics — council accuracy + outcome attribution (click to expand)</summary>
+    <div style="color:#cc8855; font-size:0.78em; margin:8px 0;">
+        ⚠ cycles before the 2026-06-12 five-fix rebuild graded the old 0.75% config
+        (and span a stopped-engine window) — read aggregates accordingly until
+        post-rebuild cycles mature
+    </div>
     <!-- ── Phase 5 PANEL 2: Accuracy Tracker — scoped to the paper run ── -->
     <h2>Council Accuracy (paper run)</h2>
     <div style="color:#666; font-size:0.78em; margin-bottom:8px;">
@@ -1454,7 +1504,10 @@ HTML_TEMPLATE = """
             </div>
             <div class="accuracy-line">
                 accuracy: <span class="num">{{ a.acc.accuracy_pct if a.acc.accuracy_pct is not none else '—' }}{{ '%' if a.acc.accuracy_pct is not none else '' }}</span>
-                <span style="color:#666;">({{ a.acc.positive_outcomes }}/{{ a.acc.total_calls }} scored)</span>
+                <span style="color:#666;">({{ a.acc.positive_outcomes }}/{{ a.acc.scored }} scored)</span>
+            </div>
+            <div style="color:#666; font-size:0.68em; margin-top:4px;">
+                {{ a.acc.total_calls }} eligible · {{ a.acc.excluded }} excluded{% if a.acc.excluded %} ({% for k, v in a.acc.excluded_reasons.items() if v %}{{ k }}: {{ v }}{{ ', ' if not loop.last else '' }}{% endfor %}){% endif %}
             </div>
             <div style="margin-top:10px;">
                 <div style="color:#666; font-size:0.7em; margin-bottom:4px;">conviction (last 30 cycles)</div>
@@ -1463,10 +1516,7 @@ HTML_TEMPLATE = """
         </div>
         {% endfor %}
     </div>
-    </details>
 
-    <details style="margin-bottom:10px;" id="d-outcome-attribution">
-    <summary style="cursor:pointer; color:#88aaff; font-size:0.9em;">▸ Outcome Attribution — paper run (click to expand)</summary>
     <!-- ── Phase 5 PANEL 5: Outcome Attribution — scoped to the paper run ── -->
     <h2>Outcome Attribution (paper run)</h2>
     <div style="color:#666; font-size:0.78em; margin-bottom:8px;">
@@ -1530,52 +1580,6 @@ HTML_TEMPLATE = """
         <div style="color:#666;">No 24h-backfilled cycles yet.</div>
         {% endif %}
     </div>
-    </details>
-
-    <details style="margin-bottom:10px;" id="d-council-log" open>
-    <summary style="cursor:pointer; color:#88aaff; font-size:0.9em;">▸ Council Log — recent cycles (click to collapse)</summary>
-    <!-- ── Council Log: every recent cycle, deep-linked to its Langfuse
-         trace (full prompts/responses live there, not here) ────────── -->
-    <h2>Council Log</h2>
-    {% if council_log_rows %}
-    <table style="margin-top:10px;">
-        <tr>
-            <th>Time</th>
-            <th>Trigger</th>
-            <th>Casper</th>
-            <th>Melchior</th>
-            <th>Balthasar</th>
-            <th>Debate</th>
-            <th>Grid</th>
-            <th>Risk</th>
-            <th>Hard rules</th>
-            <th>Fills 6h</th>
-            <th>Trace</th>
-        </tr>
-        {% for d in council_log_rows %}
-        <tr>
-            <td style="color:#888;">{{ d.timestamp | et }}</td>
-            <td style="color:#ffaa00; font-size:0.8em;">{{ d.trigger or '—' }}</td>
-            <td style="font-size:0.8em;">{{ d.casper_r0_position or '—' }}</td>
-            <td style="font-size:0.8em;">{{ d.melchior_r0_position or '—' }}</td>
-            <td style="font-size:0.8em;">{{ d.balthasar_r0_position or '—' }}</td>
-            <td>{% if d.debate_triggered %}<span class="debate-flag-yes">YES</span>{% else %}<span class="debate-flag-no">no</span>{% endif %}</td>
-            <td class="{{ d.final_grid_action }}">{{ d.final_grid_action or '—' }}</td>
-            <td>{{ d.final_risk_action or '—' }}</td>
-            <td style="color:#ff8866; font-size:0.78em;">{{ d.override_tags|join(', ') if d.override_tags else '—' }}</td>
-            <td>{{ d.fills_6h if d.fills_6h is not none else '—' }}</td>
-            <td>
-                {% if d.trace_url %}
-                <a href="{{ d.trace_url }}" target="_blank" rel="noopener"
-                   style="color:#66ccff; text-decoration:underline;">trace →</a>
-                {% else %}<span style="color:#444;">—</span>{% endif %}
-            </td>
-        </tr>
-        {% endfor %}
-    </table>
-    {% else %}
-    <div style="color:#666; margin-top:10px;">No council cycles recorded yet.</div>
-    {% endif %}
     </details>
 
     <div class="footer">

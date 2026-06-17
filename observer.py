@@ -772,6 +772,14 @@ def backfill_seat_accuracy_scores():
 
     conn = get_conn()
     try:
+        # 72h maturity cutoff computed in Python so the separator matches the
+        # stored ISO timestamps ('T'). SQLite datetime('now',...) yields a
+        # SPACE separator, which sorts AFTER 'T' (0x20 < 0x54) and wrongly
+        # excluded rows whose calendar date equalled the cutoff date — a
+        # self-healing ≤24h delivery delay at the boundary, never a loss.
+        # Mirrors backfill_stance_grades' cutoff so the two adjacent 72h
+        # maturity checks can't drift apart again.
+        cutoff_72h = (datetime.utcnow() - timedelta(hours=72)).isoformat()
         candidates = conn.execute(
             "SELECT cycle_id, timestamp, trace_id, "
             "       casper_r0_position, melchior_r0_position, "
@@ -781,8 +789,9 @@ def backfill_seat_accuracy_scores():
             "       hard_rule_overrides "
             "FROM debate_records "
             "WHERE trace_id IS NOT NULL AND seat_scores_pushed=0 "
-            "AND timestamp <= datetime('now', '-72 hours') "
-            "ORDER BY id LIMIT 5"
+            "AND timestamp <= ? "
+            "ORDER BY id LIMIT 5",
+            (cutoff_72h,),
         ).fetchall()
         if not candidates:
             return

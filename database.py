@@ -1856,7 +1856,10 @@ def _grade_casper_row(r, bars, ts_keys, n):
 
 def _grade_melchior_row(r, bars, ts_keys, n):
     """Melchior — verdict-conditional, no shared predicate:
-      THESIS_HOLDS        reality  — fills_6h>0 AND pnl_6h>=0 AND (pnl+unreal)>=0.
+      THESIS_HOLDS        sim 72h  — the DEPLOYED config's sim alpha clears FEE_FLOOR
+                                     AND no shown candidate beat it by > FEE_FLOOR
+                                     (a switch is only justified when its edge exceeds
+                                     the round-trip cost of getting there).
       NO_PROFITABLE_GRID  sim 72h  — simulate alpha_pct <= FEE_FLOOR (no fee-clearing
                                      grid existed). Graded, not raw-only: the raw
                                      "0 fills" alone re-teaches over-trading.
@@ -1867,17 +1870,60 @@ def _grade_melchior_row(r, bars, ts_keys, n):
     from grid.forward_sim import simulate, FEE_FLOOR, WINDOW_H
     verdict = r['position']
     if verdict == 'THESIS_HOLDS':
-        pnl = r['pnl_6h']
-        if pnl is None:
-            return None, 'missing_outcome'
-        fills = r['fills_6h'] or 0
-        unreal = r['unrealized_pnl_6h'] or 0.0          # COALESCE NULL -> 0.0
+        # Sim-graded as of 2026-06-12. The prior reality predicate (fills_6h>0
+        # AND pnl_6h>=0 AND pnl+unreal>=0) graded the market, not the verdict:
+        # at 1.5-2.5% spacing most 6h windows fill nothing, so every
+        # quiet-but-correct hold scored wrong (0/16 on the paper run) and the
+        # Journal fed Melchior false always-failing feedback. THESIS_HOLDS and
+        # NO_PROFITABLE_GRID now partition on the same exogenous FEE_FLOOR over
+        # the shared 72h horizon.
+        # TRADEOFF (accepted): truth-standard is the forward sim, not real
+        # fills — same basis as Casper / NO_PROFITABLE_GRID / Balthasar's
+        # counterfactual. Escalation fix if sim and reality diverge: once the
+        # wide grid has enough real round trips, compare matured sim grades
+        # against realized round-trip PnL over the same windows.
+        i = _decision_bar_index(ts_keys, r['timestamp'])
+        if i is None or i + WINDOW_H >= n:
+            return None, 'not_matured_72h'
+        raw = r['world_state']
+        if not raw:
+            return None, 'missing_world_state'
+        try:
+            ws = json.loads(raw)
+        except Exception:
+            return None, 'missing_world_state'
+        spacing = ws.get('current_spacing_pct')
+        levels = ws.get('current_levels')
+        if not spacing or not levels:
+            return None, 'missing_world_state'
+        # world_state levels are TOTAL (spacing_evaluator: n_pairs = levels//2);
+        # forward_sim n_levels is PER SIDE.
+        per_side = max(1, int(levels) // 2)
+        deployed = simulate(bars, i, spacing_pct=float(spacing), n_levels=per_side)
+        thesis_ok = deployed['alpha_pct'] > FEE_FLOOR
+        top = ws.get('scored_variants_top_10') or []
+        rank1 = top[0] if top else None
+        no_better = True
+        rival_note = "no scored candidates shown"
+        if rank1 and rank1.get('spacing_pct') and rank1.get('levels'):
+            r1_sp, r1_lv = float(rank1['spacing_pct']), int(rank1['levels'])
+            if (r1_sp, r1_lv) == (float(spacing), int(levels)):
+                rival_note = "rank-1 candidate = deployed config"
+            else:
+                rival = simulate(bars, i, spacing_pct=r1_sp,
+                                 n_levels=max(1, r1_lv // 2))
+                edge = rival['alpha_pct'] - deployed['alpha_pct']
+                no_better = edge <= FEE_FLOOR
+                rival_note = (f"best shown variant ({r1_lv}L/{r1_sp * 100:.2f}%) "
+                              f"sim alpha {rival['alpha_pct']:+.2f}%, edge "
+                              f"{edge:+.2f}% vs {FEE_FLOOR:.2f}% switch floor")
         return {
             'bucket': 'THESIS_HOLDS',
-            'correct': (fills > 0 and pnl >= 0 and (pnl + unreal) >= 0),
-            'basis': 'reality', 'estimated': False, 'label': 'THESIS_HOLDS',
-            'raw_outcome': (f"held grid: {fills} fills, realized {pnl:+.4f}, "
-                            f"unrealized {unreal:+.4f} (6h)"),
+            'correct': (thesis_ok and no_better),
+            'basis': 'sim', 'estimated': False, 'label': 'THESIS_HOLDS',
+            'raw_outcome': (f"held grid: deployed sim alpha "
+                            f"{deployed['alpha_pct']:+.2f}% vs fee floor "
+                            f"{FEE_FLOOR:.2f}% over {WINDOW_H}h; {rival_note}"),
         }, None
     if verdict == 'NO_PROFITABLE_GRID':
         i = _decision_bar_index(ts_keys, r['timestamp'])
@@ -2023,8 +2069,9 @@ def _score_casper(conn, bars, ts_keys, cutoff):
 
 def _score_melchior(conn, bars, ts_keys, cutoff):
     """Melchior — verdict-conditional. Per-verdict, no shared predicate:
-      THESIS_HOLDS  (reality)        correct iff fills_6h>0 AND pnl_6h>=0 AND
-                                     (pnl_6h + unrealized_pnl_6h) >= 0.
+      THESIS_HOLDS  (sim 72h)        correct iff the DEPLOYED config's sim alpha
+                                     > FEE_FLOOR AND no shown candidate beat it
+                                     by > FEE_FLOOR (switch-cost materiality bar).
       NO_PROFITABLE_GRID (sim 72h)   correct iff simulate alpha_pct <= FEE_FLOOR
                                      (no fee-clearing grid; 2*MAKER_FEE floor).
       RECONFIGURE   (decision-time PROXY) correct iff the best-ranked scored
@@ -2134,8 +2181,8 @@ def get_agent_accuracy(agent_id, days=7):
 
       casper    — regime-realized (forward_sim 72h label vs casper_r0_position),
                   PnL-independent. (see _score_casper)
-      melchior  — verdict-conditional (THESIS_HOLDS reality / NO_PROFITABLE_GRID
-                  sim / RECONFIGURE decision-time proxy). (see _score_melchior)
+      melchior  — verdict-conditional (THESIS_HOLDS sim 72h / NO_PROFITABLE_GRID
+                  sim 72h / RECONFIGURE decision-time proxy). (see _score_melchior)
       balthasar — total-PnL + applied-flag, with reality-graded (CLEAR/PROCEED)
                   and counterfactual-graded (applied veto, sim) kept SEPARATE.
                   (see _score_balthasar)
