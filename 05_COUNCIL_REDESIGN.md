@@ -1,0 +1,192 @@
+# 05 — Blind-Review Council (READ FIRST for the decision layer)
+
+**Written 2026-06-24 to orient a future Claude Code session.** As of this date the
+MAGI **decision layer** was rebuilt from the old *arbiter relay* into a
+**blind-review, equal-seats council**. This doc is authoritative for the council;
+it **supersedes** the council/decision-layer descriptions in `CLAUDE.md` §2–§3 and
+in `00`/`01`/`02`. Everything *below* the council — the engine (`grid/engine.py`),
+the hard-rule layer (`orchestrator.enforce_hard_rules`), the gate, world_state, and
+the data layout — is **unchanged**. If a council statement here disagrees with the
+older docs, this doc wins.
+
+---
+
+## TL;DR — where we are right now
+- **Code:** branch `council-redesign`, commit `fc62b93`, **pushed** to `origin`
+  (`aye5788/xrp_grid`). **NOT merged to `main`** — `main` still holds the dead arbiter.
+- **This box:** revival prep is done — `observer.db` restored (brain through
+  **2026-06-14**), `.env` → symlink to `/root/magi.env`, `.venv` built. **MAGI is
+  SHUT DOWN** (no services running or installed). Paper mode.
+- **Smoke-tested:** boots end-to-end and produces a valid decision. Melchior and
+  Balthasar (haiku) work. **Casper's *propose* call is broken (Gemini schema 400).
+  FIX THAT FIRST — see §4.**
+
+---
+
+## 1. The new architecture
+
+**Three EQUAL seats. No arbiter, no privileged seat, no synthesizer.** Governing
+principles (settled — do not reopen):
+- **P1 — equality:** the three seats are equals; none sees more or decides more.
+- **P2 — minimal rules:** the council is central; do not add static governance that
+  monitors/controls it, and do not bend the council to feed a monitor.
+- **P3 — non-consensus is the council's output, never a deterministic rule:** there
+  is **no most-reversible tiebreak** and **no external action-picker** anywhere.
+
+**Seats (models are cost-matched; no premium synthesizer tier):**
+| Seat | Vendor / model | Transport |
+|---|---|---|
+| Casper | Google `gemini-2.5-flash` | native Gemini via **ADK `output_schema`** |
+| Melchior | DeepSeek `deepseek-v4-pro` | Anthropic-compat endpoint, `thinking` **disabled** |
+| Balthasar | Anthropic `claude-haiku-4-5` | Anthropic (was `claude-sonnet-4-6` in the arbiter era — **changed**) |
+
+**Mechanism (in `magi/council_v2.py:run_council`):**
+1. **Phase 1 — propose:** 3 seats, in parallel, isolated (no peer context). Identical
+   scaffold; persona is a reasoning *lens* only. Each returns a `CandidateDecision`.
+2. **Phase 2 — review:** 3 seats, in parallel, cross-review the candidates with
+   **authorship stripped + template normalized + shuffled to A/B/C** (per-cycle seed).
+   Each returns a `Ranking` (best→worst).
+3. **Phase 3 — aggregate (deterministic, pure):** Condorcet check → Borda fallback.
+   A clear winner **is** the decision. A cycle/tie → `winner=None`.
+4. **Reconciliation:** if no stable winner, ONE more round showing the anonymized
+   split; seats revise; re-aggregate.
+5. **NO_CONSENSUS:** if still no winner → first-class decision ("no mandate, nothing
+   changes"). Not an error, not a fabricated rule.
+
+**Action space (the only values a seat may propose, + the decision-only NO_CONSENSUS):**
+`MAINTAIN | RECONFIGURE(geometry) | PAUSE_LONGS | PAUSE_SHORTS | STAND_ASIDE | HALT`
+and, at the decision level only, `NO_CONSENSUS`. **Regime is an INPUT** carried in
+`world_state` that all seats see — it is **not** a field any seat outputs (the old
+Casper regime grader is retired).
+
+**Seat-failure handling (honest, minimal):** retry once; if a clear tally remains
+from the responders, proceed; otherwise NO_CONSENSUS; log plainly. **No fabricated
+votes, no SAFE_DEFAULTS sentinels.** `council_error` is set **only** on a genuine
+convene crash, never for a designed NO_CONSENSUS.
+
+---
+
+## 2. Code map + integration seam
+
+**Changed/new files (all on `council-redesign`):**
+| File | What |
+|---|---|
+| `magi/council_v2.py` | rewritten — the 5-step flow above |
+| `magi/agents/aggregate.py` | **new** — Condorcet→Borda (no tiebreak); action→cons map |
+| `magi/agents/anonymize.py` | **new** — authorship strip + seeded A/B/C shuffle |
+| `magi/agents/seats.py` | **new** — symmetric `propose`/`review`; `MODELS`/`VENDORS` |
+| `magi/agents/schemas.py` | `CandidateDecision` + `Ranking`; regime fields dropped |
+| `database.py` | additive `council_json` column + `get_council_ledger` |
+| `magi/orchestrator.py` | 8-line additive: persist `council_json` to debate_records |
+| `observer.py` | retired the Casper regime grader |
+
+**The seam (unchanged from the arbiter era — the redesign plugs into it cleanly):**
+- `run_council(world_state, cycle_id, trigger=None) -> (round_0, round_1, cons)` —
+  **same signature/return** as before. Called at `orchestrator.py:run_cycle`.
+- The council emits **`grid_verdict`** (not `grid_action`). `enforce_hard_rules`
+  translates it via `_VERDICT_TO_GRID_ACTION`:
+  `THESIS_HOLDS→MAINTAIN`, `RECONFIGURE→RECENTRE`, `NO_PROFITABLE_GRID→GRID_PAUSE`.
+  The redesign's `aggregate._ACTION_TO_CONS` emits **only those three** verdict
+  values, so the unchanged table consumes them with no gaps.
+- `cons` carries the 3 **gating** axes (`grid_verdict`, `stance`, `risk_action`),
+  the record-only axes as `None` (`regime`, `regime_action`, `geometry_veto`,
+  `override_justification` → NULL columns), and `council_json`.
+- Engine geometry channel: winner geometry is written to
+  `round_0['melchior']['geometry']`, which `_final_consensus` forwards as
+  `melchior_geometry`. **Engine and hard-rule layer are not modified.**
+
+**Data:** `debate_records.council_json` holds
+`{decision, vote_multiset (authorship-free, e.g. "2x MAINTAIN, 1x RECONFIGURE"),
+consensus: clear|reconciled|none, reconciled: bool}`. `get_council_ledger` reads it,
+filtered by `config_version`; it is the council's own replay-safe memory, injected
+**identically** to all three seats. Historical (arbiter-era) rows have **NULL**
+`council_json` and are excluded. `config_version` **bumps at cutover** (haiku +
+`veto_mode="none_blind_review"`), so pre/post history partitions cleanly.
+
+---
+
+## 3. Current state (detail)
+
+- **GitHub:** `council-redesign` @ `fc62b93` on `aye5788/xrp_grid`. `main` is still the
+  arbiter — open a PR / merge when the council is healthy. Do **not** assume `main`
+  reflects this design.
+- **Brain restored from the GCS archive** (this is where the prior session stashed it):
+  `gs://xrp-grid-tape-backups-ayn88/project-final-archive/magi-final-archive-2026-06-17.tar.gz`.
+  Contains a full cold-restart guide (`magi_final_glue_2026-06-17/RESUME.md`), the
+  consistent `observer.db`, tape DBs, systemd/nginx units, `.env`, and the `magi_docs`
+  checkout. The restored `observer.db` (253 cycles, last 2026-06-14, `council_stance=DEPLOY`)
+  was migrated by the redesign's `init_db` (added `council_json`, old rows NULL,
+  integrity ok).
+- **Env:** code does `load_dotenv()` expecting `/root/xrp_grid/.env`; that's a symlink
+  to `/root/magi.env` (which holds all keys: ANTHROPIC/GOOGLE/DEEPSEEK + Langfuse/NTFY).
+- **Smoke test (`cyc_smoketest_boot`, frozen ws from `cyc_1781395248`):** decision
+  `STAND_ASIDE` (`grid_verdict=THESIS_HOLDS, stance=STAND_ASIDE, risk_action=PAUSE_LONGS`),
+  consensus clear, no council_error, **no DB write** (the standalone runner does not
+  insert a cycle row). Melchior 200, Balthasar/haiku 200 (×2 each), **Casper 400 on
+  propose** / 200 on review.
+
+---
+
+## 4. KNOWN BUG — fix this first
+
+**Casper (Gemini) cannot PROPOSE.** Its propose call 400s:
+`Invalid JSON payload ... Unknown name "additional_properties" at
+response_schema.properties[1].value` — `properties[1]` is the nested **`Geometry`**
+object in `CandidateDecision`.
+
+**Root cause:** the Anthropic seats go through `magi/agents/schema_tools.py:schema_for_tool`,
+which **strips `additionalProperties`** (native-Gemini rejects that key). Casper's
+Gemini path in `seats.py:_call_gemini` passes the Pydantic model straight to **ADK
+`output_schema`**, which **bypasses that strip**, so ADK serializes the nested geometry
+with `additional_properties` and Gemini 400s. The flat `Ranking` schema has no nested
+object, so Casper's *review* works — only *propose* is broken.
+
+**Why it's new:** in the arbiter era Casper emitted a flat regime vote (no nested
+object); only Melchior carried geometry, and Melchior is on the Anthropic path. Now
+all three share `CandidateDecision` (nested geometry) and Casper-on-Gemini never got
+the strip. **Net effect: a 2-seat propose council — breaks P1 (equal seats).**
+
+**Fix:** apply the `additionalProperties` strip to the schema handed to ADK on the
+Gemini path (mirror what `schema_for_tool` does for Anthropic) — e.g. sanitize the
+schema dict recursively before ADK builds its `response_schema`, or route Casper
+through a forced-function/tool schema like the other seats. **Verify** by re-running
+the §5 smoke test and confirming **3/3 propose calls return 200** and a 3-candidate
+`vote_multiset`.
+
+---
+
+## 5. How to run / revive
+
+**Standalone council (cheap, no services, the test path):**
+```
+cd /root/xrp_grid
+PYTHONPATH=/root/xrp_grid .venv/bin/python -m magi.council_v2 --json <ws.json> --cycle-id cyc_test
+```
+- Makes **real paid** seat calls. Without `--json` it calls `build_world_state()`
+  (hits Kraken for price; may fire a schema-drift alert → phone).
+- **Frozen ws fixture:** none ships in the repo. Get one by extracting the latest
+  `debate_records.world_state` from `observer.db`, or by dumping `build_world_state()`.
+
+**Dependency gap (IMPORTANT):** `requirements.txt` is **missing** `google-adk` and
+`icontract` (it pins `google-genai`, not `google-adk`). Install both explicitly:
+`.venv/bin/pip install google-adk icontract`. Note `google-adk` bumps `google-genai`
+from the pinned 1.74.0 to ~2.10.0 (pip check stays clean). Add these to
+`requirements.txt` for a reproducible fresh box.
+
+**Full revival of the running system:** follow `RESUME.md` in the GCS archive's
+`magi_final_glue_2026-06-17/` — it has the systemd/nginx units and the cold-restart
+sequence. Keep PAPER safety: `MAGI_LIVE_CONFIRM=NO`, `CONFIRM_LIVE` disarmed, and
+`system_state['paper_run_started_utc']` set (engine live-gate fails closed while it is).
+
+---
+
+## 6. What is now stale (don't be misled)
+These describe the **dead arbiter** and do **not** reflect the running council:
+- `CLAUDE.md` §2 "Layer 1 — Council judgment" and §3 (Balthasar-as-arbiter, sequential
+  Casper→Melchior→Balthasar synthesis, R1 rebuttal, Melchior verdict-only).
+- `00_PROJECT_OVERVIEW.md` council vote-field descriptions (regime/regime_action,
+  geometry_veto, six-call choreography).
+- `01_CURRENT_STATE.md` / `02_NEXT_BUILD_TASKS.md` references to the arbiter, the
+  synthesis vote, and the regime grader.
+The engine, hard rules, gate, data layout, paper/live toggle, and PnL scoping in
+those docs are **still accurate** — only the council/decision-layer parts changed.

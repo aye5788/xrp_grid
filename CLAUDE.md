@@ -1,5 +1,15 @@
 # CLAUDE.md
 
+> ⚠️ **DECISION LAYER REDESIGNED 2026-06-24 — READ `05_COUNCIL_REDESIGN.md` FIRST.**
+> The council was rebuilt from the *arbiter relay* into a **blind-review,
+> equal-seats** council (no arbiter; Balthasar is now `claude-haiku-4-5`, not
+> sonnet). It lives on branch **`council-redesign`** (`fc62b93`, pushed; **not**
+> merged to `main`). The council/decision-layer descriptions in §2–§3 below and in
+> `00`/`01`/`02` are **stale** — `05_COUNCIL_REDESIGN.md` is authoritative for the
+> council and lists exactly what's superseded, the current state, and the one known
+> bug (Casper's Gemini propose 400). Everything else here (engine, hard rules, gate,
+> data, paper/live) is still accurate.
+
 This file loads automatically at the start of every Claude Code session
 in this repo. It encodes operating context and intent. State (what is
 built, what is broken, what is next) lives in the five handoff docs at
