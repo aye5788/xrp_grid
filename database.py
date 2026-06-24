@@ -285,7 +285,9 @@ def init_db():
 
         config_version TEXT,
         config_snapshot TEXT,
-        override_justification TEXT
+        override_justification TEXT,
+
+        council_json TEXT
     )''')
     c.execute('''CREATE INDEX IF NOT EXISTS idx_debate_records_cycle_id
         ON debate_records (cycle_id)''')
@@ -362,6 +364,14 @@ def init_db():
         # unconfirmed rows every pass. NULL-trace rows are stamped 1 with
         # nothing to deliver.
         "ALTER TABLE debate_records ADD COLUMN stance_scores_pushed INTEGER DEFAULT 0",
+        # council_json: the blind-review council's OWN memory (redesign 2026-06-24).
+        # One JSON object per cycle: {decision, vote_multiset (authorship-free, e.g.
+        # "2x MAINTAIN, 1x RECONFIGURE"), consensus ("clear"|"reconciled"|"none"),
+        # reconciled (bool)}. The matured outcome (fills/pnl) is filled later by the
+        # existing backfill columns; get_council_ledger joins the two for recall.
+        # NULL on pre-redesign rows (the arbiter relay wrote no council_json) — those
+        # rows are not migrated. Written by orchestrator._build_debate_record.
+        "ALTER TABLE debate_records ADD COLUMN council_json TEXT",
     ):
         try:
             c.execute(_alter)
@@ -2416,6 +2426,114 @@ def get_agent_recall(agent_id, config_version, as_of=None):
         'config_version': cfg_version,
         'entries': entries,
         'block': _render_recall_block(entries),
+    }
+
+
+_LEDGER_HEADER = ("=== COUNCIL LEDGER — the council's own recent decisions and how "
+                  "they turned out (shared, authorship-free) ===")
+_LEDGER_EMPTY_SENTINEL = _LEDGER_HEADER + "\n(no prior council decisions yet)"
+
+
+def _render_ledger_block(entries):
+    """Render the council-ledger entries into a deterministic, prompt-ready block
+    injected IDENTICALLY to all three seats. Authorship-free by construction — it
+    carries the decision + the authorship-free vote multiset + the matured outcome,
+    never which seat proposed what. Empty -> the explicit sentinel."""
+    if not entries:
+        return _LEDGER_EMPTY_SENTINEL
+    lines = [_LEDGER_HEADER]
+    for e in entries:
+        outcome = e['outcome'] or "outcome pending"
+        lines.append(
+            f"[{e['date']}] decision={e['decision']} ({e['consensus']}) | "
+            f"votes [{e['vote_multiset']}] | {outcome}"
+        )
+    return "\n".join(lines)
+
+
+def get_council_ledger(config_version, as_of=None):
+    """The COUNCIL'S OWN memory — a pure SQLite read (NO model call), replay-safe:
+    the same inputs produce byte-identical output. Unlike the per-seat Journal
+    (get_agent_recall), this is ONE shared, authorship-free block injected IDENTICALLY
+    to all three seats in Phase 1 (the blind-review council is co-equal — no seat gets
+    a privileged view of the past). It stores only what the council needs to recall
+    its OWN past: the decision, the authorship-free vote multiset, the consensus class,
+    and the matured 24h outcome. Nothing here is added for auditing or monitoring.
+
+    Source: the additive `council_json` column (written by the blind-review council)
+    joined with the existing matured-outcome columns (fills_24h / pnl_24h, set later
+    by the backfill path). config_version is a PARAMETER supplied by the caller (the
+    decision layer owns the fingerprint); None -> EMPTY ledger (fail-safe miss, never
+    cross-config recall). Same boundary/lookback/count discipline as get_agent_recall:
+      (a) config boundary — only rows whose config_version EQUALS the argument.
+      (b) council-only — only rows that carry a council_json (pre-redesign rows have
+          NULL council_json and are skipped — no arbiter-relay history leaks in).
+      (c) bounds — most-recent RECALL_MAX_ITEMS rows within RECALL_LOOKBACK_DAYS.
+
+    Returns {as_of, config_version, entries, block}; `block` is the rendered text
+    (empty sentinel when nothing survives the filters)."""
+    cfg_version = config_version
+    conn = get_conn()
+    try:
+        if as_of is None:
+            row = conn.execute(
+                "SELECT MAX(timestamp) AS ts FROM debate_records").fetchone()
+            as_of = row['ts'] if row and row['ts'] else None
+
+        entries = []
+        if cfg_version is not None and as_of is not None:
+            as_of_s = as_of if isinstance(as_of, str) else as_of.isoformat()
+            try:
+                lower = (datetime.fromisoformat(as_of_s)
+                         - timedelta(days=RECALL_LOOKBACK_DAYS)).isoformat()
+            except ValueError:
+                lower = None
+            if lower is not None:
+                rows = conn.execute(
+                    "SELECT timestamp, council_json, fills_24h, pnl_24h, "
+                    "       outcome_24h_backfilled "
+                    "FROM debate_records "
+                    "WHERE config_version = ? "
+                    "  AND timestamp >= ? AND timestamp <= ? "
+                    "  AND council_json IS NOT NULL "
+                    "  AND id != ? "
+                    "  AND (cycle_id IS NULL OR cycle_id != ?) "
+                    "ORDER BY timestamp DESC, id DESC",
+                    (cfg_version, lower, as_of_s,
+                     _RECALL_EXCLUDE_ID, _RECALL_EXCLUDE_CYCLE_ID),
+                ).fetchall()
+                for r in rows:                      # most-recent first
+                    try:
+                        cj = json.loads(r['council_json']) if r['council_json'] else None
+                    except (ValueError, TypeError):
+                        cj = None
+                    if not isinstance(cj, dict):     # (b) council-only: skip unparseable
+                        continue
+                    outcome = None
+                    if r['outcome_24h_backfilled']:
+                        fills = r['fills_24h']
+                        pnl = r['pnl_24h']
+                        pnl_s = f"${pnl:+.2f}" if isinstance(pnl, (int, float)) else "n/a"
+                        outcome = f"24h: {fills if fills is not None else 'n/a'} fills, {pnl_s}"
+                    entries.append({
+                        'date': (r['timestamp'] or '')[:10],
+                        'decision': cj.get('decision'),
+                        'vote_multiset': cj.get('vote_multiset', ''),
+                        'consensus': cj.get('consensus'),
+                        'outcome': outcome,
+                    })
+                    if len(entries) >= RECALL_MAX_ITEMS:    # (c) bound count
+                        break
+                entries.reverse()                   # inject oldest -> newest
+    finally:
+        conn.close()
+
+    return {
+        'as_of': (as_of if isinstance(as_of, str)
+                  else (as_of.isoformat() if as_of else None)),
+        'config_version': cfg_version,
+        'entries': entries,
+        'block': _render_ledger_block(entries),
     }
 
 

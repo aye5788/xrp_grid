@@ -2067,6 +2067,14 @@ def _build_debate_record(cycle_id: str, trigger: str, world_state: dict,
         json.dumps(_cfg_snap, sort_keys=True, default=str)
         if isinstance(_cfg_snap, (dict, list)) else _cfg_snap
     )
+    # council_json: the blind-review council's own memory for this cycle — already a
+    # JSON STRING when carried from council_v2 ({decision, vote_multiset, consensus,
+    # reconciled}); binds straight to the TEXT column. A dict is tolerated and encoded
+    # here. NULL on the pre-redesign arbiter relay (which carried no council_json).
+    _cj = cons.get("council_json")
+    record["council_json"] = (
+        json.dumps(_cj, default=str) if isinstance(_cj, (dict, list)) else _cj
+    )
     # Per-agent freshness-retry flags from council.py's R0 validator. None of
     # the agents will carry the key if world_state wasn't passed through, so
     # default to False to preserve the JSON shape across cycles.

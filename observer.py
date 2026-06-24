@@ -765,8 +765,13 @@ def backfill_seat_accuracy_scores():
     neither right nor wrong). LIMIT 5 per pass keeps the score POSTs far
     under the Langfuse rate limit.
     """
+    # Casper's regime grader is RETIRED (blind-review redesign 2026-06-24): the
+    # council no longer outputs a regime, so casper_r0_position now records Casper's
+    # proposed ACTION, not a RANGING/TRENDING/UNCERTAIN regime — grading it as a
+    # regime would push garbage to Langfuse. Melchior's verdict and Balthasar's risk
+    # posture are still their own proposals, so those graders stay.
     from database import (
-        get_conn, _grade_casper_row, _grade_melchior_row, _grade_balthasar_row,
+        get_conn, _grade_melchior_row, _grade_balthasar_row,
     )
     from magi.agents import tracing
 
@@ -804,13 +809,13 @@ def backfill_seat_accuracy_scores():
 
         for row in candidates:
             r = dict(row)
+            # Casper's regime grader retired (see import note): blind-review records
+            # an action in casper_r0_position, not a regime — it is not graded here.
             seat_rows = {
-                'casper': {**r, 'position': r['casper_r0_position']},
                 'melchior': {**r, 'position': r['melchior_r0_position']},
                 'balthasar': {**r, 'position': r['balthasar_r0_position']},
             }
             graders = {
-                'casper': _grade_casper_row,
                 'melchior': _grade_melchior_row,
                 'balthasar': _grade_balthasar_row,
             }
