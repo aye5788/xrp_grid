@@ -2112,6 +2112,43 @@ def _grade_action_row(r, bars, ts_keys, n):
     }, None
 
 
+def _score_action_seat(conn, seat, bars, ts_keys, cutoff):
+    """Blind-review seat accuracy — UNIFORM across all three co-equal seats (P1):
+    grade each seat's RAW action ({seat}_r0_action) via _grade_action_row over the 72h
+    forward sim. Same back-compat shape as _score_casper, deliberately WITHOUT the
+    arbiter-era role breakdowns (Melchior by_verdict / Balthasar reality-counterfactual)
+    — those don't apply to a single co-equal action. Rows with no action
+    ({seat}_r0_action NULL: arbiter-era or a non-responder) are not selected, so
+    eligible_calls==0 means "no blind-review data — use the legacy scorer". Uses the
+    SAME _grade_action_row the observer/Langfuse seat scores use, so the dashboard
+    accuracy panel and the Langfuse scores cannot diverge. `seat` is a fixed member of
+    _VALID_AGENT_IDS (never user input), so the column interpolation is safe."""
+    n = len(bars)
+    col = f"{seat}_r0_action"
+    rows = conn.execute(
+        f"SELECT {col} AS action, timestamp FROM debate_records "
+        f"WHERE timestamp >= ? AND {col} IS NOT NULL",
+        (cutoff,)
+    ).fetchall()
+    scored = correct = not_matured = 0
+    for r in rows:
+        grade, _reason = _grade_action_row(dict(r), bars, ts_keys, n)
+        if grade is None:
+            not_matured += 1
+            continue
+        scored += 1
+        if grade['correct']:
+            correct += 1
+    acc = round(correct / scored * 100.0, 2) if scored else None
+    return {
+        'eligible_calls': len(rows),
+        'role_basis': 'action_realized_72h',
+        'scored': scored, 'correct': correct, 'accuracy_pct': acc,
+        'excluded': not_matured,
+        'excluded_reasons': {'not_matured_72h': not_matured},
+    }
+
+
 def _score_casper(conn, bars, ts_keys, cutoff):
     """Casper — regime-realized, PnL-independent, 72h horizon. A call is correct
     iff casper_r0_position == the forward-realized regime label (forward_sim:
@@ -2297,12 +2334,20 @@ def get_agent_accuracy(agent_id, days=7):
     try:
         bars = load_1h(conn)
         ts_keys = [b[0][:19] for b in bars]     # normalised ascending bisect keys
-        if agent_id == 'casper':
-            role = _score_casper(conn, bars, ts_keys, cutoff)
-        elif agent_id == 'melchior':
-            role = _score_melchior(conn, bars, ts_keys, cutoff)
-        else:  # balthasar
-            role = _score_balthasar(conn, bars, ts_keys, cutoff)
+        # Era dispatch: if the seat has any blind-review rows ({seat}_r0_action) in the
+        # window, score them UNIFORMLY via the action grader — the SAME predicate the
+        # observer/Langfuse seat scores use, so the two surfaces can't diverge. Only
+        # when there is NO blind-review data do we fall back to the legacy per-role
+        # scorer (arbiter-era history). is_action gates the role-specific output below.
+        role = _score_action_seat(conn, agent_id, bars, ts_keys, cutoff)
+        is_action = role['eligible_calls'] > 0
+        if not is_action:
+            if agent_id == 'casper':
+                role = _score_casper(conn, bars, ts_keys, cutoff)
+            elif agent_id == 'melchior':
+                role = _score_melchior(conn, bars, ts_keys, cutoff)
+            else:  # balthasar
+                role = _score_balthasar(conn, bars, ts_keys, cutoff)
     finally:
         conn.close()
 
@@ -2315,7 +2360,7 @@ def get_agent_accuracy(agent_id, days=7):
         'excluded': role['excluded'],
         'excluded_reasons': role['excluded_reasons'],
     }
-    if agent_id == 'balthasar':
+    if agent_id == 'balthasar' and not is_action:
         out['reality_graded'] = role['reality_graded']
         out['counterfactual_graded'] = role['counterfactual_graded']
         # Back-compat scalars: REALITY basis ONLY (never blended w/ counterfactual).
@@ -2328,10 +2373,13 @@ def get_agent_accuracy(agent_id, days=7):
             "counterfactual_graded and are deliberately NOT summed into them."
         )
     else:
+        # Uniform path: every blind-review seat (and legacy Casper/Melchior). The
+        # arbiter-era role extras (Melchior by_verdict, Balthasar reality/counterfactual
+        # split) apply ONLY to legacy rows, never to the co-equal action grade.
         out['scored'] = role['scored']
         out['positive_outcomes'] = role['correct']
         out['accuracy_pct'] = role['accuracy_pct']
-        if agent_id == 'melchior':
+        if agent_id == 'melchior' and not is_action:
             out['by_verdict'] = role['by_verdict']
     return out
 
