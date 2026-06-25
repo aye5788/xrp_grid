@@ -1124,7 +1124,7 @@ HTML_TEMPLATE = """
         {% set m_conv = latest_debate.melchior_r0_conviction or 0 %}
         {% set m_cls = 'conv-high' if m_conv >= 0.75 else ('conv-med' if m_conv >= 0.5 else 'conv-low') %}
         <div class="magi-agent agent-melchior {{ m_cls }}">
-          <div class="agent-name">MELCHIOR · 1</div>
+          <div class="agent-name">MELCHIOR</div>
           <div class="agent-position">{{ latest_debate.melchior_r0_position or '—' }}</div>
           <div class="agent-conviction">conv {{ '%.2f'|format(m_conv) }}</div>
         </div>
@@ -1134,18 +1134,25 @@ HTML_TEMPLATE = """
           {% if latest_debate_age_label %}
           <div class="core-age">{{ latest_debate_age_label }}</div>
           {% endif %}
+          {% if latest_is_blind_review and council_decision %}
+          <div class="core-decision" style="margin-top:6px; font-size:10px; line-height:1.5;">
+            <div style="color:#88ccff; letter-spacing:1px;">{{ council_decision.decision or '—' }}</div>
+            {% if council_decision.vote_multiset %}<div style="color:#999;">votes [{{ council_decision.vote_multiset }}]</div>{% endif %}
+            {% if council_decision.consensus %}<div style="color:#777; text-transform:uppercase; letter-spacing:1px;">{{ council_decision.consensus }}</div>{% endif %}
+          </div>
+          {% endif %}
         </div>
         {% set c_conv = latest_debate.casper_r0_conviction or 0 %}
         {% set c_cls = 'conv-high' if c_conv >= 0.75 else ('conv-med' if c_conv >= 0.5 else 'conv-low') %}
         <div class="magi-agent agent-casper {{ c_cls }}">
-          <div class="agent-name">CASPER · 3</div>
+          <div class="agent-name">CASPER</div>
           <div class="agent-position">{{ latest_debate.casper_r0_position or '—' }}</div>
           <div class="agent-conviction">conv {{ '%.2f'|format(c_conv) }}</div>
         </div>
         {% set b_conv = latest_debate.balthasar_r0_conviction or 0 %}
         {% set b_cls = 'conv-high' if b_conv >= 0.75 else ('conv-med' if b_conv >= 0.5 else 'conv-low') %}
         <div class="magi-agent agent-balthasar {{ b_cls }}">
-          <div class="agent-name">BALTHASAR · 2</div>
+          <div class="agent-name">BALTHASAR</div>
           <div class="agent-position">{{ latest_debate.balthasar_r0_position or '—' }}</div>
           <div class="agent-conviction">conv {{ '%.2f'|format(b_conv) }}</div>
         </div>
@@ -1181,7 +1188,11 @@ HTML_TEMPLATE = """
             scrolling="no"></iframe>
 
     {% if latest_debate and latest_debate.deadlock %}
+    {% if latest_is_blind_review %}
+    <div class="deadlock-banner">NO CONSENSUS ON LAST CYCLE — grid defaulted to its safe stance (a valid council outcome, not an error)</div>
+    {% else %}
     <div class="deadlock-banner">⚠ DEADLOCK ON LAST CYCLE — HUMAN REVIEW REQUESTED</div>
+    {% endif %}
     {% endif %}
     {% if council_override_tags %}
     <div class="override-line">Hard rule overrides applied: {{ council_override_tags|join(', ') }}</div>
@@ -1449,7 +1460,7 @@ HTML_TEMPLATE = """
             <th>Casper</th>
             <th>Melchior</th>
             <th>Balthasar</th>
-            <th>Debate</th>
+            <th>Consensus</th>
             <th>Grid</th>
             <th>Risk</th>
             <th>Hard rules</th>
@@ -1463,7 +1474,16 @@ HTML_TEMPLATE = """
             <td style="font-size:0.8em;">{{ d.casper_r0_position or '—' }}</td>
             <td style="font-size:0.8em;">{{ d.melchior_r0_position or '—' }}</td>
             <td style="font-size:0.8em;">{{ d.balthasar_r0_position or '—' }}</td>
+            {% if d.is_blind_review %}
+            <td style="font-size:0.78em;">
+              {% if d.consensus_class == 'no_consensus' %}<span style="color:#ffaa44;">no-consensus</span>
+              {% elif d.consensus_class == 'reconciled' %}<span style="color:#88ccff;">reconciled</span>
+              {% elif d.consensus_class == 'clear' %}<span style="color:#66cc88;">clear</span>
+              {% else %}<span style="color:#666;">—</span>{% endif %}
+            </td>
+            {% else %}
             <td>{% if d.debate_triggered %}<span class="debate-flag-yes">YES</span>{% else %}<span class="debate-flag-no">no</span>{% endif %}</td>
+            {% endif %}
             <td class="{{ d.final_grid_action }}">{{ d.final_grid_action or '—' }}</td>
             <td>{{ d.final_risk_action or '—' }}</td>
             <td style="color:#ff8866; font-size:0.78em;">{{ d.override_tags|join(', ') if d.override_tags else '—' }}</td>
@@ -2056,6 +2076,34 @@ def _fetch_council_data():
             if nrow and nrow['notes']:
                 override_tags = sorted(set(_re.findall(r"\[([A-Z_]+)\]", nrow['notes'])))
 
+    # Blind-review decision summary for the latest cycle. The redesign records the
+    # authorship-free decision (winning action / NO_CONSENSUS), the vote multiset, and
+    # the consensus class (clear / reconciled / no_consensus) in council_json — none of
+    # which exist in the arbiter-era rows. A row is blind-review iff it carries a seat
+    # action column or a council_json blob; the template renders redesign vocabulary
+    # only for those, falling back to the legacy view otherwise.
+    latest_is_blind_review = False
+    council_decision = None
+    if latest_debate:
+        latest_is_blind_review = bool(
+            latest_debate.get('casper_r0_action')
+            or latest_debate.get('melchior_r0_action')
+            or latest_debate.get('balthasar_r0_action')
+            or latest_debate.get('council_json')
+        )
+        cj_raw = latest_debate.get('council_json')
+        if cj_raw:
+            try:
+                cj = _json.loads(cj_raw) if isinstance(cj_raw, str) else cj_raw
+                council_decision = {
+                    'decision': cj.get('decision'),
+                    'vote_multiset': cj.get('vote_multiset'),
+                    'consensus': cj.get('consensus'),
+                    'reconciled': bool(cj.get('reconciled')),
+                }
+            except (ValueError, TypeError):
+                council_decision = None
+
     # Paper-run scope start (set at the 2026-06-09 paper book reset).
     conn0 = get_conn()
     _ps = conn0.execute(
@@ -2104,7 +2152,8 @@ def _fetch_council_data():
     log_rows = conn.execute(
         "SELECT cycle_id, timestamp, trigger, "
         "casper_r0_position, melchior_r0_position, balthasar_r0_position, "
-        "debate_triggered, final_grid_action, final_risk_action, "
+        "casper_r0_action, debate_triggered, deadlock, council_json, "
+        "final_grid_action, final_risk_action, "
         "hard_rule_overrides, fills_6h, trace_id "
         "FROM debate_records ORDER BY id DESC LIMIT 20"
     ).fetchall()
@@ -2118,6 +2167,22 @@ def _fetch_council_data():
             tags = []
         d['override_tags'] = [t.strip('[]') for t in tags if isinstance(t, str)]
         d['trace_url'] = _langfuse_trace_url(d.get('trace_id'))
+        # Era-aware consensus label for the log's Consensus column. Blind-review rows
+        # carry the consensus class in council_json (clear / reconciled / no_consensus);
+        # arbiter rows fall back to the legacy debate_triggered flag.
+        d['is_blind_review'] = bool(d.get('casper_r0_action') or d.get('council_json'))
+        consensus = None
+        cj_raw = d.get('council_json')
+        if cj_raw:
+            try:
+                cj = _json.loads(cj_raw) if isinstance(cj_raw, str) else cj_raw
+                if cj.get('decision') == 'NO_CONSENSUS' or d.get('deadlock'):
+                    consensus = 'no_consensus'
+                else:
+                    consensus = 'reconciled' if cj.get('reconciled') else 'clear'
+            except (ValueError, TypeError):
+                consensus = None
+        d['consensus_class'] = consensus
         council_log.append(d)
 
     cutoff = paper_cutoff
@@ -2171,6 +2236,8 @@ def _fetch_council_data():
         'latest_debate':          latest_debate,
         'latest_debate_age_label': latest_debate_age_label,
         'latest_debate_age_color': latest_debate_age_color,
+        'latest_is_blind_review': latest_is_blind_review,
+        'council_decision':       council_decision,
         'council_override_tags':  override_tags,
         'council_accuracy':       council_accuracy,
         'conviction_sparklines_svg': sparklines_svg,
@@ -2199,9 +2266,11 @@ def _langfuse_trace_url(trace_id):
 
 
 _LLM_CALLS_CACHE = {'ts': 0.0, 'data': None}
-_SEAT_CALL_NAMES = ('casper', 'melchior', 'balthasar',
-                    'casper:rebuttal', 'melchior:rebuttal',
-                    'balthasar:synthesis')
+# Blind-review seat generations are named by the bare seat (the phase —
+# propose / review / reconcile — lives in span metadata, not the name; see
+# magi/agents/tracing.py:trace_seat). The arbiter-era ':rebuttal'/':synthesis'
+# span names are retired with the relay council.
+_SEAT_CALL_NAMES = ('casper', 'melchior', 'balthasar')
 
 
 def _fetch_llm_calls_24h_safe():
@@ -2209,11 +2278,13 @@ def _fetch_llm_calls_24h_safe():
     per-seat calls since the 2026-06-09 rebuild — the local token_usage table
     stopped being written at the Letta decoupling).
 
-    Counts ONLY the six named seat spans, because each cycle trace also
-    carries auto-instrumented inner SDK spans (ADK generate_content,
-    call_llm) that duplicate the same vendor calls — a raw GENERATION
-    count overstates by ~1.7x. Traces = council cycles (includes manual/
-    scratch runs, deliberately — off-service calls should be visible).
+    Counts ONLY the named seat spans (casper / melchior / balthasar),
+    because each cycle trace also carries auto-instrumented inner SDK spans
+    (ADK generate_content, call_llm) that duplicate the same vendor calls — a
+    raw GENERATION count overstates by ~1.7x. A seat may emit more than one
+    generation per cycle (propose + reconcile phases), each counted as a real
+    call. Traces = council cycles (includes manual/scratch runs, deliberately
+    — off-service calls should be visible).
 
     Cached 60s per process. Falls back to a debate_records cycle count
     (calls=None) if Langfuse is unreachable. Never raises.
@@ -2305,53 +2376,76 @@ _AGENT_HEALTH_ORDER = ('casper', 'melchior', 'balthasar')
 
 def _fetch_agent_health():
     """
-    Per-agent degradation health computed from the last 3 R0 rows per agent
-    in debate_records.
+    Per-agent degradation health computed from the last 3 council rows in
+    debate_records. ERA-AWARE — the blind-review and arbiter eras record a
+    degraded seat differently, so each row is classified and graded on its own
+    era's fingerprint (mirrors database._score_action_seat / the era dispatch in
+    observer.backfill_seat_accuracy_scores):
 
-    Safe-default fingerprint: conviction == 0.0 AND crux LIKE '(no response)%'.
-    Same gate magi/council.py uses in SAFE_DEFAULTS — anything matching it is
-    a parse-failure / model-degradation event, not a real response.
+      blind-review row (any seat has a non-NULL {seat}_r0_action): a seat is
+        degraded iff ITS OWN action is NULL while a peer responded — i.e. the
+        cycle ran and this seat failed to produce a candidate. There is no
+        SAFE_DEFAULTS sentinel in this era (a non-responder is simply absent),
+        so the legacy crux fingerprint never fires here.
+      arbiter-era row (all three actions NULL): the legacy SAFE_DEFAULTS
+        fingerprint — conviction ≈ 0 AND crux LIKE '(no response)%' — the
+        parse-failure / model-degradation marker magi/council.py used.
 
-    Returns:
-      {agent_id: {status, degraded_count, total, model}}
+    A full-council-crash row (every action NULL, no '(no response)' crux) is
+    neither era's degradation signal and is ignored here — that is a council-level
+    failure surfaced via alerts, not a per-seat health event.
 
-    Status thresholds:
-      0 of 3 degraded → 'green'
-      1 of 3 degraded → 'yellow'
-      2 or 3 degraded → 'red'
-
-    Empty / missing data → status='green' (no signal yet, don't false-alarm).
+    Returns: {agent_id: {status, degraded_count, total, model}}
+    Status: 0 degraded → green, 1 → yellow, 2-3 → red.
+    Empty / missing data → green (no signal yet, don't false-alarm).
     """
     from database import get_conn
+    # Model labels come from the authoritative live lineup (seats.MODELS, the
+    # declared single source of truth), NOT the agent_registry table — that table
+    # held the arbiter-era models (e.g. Balthasar claude-sonnet-4-6) and drifted
+    # stale when the redesign dropped Balthasar to claude-haiku-4-5.
+    try:
+        from magi.agents.seats import MODELS as _LIVE_MODELS
+    except Exception:
+        _LIVE_MODELS = {}
     out = {}
     conn = get_conn()
     try:
-        registry_rows = conn.execute(
-            "SELECT agent_id, model FROM agent_registry"
+        model_by_agent = {a: _LIVE_MODELS.get(a, '') for a in _AGENT_HEALTH_ORDER}
+
+        cols = ", ".join(
+            f"{a}_r0_action AS {a}_act, {a}_r0_conviction AS {a}_conv, "
+            f"{a}_r0_crux AS {a}_crux"
+            for a in _AGENT_HEALTH_ORDER
+        )
+        rows = conn.execute(
+            f"SELECT {cols} FROM debate_records ORDER BY id DESC LIMIT 3"
         ).fetchall()
-        model_by_agent = {r['agent_id']: (r['model'] or '') for r in registry_rows}
+
+        def _legacy_degraded(conv, crux):
+            conv_zero = (conv is None) or (abs(float(conv)) < 1e-9)
+            return conv_zero and (crux or '').startswith('(no response)')
 
         for agent in _AGENT_HEALTH_ORDER:
-            rows = conn.execute(
-                f"SELECT {agent}_r0_conviction AS conv, "
-                f"       {agent}_r0_crux AS crux "
-                f"FROM debate_records ORDER BY id DESC LIMIT 3"
-            ).fetchall()
-            degraded = 0
-            total = len(rows)
+            degraded = total = 0
             for r in rows:
-                conv = r['conv']
-                crux = r['crux'] or ''
-                # Tolerate a tiny float epsilon on conviction
-                conv_zero = (conv is None) or (abs(float(conv)) < 1e-9)
-                if conv_zero and crux.startswith('(no response)'):
-                    degraded += 1
-            if degraded == 0:
-                status = 'green'
-            elif degraded == 1:
-                status = 'yellow'
-            else:
-                status = 'red'
+                blind_review_cycle = any(
+                    r[f'{a}_act'] is not None for a in _AGENT_HEALTH_ORDER
+                )
+                if blind_review_cycle:
+                    total += 1
+                    if r[f'{agent}_act'] is None:       # peers answered, this seat didn't
+                        degraded += 1
+                else:
+                    # arbiter-era / pre-blind-review row. Scoreable for this seat only
+                    # if it carried a real signal (conviction or crux); a full-council
+                    # crash (all NULL, no '(no response)') is no-signal and ignored.
+                    conv, crux = r[f'{agent}_conv'], r[f'{agent}_crux']
+                    if conv is not None or crux:
+                        total += 1
+                        if _legacy_degraded(conv, crux):
+                            degraded += 1
+            status = 'green' if degraded == 0 else 'yellow' if degraded == 1 else 'red'
             out[agent] = {
                 'status': status,
                 'degraded_count': degraded,
