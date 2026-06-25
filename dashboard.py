@@ -2829,4 +2829,13 @@ def api_readiness():
 if __name__ == "__main__":
     from magi import adam
     adam.init("dashboard")
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    host, port = '0.0.0.0', 5000
+    # Production: serve under waitress (a real WSGI server). Flask's built-in
+    # app.run() is dev tooling and is not meant to sit behind the cloudflared
+    # tunnel long-term. Fall back to app.run only if waitress is somehow absent,
+    # so a dev box without it still boots.
+    try:
+        from waitress import serve
+        serve(app, host=host, port=port, threads=8)
+    except ModuleNotFoundError:
+        app.run(host=host, port=port, debug=False)
