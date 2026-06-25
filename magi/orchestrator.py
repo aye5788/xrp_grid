@@ -1970,6 +1970,9 @@ def _build_debate_record(cycle_id: str, trigger: str, world_state: dict,
         record[f"{agent}_r0_position"]   = (
             r0.get("verdict") if agent == "melchior" else r0.get("position")
         )
+        # Raw proposed action (lossless) for the symmetric blind-review seat grader.
+        # NULL on a non-responding seat and on arbiter-era rows (no action authored).
+        record[f"{agent}_r0_action"]     = r0.get("action")
         try:
             record[f"{agent}_r0_conviction"] = float(r0.get("conviction") or 0.0)
         except (TypeError, ValueError):

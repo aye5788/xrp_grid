@@ -765,13 +765,15 @@ def backfill_seat_accuracy_scores():
     neither right nor wrong). LIMIT 5 per pass keeps the score POSTs far
     under the Langfuse rate limit.
     """
-    # Casper's regime grader is RETIRED (blind-review redesign 2026-06-24): the
-    # council no longer outputs a regime, so casper_r0_position now records Casper's
-    # proposed ACTION, not a RANGING/TRENDING/UNCERTAIN regime — grading it as a
-    # regime would push garbage to Langfuse. Melchior's verdict and Balthasar's risk
-    # posture are still their own proposals, so those graders stay.
+    # Blind-review rows (a {seat}_r0_action is present) grade ALL THREE co-equal seats
+    # with the one symmetric forward-realized action grader (_grade_action_row) — the
+    # equal-seats P1 fix: every seat's own proposed ACTION graded on the same anchored
+    # predicate. The legacy per-role graders (_grade_melchior_row verdict,
+    # _grade_balthasar_row risk) are kept ONLY for arbiter-era rows, which carry no
+    # action columns; Casper's retired regime grader stays unused for those (its
+    # casper_r0_position is a regime, deliberately ungraded).
     from database import (
-        get_conn, _grade_melchior_row, _grade_balthasar_row,
+        get_conn, _grade_melchior_row, _grade_balthasar_row, _grade_action_row,
     )
     from magi.agents import tracing
 
@@ -789,6 +791,7 @@ def backfill_seat_accuracy_scores():
             "SELECT cycle_id, timestamp, trace_id, "
             "       casper_r0_position, melchior_r0_position, "
             "       balthasar_r0_position, "
+            "       casper_r0_action, melchior_r0_action, balthasar_r0_action, "
             "       fills_6h, pnl_6h, unrealized_pnl_6h, world_state, "
             "       geometry_veto, final_grid_action, final_risk_action, "
             "       hard_rule_overrides "
@@ -807,21 +810,31 @@ def backfill_seat_accuracy_scores():
         n = len(bars)
         TRANSIENT = {'not_matured_72h', 'missing_outcome'}
 
+        _SEATS = ('casper', 'melchior', 'balthasar')
         for row in candidates:
             r = dict(row)
-            # Casper's regime grader retired (see import note): blind-review records
-            # an action in casper_r0_position, not a regime — it is not graded here.
-            seat_rows = {
-                'melchior': {**r, 'position': r['melchior_r0_position']},
-                'balthasar': {**r, 'position': r['balthasar_r0_position']},
-            }
-            graders = {
-                'melchior': _grade_melchior_row,
-                'balthasar': _grade_balthasar_row,
-            }
+            # Era dispatch: a blind-review row carries at least one {seat}_r0_action.
+            # Grade all three co-equal seats on their raw action (symmetric, P1);
+            # arbiter-era rows have no action columns -> legacy role-specific graders
+            # (Casper's regime grader stays retired there).
+            is_blind_review = any(r.get(f'{s}_r0_action') for s in _SEATS)
+            if is_blind_review:
+                probe = 'action'
+                seat_rows = {s: {**r, 'action': r.get(f'{s}_r0_action')} for s in _SEATS}
+                graders = {s: _grade_action_row for s in _SEATS}
+            else:
+                probe = 'position'
+                seat_rows = {
+                    'melchior': {**r, 'position': r['melchior_r0_position']},
+                    'balthasar': {**r, 'position': r['balthasar_r0_position']},
+                }
+                graders = {
+                    'melchior': _grade_melchior_row,
+                    'balthasar': _grade_balthasar_row,
+                }
             grades, all_resolved = {}, True
             for seat, grader in graders.items():
-                if seat_rows[seat]['position'] is None:
+                if seat_rows[seat].get(probe) is None:
                     continue  # seat never voted — permanently ungradeable
                 grade, reason = grader(seat_rows[seat], bars, ts_keys, n)
                 if grade is not None:

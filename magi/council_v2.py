@@ -306,8 +306,13 @@ def _own_r0(candidates: dict[str, Any]) -> dict[str, dict]:
     A non-responding seat is simply absent (its columns read NULL — no sentinel)."""
     r0: dict[str, dict] = {}
     for seat, c in candidates.items():
+        # `action` is each seat's RAW proposed action — the lossless record the
+        # symmetric forward-realized seat grader needs (the verdict/risk projections
+        # below are lossy). Recorded per responding seat only; a non-responder is
+        # absent and its *_r0_action column reads NULL (ungraded, not wrong).
         base = {"conviction": float(c.conviction),
-                "key_evidence": list(c.key_evidence or []), "crux": c.rationale}
+                "key_evidence": list(c.key_evidence or []), "crux": c.rationale,
+                "action": c.action}
         if seat == "melchior":
             r0["melchior"] = {"verdict": agg.verdict_for(c.action), "geometry": None, **base}
         elif seat == "casper":

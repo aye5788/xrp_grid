@@ -372,6 +372,15 @@ def init_db():
         # NULL on pre-redesign rows (the arbiter relay wrote no council_json) — those
         # rows are not migrated. Written by orchestrator._build_debate_record.
         "ALTER TABLE debate_records ADD COLUMN council_json TEXT",
+        # Per-seat RAW proposed action (blind-review redesign) — the lossless record
+        # the symmetric forward-realized seat grader reads (the *_r0_position columns
+        # hold lossy verdict/risk projections). NOT injected into the council (kept
+        # out of council_json, which is the authorship-free ledger), so grading
+        # authorship can't leak back into the blind review. NULL on a non-responding
+        # seat and on every arbiter-era row. Written by _build_debate_record.
+        "ALTER TABLE debate_records ADD COLUMN casper_r0_action TEXT",
+        "ALTER TABLE debate_records ADD COLUMN melchior_r0_action TEXT",
+        "ALTER TABLE debate_records ADD COLUMN balthasar_r0_action TEXT",
     ):
         try:
             c.execute(_alter)
@@ -2039,6 +2048,67 @@ def _grade_balthasar_row(r, bars, ts_keys, n):
         'basis': 'reality', 'estimated': False, 'label': pos,
         'raw_outcome': (f"applied {pos}: total PnL realized {pnl:+.4f} + "
                         f"unrealized {unreal:+.4f} (6h)"),
+    }, None
+
+
+def _grade_action_row(r, bars, ts_keys, n):
+    """Blind-review SYMMETRIC seat grader — one anchored predicate for ALL THREE
+    co-equal seats (governing principle P1), grading each seat's RAW proposed action
+    (r['action'] from {seat}_r0_action) against the shared 72h forward sim. This is
+    NOT a per-role special-case ladder (the old per-seat regime/verdict/risk graders);
+    it collapses them onto TWO axes, each matched to what the action actually controls:
+
+      grid-run/stop — graded on GRID ECONOMICS (grid-vs-hold alpha):
+        MAINTAIN / RECONFIGURE  correct iff the forward grid harvested above costs
+                                -> sim alpha_pct >  FEE_FLOOR
+        HALT                    correct iff running it would have bled vs hold
+                                -> sim alpha_pct < -FEE_FLOOR
+      exposure-direction — graded on realized PRICE DIRECTION (not grid alpha; a
+        de-risk through a rally must score wrong, which the alpha axis would miss):
+        STAND_ASIDE / PAUSE_LONGS  correct iff price fell -> forward drift < 0
+        PAUSE_SHORTS               correct iff price rose -> forward drift > 0
+
+    Anchored ONLY to FEE_FLOOR (exogenous: 2*MAKER_FEE, the round-trip break-even) and
+    the forward price direction — no thresholds fit to data — and it reuses the exact
+    forward_sim truth-standard every other grader already uses. OBSERVABILITY ONLY:
+    the grade is mirrored to Langfuse and never feeds back into a council decision or
+    vote weight (the tally stays flat). Ungradeable iff the 72h window is not yet
+    fully covered by candles, or no action was authored (non-responder / arbiter-era
+    row -> NULL, neither right nor wrong)."""
+    from grid.forward_sim import simulate, FEE_FLOOR, WINDOW_H
+    action = r.get('action')
+    if not action:
+        return None, 'no_action'
+    i = _decision_bar_index(ts_keys, r['timestamp'])
+    if i is None or i + WINDOW_H >= n:
+        return None, 'not_matured_72h'
+    d = simulate(bars, i)
+    a, drift = d['alpha_pct'], d['drift_pct']
+    if action in ('MAINTAIN', 'RECONFIGURE'):
+        correct = a > FEE_FLOOR
+        note = (f"deployed ({action}); forward grid alpha {a:+.2f}% vs fee floor "
+                f"{FEE_FLOOR:.2f}% over {WINDOW_H}h")
+    elif action == 'HALT':
+        # grid-STOP decision: correct iff running the grid would have bled vs hold.
+        correct = a < -FEE_FLOOR
+        note = (f"halted; forward grid alpha {a:+.2f}% vs -{FEE_FLOOR:.2f}% "
+                f"bleed floor over {WINDOW_H}h")
+    elif action in ('STAND_ASIDE', 'PAUSE_LONGS'):
+        # withhold / shed LONG exposure: graded on realized DIRECTION, not grid
+        # alpha — these are right iff price fell (a de-risk through a rally is wrong,
+        # which the grid-alpha axis would mis-score). Matches the stance grader.
+        correct = drift < 0
+        verb = 'stood aside' if action == 'STAND_ASIDE' else 'paused longs'
+        note = f"{verb} ({action}); forward drift {drift:+.2f}% over {WINDOW_H}h"
+    elif action == 'PAUSE_SHORTS':
+        # withhold SELL side: right iff price rose.
+        correct = drift > 0
+        note = f"paused shorts; forward drift {drift:+.2f}% over {WINDOW_H}h"
+    else:
+        return None, 'unknown_action'
+    return {
+        'bucket': 'action', 'correct': bool(correct), 'basis': 'sim',
+        'estimated': False, 'label': action, 'raw_outcome': note,
     }, None
 
 
