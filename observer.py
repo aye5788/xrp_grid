@@ -423,6 +423,17 @@ def _decision_baseline_equity(cycle_id):
     return None
 
 
+def _vote_distinct_count(multiset):
+    """Distinct proposed-action count from an authorship-free vote multiset string
+    like '2x STAND_ASIDE, 1x MAINTAIN' -> 2 (each comma segment is one distinct
+    action; the aggregator never repeats an action). 1 == unanimous. None if the
+    string is empty/unparseable. Used for the vote_spread / vote_unanimous scores."""
+    if not multiset or not isinstance(multiset, str):
+        return None
+    segs = [s for s in (p.strip() for p in multiset.split(',')) if s]
+    return len(segs) or None
+
+
 def _push_outcome_scores(cycle_id: str, window: str) -> bool:
     """Mirror the cycle's matured {window} outcome metrics onto its Langfuse
     trace as scores, so decision quality is monitorable next to cost/latency/
@@ -447,7 +458,7 @@ def _push_outcome_scores(cycle_id: str, window: str) -> bool:
             "       casper_r0_position, melchior_r0_position, "
             "       balthasar_r0_position, "
             "       casper_r0_conviction, melchior_r0_conviction, "
-            "       balthasar_r0_conviction, "
+            "       balthasar_r0_conviction, council_json, "
             "       fills_1h, pnl_1h, "
             "       fills_6h, pnl_6h, unrealized_pnl_6h, grid_alive_6h, "
             "       fills_24h, pnl_24h, unrealized_pnl_24h "
@@ -524,6 +535,24 @@ def _push_outcome_scores(cycle_id: str, window: str) -> bool:
                               'balthasar_r0_conviction')
                 ]
                 scores['conviction_shift'] = round(sum(deltas) / 3, 4)
+            # B3: the council's OWN decision quality, from council_json (redesign rows
+            # only — NULL on arbiter-era rows, so these are simply absent there).
+            # Known at decision time; mirrored on the 1h touchpoint via the same
+            # convergent delivery. Observability only — never feeds a decision.
+            cj_raw = row['council_json']
+            if cj_raw:
+                try:
+                    cj = _json.loads(cj_raw)
+                except (ValueError, TypeError):
+                    cj = None
+                if isinstance(cj, dict):
+                    scores['decision_action'] = cj.get('decision') or 'unknown'
+                    scores['consensus_type'] = cj.get('consensus') or 'unknown'
+                    scores['reconciled'] = bool(cj.get('reconciled'))
+                    distinct = _vote_distinct_count(cj.get('vote_multiset'))
+                    if distinct is not None:
+                        scores['vote_spread'] = distinct
+                        scores['vote_unanimous'] = (distinct == 1)
         conn.close()
         from magi.agents import tracing
         return tracing.push_trace_scores(row['trace_id'], scores)

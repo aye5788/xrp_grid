@@ -186,6 +186,37 @@ def set_trace_tags(trace_id: str, tags: list):
         log.warning("set_trace_tags(%s) failed: %s", trace_id, e)
 
 
+def set_trace_session(trace_id: str, session_id: str):
+    """Set the sessionId on an EXISTING trace via the same trace-create MERGE the
+    tags use (SDK 4.7.1 has no public trace-update method). Grouping cycles into a
+    session — one per paper run — is what turns the loose per-cycle traces into a
+    navigable run timeline in Langfuse's Sessions view instead of isolated islands.
+    Fire-and-forget like everything in this module."""
+    if not trace_id or not session_id:
+        return
+    try:
+        import os
+        import uuid
+        from datetime import datetime, timezone
+        import requests
+        base = (os.environ.get("LANGFUSE_BASE_URL") or "").rstrip("/")
+        pub = os.environ.get("LANGFUSE_PUBLIC_KEY")
+        sec = os.environ.get("LANGFUSE_SECRET_KEY")
+        if not (base and pub and sec):
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        batch = {"batch": [{
+            "id": str(uuid.uuid4()),
+            "type": "trace-create",
+            "timestamp": now,
+            "body": {"id": trace_id, "sessionId": str(session_id)},
+        }]}
+        requests.post(f"{base}/api/public/ingestion", json=batch,
+                      auth=(pub, sec), timeout=3)
+    except Exception as e:  # noqa: BLE001 - tracing never breaks the caller
+        log.warning("set_trace_session(%s) failed: %s", trace_id, e)
+
+
 def push_trace_scores(trace_id: str, scores: dict, comment: str | None = None):
     """Attach scores to an EXISTING trace via the public REST API (the SDK's
     score path needs an active span context; the outcome backfill runs hours

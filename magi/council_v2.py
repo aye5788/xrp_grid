@@ -441,6 +441,18 @@ def run_council(world_state: dict, cycle_id: str,
             "gate_triggered": bool(trigger and trigger.startswith("gate_wake"))}):
         trace_id = tracing.current_trace_id()
         tracing.set_trace_tags(trace_id, [f"trigger:{trigger or 'unknown'}"])
+        # B4: group cycles into a Langfuse session — one per paper run (the natural
+        # run boundary: a book reset starts a new paper_run_started_utc -> new
+        # session). Falls back to config_version, then 'ungrouped', so a trace
+        # always lands in some session rather than floating loose.
+        try:
+            from database import get_system_state
+            _prs = get_system_state('paper_run_started_utc', default='') or ''
+        except Exception:
+            _prs = ''
+        _session = (f"paper-run:{_prs}" if _prs
+                    else f"config:{cfg_version}" if cfg_version else "ungrouped")
+        tracing.set_trace_session(trace_id, _session)
 
         # Shared council ledger — the council's OWN recent decisions + matured outcomes,
         # authorship-free, injected IDENTICALLY to all three seats (not per-seat recall).
