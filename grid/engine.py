@@ -593,17 +593,6 @@ class GridEngine:
                        candle_high: float = None,
                        candle_low: float = None):
         """Paper mode: check which resting orders would be filled at current price."""
-        # TEMP DEBUG (candle-completeness verification) — log inputs before
-        # walking orders. Remove once the get_latest_candle_hl fix is confirmed
-        # in production.
-        open_count = sum(
-            1 for o in self.paper_orders.values() if o.get('status') == 'open'
-        )
-        log.info(
-            f"[SIMFILLS DEBUG] price={current_price} "
-            f"candle_high={candle_high} candle_low={candle_low} "
-            f"open_orders={open_count}"
-        )
         filled = []
         for order_id, order in list(self.paper_orders.items()):
             if order['status'] != 'open':
@@ -636,8 +625,11 @@ class GridEngine:
                 self.paper_inventory['usd'] += order['size'] * order['price']
 
             if filled_flag:
+                # A resting limit order fills at its OWN limit price (which the
+                # inventory debit/credit and fee above already use), never the spot
+                # price at check time — recording spot here was a cosmetic mismatch.
                 order['status'] = 'filled'
-                order['fill_price'] = current_price
+                order['fill_price'] = order['price']
                 fee = order['size'] * order['price'] * MAKER_FEE
                 order['fee'] = fee
                 now_iso = datetime.utcnow().isoformat()
@@ -645,13 +637,13 @@ class GridEngine:
                     update_grid_order_status(
                         order_id, 'filled',
                         filled_at=now_iso,
-                        fill_price=current_price,
+                        fill_price=order['price'],
                         fee=fee
                     )
                 except Exception as e:
                     log.warning(f"Failed to persist fill for {order_id}: {e}")
                 filled.append(order)
-                log.info(f"[PAPER FILL] {order['side'].upper()} {order['size']} XRP @ {current_price} fee={fee:.4f}")
+                log.info(f"[PAPER FILL] {order['side'].upper()} {order['size']} XRP @ {order['price']} fee={fee:.4f}")
 
         if filled and self.shadow_sim:
             try:
