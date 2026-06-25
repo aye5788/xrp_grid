@@ -423,6 +423,39 @@ def _decision_baseline_equity(cycle_id):
     return None
 
 
+# === LANGFUSE SCORE SCHEMA (B6, 2026-06-25) =========================================
+# Reference map of every score the observer mirrors to Langfuse. Two invariants hold
+# for ALL of them:
+#   * They attach to the cycle's TRACE (council-cycle:<cycle_id>), never to a single
+#     seat observation. Per-seat signals are told apart by NAME (casper_*/melchior_*/
+#     balthasar_*) — that naming is what makes them queryable, so per-observation
+#     attachment would add nothing.
+#   * They are OBSERVABILITY ONLY — nothing here feeds back into a council decision or
+#     vote weight.
+# The OWNING FUNCTION is the single source of truth for each family (named so this
+# comment cannot silently drift from the code):
+#
+#   family          names                                           type      when  owner
+#   outcome 1h      fills_1h, pnl_1h                                 NUM       1h    _push_outcome_scores
+#   reiteration 1h  hard_rule_overridden, council_changed,          BOOL/CAT/ 1h    _push_outcome_scores
+#                   judgment_changed, trigger_class, conviction_shift NUM
+#   decision 1h(B3) decision_action, consensus_type, reconciled,     CAT/BOOL/ 1h    _push_outcome_scores
+#                   vote_spread, vote_unanimous  (redesign rows only) NUM
+#   outcome 6h      fills_6h, pnl_6h, unrealized_pnl_6h, grid_alive_6h NUM/BOOL 6h   _push_outcome_scores
+#   outcome 24h     fills_24h, pnl_24h, unrealized_pnl_24h           NUM       24h   _push_outcome_scores
+#   seat accuracy   casper_correct, melchior_correct,               BOOL      72h   backfill_seat_accuracy_scores
+#                   balthasar_correct  (blind-review: symmetric                      (_grade_action_row; arbiter-era
+#                   action grade for ALL three co-equal seats)                       rows use legacy graders)
+#   stance          stance, stance_correct                          CAT/BOOL  72h   backfill_stance_grades
+#   effect          fee_share_7d, net_harvest_7d, wakes_per_day,     NUM/BOOL  daily push_daily_effect_scores
+#                   wake_yield, cap_*, matches_backtest
+#
+# Trace-level grouping: a trigger:<class> TAG (set_trace_tags) + a sessionId of one
+# session per paper run (set_trace_session, B4). Delivery is receipt-convergent (retries
+# until every POST is 2xx); a sustained outage raises the edge-triggered
+# 'langfuse_delivery_degraded' alert (B5, _note_langfuse_delivery) instead of silently
+# piling up. No score is ever lost — only delayed — under a Langfuse outage.
+# ====================================================================================
 def _vote_distinct_count(multiset):
     """Distinct proposed-action count from an authorship-free vote multiset string
     like '2x STAND_ASIDE, 1x MAINTAIN' -> 2 (each comma segment is one distinct
@@ -561,6 +594,35 @@ def _push_outcome_scores(cycle_id: str, window: str) -> bool:
         return False
 
 
+def _note_langfuse_delivery(ok: bool):
+    """Edge-triggered Langfuse score-delivery health signal (B5). Score pushes are
+    receipt-convergent and retry silently every pass, so without this a prolonged
+    Langfuse outage piles up undelivered scores with NO operator signal (the exact
+    silent-loss gap). Writes ONE warn-level magi_alert on the transition INTO a
+    degraded state (not one per failed window per pass) and an info row on recovery,
+    edge-tracked via the system_state flag 'langfuse_delivery_degraded'. warn/info
+    are dashboard-only (no ntfy). No data is lost either way — the sweep converges
+    when Langfuse recovers; this only surfaces the lag so it is not invisible."""
+    from database import get_system_state, set_system_state, insert_alert
+    degraded = (get_system_state('langfuse_delivery_degraded', default='0') or '0') == '1'
+    if not ok and not degraded:
+        set_system_state('langfuse_delivery_degraded', '1')
+        try:
+            insert_alert('warn', 'langfuse_delivery_degraded',
+                         "Langfuse score delivery incomplete (429/outage) — scores are "
+                         "queued and converge when Langfuse recovers; no data lost, "
+                         "mirror lagging.")
+        except Exception:
+            pass
+    elif ok and degraded:
+        set_system_state('langfuse_delivery_degraded', '0')
+        try:
+            insert_alert('info', 'langfuse_delivery_recovered',
+                         "Langfuse score delivery recovered; mirror caught up.")
+        except Exception:
+            pass
+
+
 def push_pending_outcome_scores():
     """Convergent Langfuse mirror sweep (2026-06-11). For every window,
     re-attempt the score push for each backfilled-but-unconfirmed cycle and
@@ -577,6 +639,8 @@ def push_pending_outcome_scores():
     under the rate limit in backlog situations; anything dropped converges
     on later passes. Never raises."""
     from database import get_pending_score_pushes, mark_outcome_scores_pushed
+    any_attempt = False
+    any_fail = False
     for window in ('1h', '6h', '24h'):
         try:
             pending = get_pending_score_pushes(window)
@@ -585,16 +649,24 @@ def push_pending_outcome_scores():
             continue
         for cycle_id in pending[:3]:
             try:
+                any_attempt = True
                 if _push_outcome_scores(cycle_id, window):
                     mark_outcome_scores_pushed(cycle_id, window)
                     log.info(f"score sweep: {cycle_id} {window} delivered")
                 else:
+                    any_fail = True
                     log.warning(
                         f"score sweep: {cycle_id} {window} not delivered — "
                         f"will retry next pass"
                     )
             except Exception as e:
+                any_fail = True
                 log.error(f"score sweep: {cycle_id} {window} failed: {e}")
+    # B5: edge-triggered delivery-health signal — only when we actually attempted a
+    # push this pass (no pending work must not flip the state). Surfaces a sustained
+    # Langfuse outage on the dashboard instead of retrying silently forever.
+    if any_attempt:
+        _note_langfuse_delivery(ok=not any_fail)
 
 
 def push_daily_effect_scores():
