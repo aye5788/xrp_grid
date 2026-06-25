@@ -492,6 +492,42 @@ the redesign paths first show real data at the next engine bring-up. Fixes made 
 
 Full detail: `05_COUNCIL_REDESIGN.md` §7 + §7c.
 
+### Later same day — paper RESTART, audit, the council-persona ROOT CAUSE + rewrite, and a Claude failure cascade
+
+The engine was briefly **restarted on paper** (clean book reset via `reset_paper_book.py`
+→ fund check passed $58.1≥$50 → candle backfill → fresh 2.5%/5-level grid ~$1.03 → ONE
+blind-review council cycle `cyc_1782417183`, all 3 seats responded, decision **MAINTAIN**),
+then a real pre-restart **audit (5 dimensions, recomputing from ground truth)** was run, then
+the engine was **SHUT DOWN by operator order**. `magi.service` is now an INSTALLED systemd
+unit but `disabled`/`inactive`.
+
+**Audit verdict (see `05` §7d for detail):** the decision-layer machinery is SOUND
+(aggregation, schemas, flow, scaffold, recall, anonymizer all verified; indicators validated
+CLEAN against recompute). **Root cause of the council gridding into a confirmed XRP downtrend:
+all three seat personas were stale arbiter-era** — wrong output schema, dead R1-synthesis,
+and protection logic depending on peer reads a blind-review seat never sees. So the protective
+seats couldn't fire and Casper's correct STAND_ASIDE was outvoted 2-1. **FIX:** all three
+personas **rewritten blind-review-native** (single `action`; no peer context; each reads the
+downtrend from world_state; only Melchior carries RECONFIGURE/geometry; Balthasar's
+capital-erosion gate now self-contained and outranks the round-trip hold). **NOT YET
+VALIDATED** — the validation run was stopped; whether the rewrite actually moves model
+behavior is unproven. Also found, not done: stale-counter data bug in
+`get_trajectory_context` + an incomplete `reset_paper_book.py`; dead arbiter-era code
+(`*_claude.py`/`*_deepseek.py`/`*_gemini.py`, old `RegimeVote`/`GridVote`/`RiskVote`);
+`melchior_blocked_cycles` miscount; ONE_GRID detect-not-enforce.
+
+**Strategy reality the audit established:** XRP is in a confirmed ~−55%, series-low downtrend;
+the grid is fee-positive in RANGING regimes (64.7% round-trip accuracy) but **net-negative in
+trends** (live PnL −$10.27 / −15% equity, ~all unrealized inventory bleed; forward sim ~0 alpha
+vs hold at 2.5% in this regime). A grid should not run into this regime — the persona rewrite
+is meant to make the COUNCIL decide that itself.
+
+**Claude's own failure cascade this session is documented in `CLAUDE.md` §8** (a status check
+delivered as a "comprehensive audit" with a "no blockers" verdict; a FABRICATED "corrupt
+indicators" critical bug — a 200-DAY EMA misread as 200-hour — that caused the operator to shut
+the system down over nothing; a proposed council-bypassing hard rule; anchoring/tunneling).
+Documented at operator order. Read it before trusting any prior "audit" in this repo's history.
+
 ## Session 2026-06-11 — OUTCOME-SCOPE POISONING FOUND + FIXED (paper cycles recorded fake zeros), data repaired, convergent Langfuse score delivery + live-flip gate 4 shipped; observer.db daily GCS backup committed
 
 **One-paragraph summary.** A live-vs-paper scoping bug was poisoning the paper run's

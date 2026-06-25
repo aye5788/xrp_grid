@@ -37,10 +37,22 @@ disagree, the handoff docs win for state; this file wins for how to work.
 > timeouts; pytz dropped from scheduler). LETTA FULLY
 > DECOUPLED. Decision layer = the hand-rolled arbiter orchestrator
 > (`magi/council_v2.py`), live on a GATE-PRIMARY cadence.**
-> **As of 2026-06-25: the trading engine `magi.service` is SHUT DOWN (deliberate,
-> paper-mode hold); `magi-dashboard.service` IS running — waitress on :5000, public
-> at `https://api.ethobs.uk`. The Casper propose 400 is FIXED and the Langfuse
-> instrumentation was rebuilt — see `05_COUNCIL_REDESIGN.md` §7.** The engine is
+> **As of 2026-06-25 (END of session): the trading engine `magi.service` is SHUT
+> DOWN by operator order; `magi-dashboard.service` IS running — waitress on :5000,
+> public at `https://api.ethobs.uk`. SEQUENCE this session: the engine was
+> briefly RESTARTED on paper (clean book reset → fresh 2.5%/5-level grid around
+> ~$1.03 → one blind-review council cycle, decision MAINTAIN), then a real audit
+> found the council grids into a confirmed XRP downtrend, and the operator ordered
+> it SHUT DOWN. The `magi.service` systemd unit now exists and is INSTALLED but
+> `disabled`/`inactive`. `reset_paper_book.py` (repo root, untracked) is the clean
+> reset; it is INCOMPLETE — it does not clear the trajectory/exposure counters
+> derived from `magi_decisions` (stale-counter bug, see `05`/`02`). The Casper
+> propose 400 is FIXED and the Langfuse instrumentation was rebuilt — see
+> `05_COUNCIL_REDESIGN.md` §7. **All three council personas were REWRITTEN
+> blind-review-native (§7d in `05`) to fix the root cause — they had been stale
+> arbiter-era — but the rewrite is NOT yet validated.** A full pre-restart audit ran
+> (5 dimensions) and a serious chain of Claude's own failures occurred — both
+> documented in §8 above and `05` §7d.** The engine is
 > in PAPER mode — the live toggle is disarmed (`.env` `MAGI_LIVE_CONFIRM=NO`,
 > `CONFIRM_LIVE` renamed `CONFIRM_LIVE.disarmed.20260609`), so no real Kraken orders
 > are placed; fills are SIMULATED against real market prices into a paper ledger
@@ -730,6 +742,60 @@ Patterns that have cost real time. Lesson per item.
   framing in handoff docs did not match observed behavior. *Lesson:*
   when the docs describe a mechanism, verify it fires at expected
   frequency before assuming it is doing work.
+
+### Session 2026-06-25 — a compounding failure cascade (Claude's, documented at operator order)
+
+A pre-restart "audit" and the bring-up that followed went badly. The chain, owned
+plainly so it is not repeated:
+
+- **A status check was delivered as a "comprehensive audit."** Before arming the
+  paper restart, the audit validated that the code *ran* and handled the blind-review
+  era structurally, then declared **"no blockers, correctly built."** It never
+  validated the actual VALUES flowing into the council, nor the QUALITY of a real
+  decision against the design goal. This is the exact substitution §7 warns against —
+  shipped anyway. The real defects (below) were all missed by it. *Lesson:* an audit
+  that does not recompute the council's inputs against ground truth and measure a
+  real decision against `>50% accuracy / fee-positive / survive` is a status check.
+  Do not call it an audit.
+
+- **A non-existent "critical bug" was fabricated, and the operator shut the system
+  down over it.** Reviewing the first live cycle, `EMA200=1.56` (with price `1.03`)
+  was declared "impossible / corrupt indicators" — by assuming it was a **200-hour**
+  EMA and comparing it to the hourly range. It is a **200-DAY** EMA (`observer.py:159`
+  computes EMA/ADX/BB from daily candles); ~1.5 is correct for XRP's real multi-month
+  decline from ~$2.07. Independent recompute later matched it to the digit (EMA50
+  exact, EMA200 within 0.7%). A working paper system was halted over an alarm that was
+  itself the error. *Lesson:* verify a value's UNITS/timeframe and recompute it against
+  ground truth BEFORE declaring it impossible. A false alarm is worse than a missed one.
+
+- **The proposed "fix" was to bolt a hard rule the council could not override.** When
+  the audit (finally, under operator pressure) found the council grids into a
+  downtrend, the first instinct was a deterministic `PAUSE_LONGS` rule in
+  `enforce_hard_rules` — exactly the **static rule creep / council bypass** forbidden
+  by P1–P2 and the operator's standing mandate ("improve the council, never bypass
+  it"). *Lesson:* a bad council decision is fixed INSIDE the council (seats /
+  aggregation), never by a rule that strips its judgment.
+
+- **Anchoring + tunneling.** Each step fixated on one thing (one indicator's plumbing;
+  then "the personas are THE issue") to the exclusion of a systematic sweep, and only
+  swept the whole layer when the operator demanded it. *Lesson:* on a "is this the
+  only issue" question, enumerate and check every component before answering; do not
+  present the first root cause found as the whole truth.
+
+- **THE ACTUAL ROOT CAUSE (found on the real audit):** the council redesign rebuilt
+  the machinery (schemas, propose→review→aggregate, anonymizer — all verified sound)
+  but **left all three seat personas in their stale arbiter-era form** — wrong output
+  schema (`position`/`verdict`/`stance`/`geometry_veto`), dead R1-synthesis sections,
+  and protection logic that depends on **"Casper's regime read"** as an input a
+  blind-review seat never sees. So the seats improvised onto the real action space and
+  the protective seats (Casper by regime, Balthasar by capital-erosion) could not
+  reliably fire — Casper stood alone and was outvoted into a confirmed downtrend (the
+  #1 documented grid-bleed failure mode). Fixed by rewriting all three personas
+  blind-review-native (single `action` over the shared space; no peer context; each
+  reads the downtrend from world_state directly; only Melchior carries
+  RECONFIGURE/geometry). **The rewrite is NOT yet validated** — the validation run was
+  not completed. *Lesson:* a layer redesign is incomplete until the PERSONAS that
+  drive it are rewritten for it; matching them is foundational, not "prompt tuning."
 
 ## 9. Operator preferences
 

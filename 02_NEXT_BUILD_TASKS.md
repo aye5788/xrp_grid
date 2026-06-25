@@ -1,5 +1,31 @@
 # Next Build Tasks
 
+> **TOP OF QUEUE 2026-06-25 (end of session) — council-layer open items, in order.
+> Engine SHUT DOWN by operator order; do NOT restart until at least (1) and (2) are
+> done and the operator directs it. Full context: `05_COUNCIL_REDESIGN.md` §7d,
+> `01_CURRENT_STATE.md` Session 2026-06-25, failure log in `CLAUDE.md` §8.**
+> 1. **VALIDATE the persona rewrite.** All three personas were rewritten
+>    blind-review-native to stop the council gridding into a downtrend, but the
+>    validation run was STOPPED. Re-run `run_council` on `cyc_1782417183`'s stored
+>    `world_state` (or fresh) and confirm the decision flips from MAINTAIN to
+>    protection (STAND_ASIDE/PAUSE_LONGS). Persona edits can fail to move haiku/
+>    deepseek/gemini behavior — until this passes, the fix is unproven. THIS GATES
+>    any restart.
+> 2. **Fix the stale-counter data bug.** `database.get_trajectory_context()` derives
+>    `regime_consecutive`/`cycles_since_structural_change`/`melchior_blocked_cycles`
+>    from the last 5 `magi_decisions` rows; `reset_paper_book.py` clears none of them
+>    (nor `down_walk_last_centre`/`down_walk_last_ts`). Floor the lookback at
+>    `paper_run_started_utc` (and clear the down_walk anchors in the reset). Also fix
+>    `melchior_blocked_cycles` (it string-compares `THESIS_HOLDS` to `'MAINTAIN'`).
+> 3. **Delete dead arbiter-era code:** `magi/agents/balthasar_claude.py`,
+>    `melchior_deepseek.py`, `casper_gemini.py`, and the `RegimeVote`/`GridVote`/
+>    `RiskVote` classes in `schemas.py` — imported by nothing live.
+> 4. **ONE_GRID invariant** (`engine.py:750`) detects-but-does-not-enforce — make it
+>    prevent a second grid, not just log.
+> 5. Strategy reality: the audit established the grid is net-NEGATIVE in trends (live
+>    −$10.27 / −15% equity; ~0 alpha vs hold at 2.5% in this downtrend). The persona
+>    rewrite is meant to make the COUNCIL stand aside in such regimes — confirm via (1).
+
 > **CURRENCY NOTE 2026-06-25 — the trading engine is currently SHUT DOWN (paper
 > hold), so the "watching" direction below is paused. This session reconnected the
 > dashboard, rebuilt the Langfuse instrumentation, and fixed the Casper propose 400 —

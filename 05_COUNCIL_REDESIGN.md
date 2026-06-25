@@ -342,3 +342,73 @@ redesign paths first light up when the engine next runs. The fixes were made
   no blind-review strip; a synthetic blind-review context fires the redesign branches
   (calm NO CONSENSUS banner, decision strip, `no-consensus` log cell). Engine stayed
   down; display-only, no feedback into council decisions.
+
+### 7d. Pre-restart audit + the persona rewrite (2026-06-25, end of session)
+
+After 7a–7c the engine was briefly restarted on paper (clean book reset → fresh
+2.5%/5-level grid ~$1.03 → one blind-review cycle, decision MAINTAIN), then audited,
+then shut down by operator order. A real, ground-truth-recomputing audit (5 dimensions)
+was run. Outcome:
+
+**The decision layer's MACHINERY is sound — verified by reading + recompute, not
+assumed:** `aggregate.py` (Condorcet→Borda + the action→cons map), `schemas.py`
+(`CandidateDecision`/`Ranking`/`Geometry`, 6-action space, conditional geometry),
+`seats.py` (scaffold + `propose`/`review`; the TASK FRAMING is already blind-review-
+native — "regime is an INPUT, pick one action, no peers"), the
+propose→review→aggregate→reconcile→NO_CONSENSUS flow, `get_council_ledger` recall, and
+`anonymize.py` (genuinely blind — template-normalized, name-scrubbed, seed-shuffled).
+`world_state_render` surfaces the full trend picture to every seat (ema_200, roc_6h,
+adx, drawdown_from_high_7d, vol_regime, a `bearish_trend` block). The indicators the
+council consumed were validated CLEAN against recompute (EMA50 exact, EMA200 within
+0.7%, ADX/BB/VWAP/ATR within live partial-candle timing).
+
+**ROOT CAUSE of the bad behavior — the personas were never rewritten for blind review.**
+All three `magi/agents/personas/*.md` were stale arbiter-era artifacts: they instructed
+each seat to emit the OLD vote schema (`casper` → `position`/`regime_action`; `melchior`
+→ `verdict`/`geometry`; `balthasar` → `stance`/`risk_action`/`geometry_veto`), carried
+dead R1-synthesis sections, and — decisively — their protection logic depended on
+**"Casper's regime read" / "Melchior's verdict"** as inputs a blind-review seat (isolated
+in Phase 1) never receives. So the seats improvised a mapping onto the real action space,
+and the two protective seats could not reliably fire — Casper stood alone with STAND_ASIDE
+and was outvoted 2-1 into a confirmed XRP downtrend (price ~34% below the 200-DAY EMA,
+a real −55% decline). That is the documented #1 grid-bleed failure mode.
+
+**THE FIX (council layer only; P1/P2/P3-respecting — no rule, no arbiter, no aggregation
+change): all three personas rewritten blind-review-native.**
+- Each emits a real `CandidateDecision`: a single `action` over
+  `MAINTAIN / RECONFIGURE / PAUSE_LONGS / PAUSE_SHORTS / STAND_ASIDE / HALT` (+ geometry
+  only on RECONFIGURE), conviction, key_evidence, rationale. The dead vote schemas,
+  R1-synthesis, and geometry_veto are gone.
+- All peer references stripped — each seat reasons from the shared `world_state` ALONE.
+- Clean lens→action division: **only Melchior carries geometry, so only Melchior proposes
+  RECONFIGURE**; Casper and Balthasar propose from the non-geometry actions. This lets BOTH
+  protective seats independently vote protection in a downtrend (Casper STAND_ASIDE by
+  regime; Balthasar STAND_ASIDE/PAUSE_LONGS by capital-erosion), so the equal vote protects
+  itself — nothing bolted on top.
+- **Balthasar's capital-erosion gate now reads the downtrend FROM world_state directly**
+  (ema_distance vs the 200-day EMA, bearish_trend, roc_6h, adx_neg>adx_pos, drawdown,
+  exposure_cap.streak) and outranks the in-flight-round-trip "hold CLEAR" preference that
+  historically suppressed it. Melchior gained a TREND-CYCLING check → HALT (no profitable
+  grid to run into a decline), giving the economics seat a principled non-MAINTAIN path too.
+
+**STATUS: NOT YET VALIDATED.** The validation run (re-run `run_council` on the live
+cycle's stored world_state and confirm the decision flips to protection) was stopped before
+completing. Until it runs, it is unproven that the rewritten personas actually move the
+haiku/deepseek/gemini seats — persona edits can fail to change model behavior. This is the
+top open item (`02`).
+
+**Also found, not yet done:** (a) DEAD arbiter-era code still in the tree — old per-seat
+modules `balthasar_claude.py` / `melchior_deepseek.py` / `casper_gemini.py` and the old
+`RegimeVote`/`GridVote`/`RiskVote` classes in `schemas.py`, imported by nothing live —
+delete. (b) The stale-counter data bug: `database.get_trajectory_context()` derives
+`regime_consecutive`/`cycles_since_structural_change`/`melchior_blocked_cycles` from the last
+5 `magi_decisions` rows, and `reset_paper_book.py` never clears them (nor
+`down_walk_last_centre`/`down_walk_last_ts`), so the restarted council was fed counters from
+the pre-shutdown June-11–14 book. (c) `melchior_blocked_cycles` miscounts `THESIS_HOLDS` as a
+"block" (string-compares to `'MAINTAIN'`). (d) The ONE_GRID invariant (`engine.py:750`)
+detects-but-does-not-enforce.
+
+**Claude's own failure cascade this session is documented in `CLAUDE.md` §8** (status-check
+delivered as an audit; a fabricated "corrupt indicators" alarm — a 200-DAY EMA misread as
+200-hour — that got the system shut down; a proposed council-bypassing hard rule;
+anchoring/tunneling). Read it.
