@@ -67,7 +67,15 @@ class Geometry(BaseModel):
     the deterministic hard-rule layer, not in this schema.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    # extra="ignore", NOT "forbid": Geometry is nested inside CandidateDecision, which
+    # Casper authors on the native Gemini API via ADK output_schema (which mirrors the
+    # pydantic schema and does NOT route through schema_for_tool's central
+    # additionalProperties strip). extra="forbid" emits `additionalProperties: false`
+    # on this nested object, which native Gemini 400s (INVALID_ARGUMENT) — the same
+    # constraint that forces CandidateDecision/Ranking to extra="ignore". The Anthropic
+    # seats reach this through schema_for_tool, which strips the key regardless, so
+    # extra="ignore" is safe there too.
+    model_config = ConfigDict(extra="ignore")
 
     target_spacing_pct: float = Field(
         description=(
