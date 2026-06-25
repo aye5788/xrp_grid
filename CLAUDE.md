@@ -249,8 +249,11 @@ re-derive these.
   validator, the step/token sweep) are HISTORICAL — they describe the replaced layer.
   Seats are built in code from `magi/agents/personas/*.md` (instruction) +
   `magi/agents/schemas.py` (output_schema) via `magi/agents/schema_tools.py`; there are
-  no Letta blocks to provision and no vendor-side agent state. `agent_registry` may
-  still back the dashboard AGENT HEALTH chip but no longer maps to Letta UUIDs.
+  no Letta blocks to provision and no vendor-side agent state. `agent_registry` no
+  longer maps to Letta UUIDs and, as of 2026-06-25 (CS2), no longer backs the dashboard
+  AGENT HEALTH chip's model labels either — those come from `magi/agents/seats.py:MODELS`
+  (the table's `model` column had drifted stale: Balthasar `claude-sonnet-4-6` vs the
+  live `claude-haiku-4-5`).
 - **Invariants (learned the hard way — do NOT regress).**
   - **Seat schemas are always built via `magi/agents/schema_tools.py:schema_for_tool()`,
     never CrewAI `generate_model_description`.** CrewAI's strict pipeline forces every
@@ -492,9 +495,17 @@ re-derive these.
   or anything operationally sensitive. Dashboard chip panel
   (`AGENT HEALTH`, served above ALERTS) is the visual companion: green/
   yellow/red per agent computed from the last 3 R0 rows in
-  `debate_records`, where degraded = `conviction=0.0 AND crux LIKE
-  '(no response)%'` (same SAFE_DEFAULTS fingerprint as `council.py`).
-  API: `/api/agent_health`.
+  `debate_records`. **Degraded-detection is ERA-AWARE as of 2026-06-25 (CS2).**
+  The blind-review council does NOT write the arbiter-era SAFE_DEFAULTS sentinel
+  (`conviction=0.0 AND crux LIKE '(no response)%'`) — a non-responding seat is
+  simply absent and its `{seat}_r0_action` column reads NULL. So `_fetch_agent_health`
+  classifies each row: a blind-review row (any seat has a non-NULL `{seat}_r0_action`)
+  degrades a seat iff its OWN action is NULL while a peer responded; an arbiter-era
+  row keeps the legacy SAFE_DEFAULTS fingerprint. Model labels shown on the chips
+  come from `magi/agents/seats.py:MODELS` (the single source of truth), NOT the
+  `agent_registry` table — that table held arbiter-era models (Balthasar
+  `claude-sonnet-4-6`) and drifted stale when the redesign dropped Balthasar to
+  `claude-haiku-4-5`. API: `/api/agent_health`.
 - **Hard-rule precedence ladder** (added 2026-05-24).
   `enforce_hard_rules` runs its rules in a fixed order, and a LATER rule may
   overwrite an EARLIER rule's `grid_action` — survival/integrity rules outrank

@@ -189,8 +189,10 @@ the historical record of the 2026-06-09→11 run:
   Best Shadow" card), Council Evolution, COUNCIL LEVERS, AGENT REASONING, and the separate
   Market section removed (Langfuse-redundant or obsolete iterations); added a **Council Log**
   (last 20 cycles with trigger, positions, hard-rule tags, per-cycle Langfuse trace
-  deep-links) and a header **24h LLM call counter** (counts only the six named seat spans);
-  accuracy/attribution panels paper-scoped.
+  deep-links) and a header **24h LLM call counter** (counts only the named seat spans —
+  `casper`/`melchior`/`balthasar`; the dead `:rebuttal`/`:synthesis` names were dropped
+  2026-06-25/CS2, since blind-review spans are named by bare seat with the phase in
+  metadata); accuracy/attribution panels paper-scoped.
 - `warehouse-append.timer` (hourly), `tape-backup.timer` + `warehouse-backup.timer`
   (daily → GCS) — feed/back up the `tape/history.db` warehouse. As of 2026-06-07 the
   hourly append also writes a **`signals_1h`** snapshot (the dashboard's GRID
@@ -456,7 +458,39 @@ observability only — nothing feeds back into a council decision or vote weight
   a SHUTDOWN-TIMING artifact (the observer was stopped before those rows hit 72h
   maturity), not broken graders. These scores populate only when the council runs again.
 
-Full detail: `05_COUNCIL_REDESIGN.md` §7.
+**Dashboard aligned to the redesign — era-aware (commits `4274f3e` CS1, `60cf20b` CS2).**
+A `dashboard.py` review found panels still rendering arbiter-era vocabulary and one dead
+check. **Material finding:** the live `observer.db` holds **ZERO blind-review rows** —
+all 253 `debate_records` rows are arbiter-era (`casper_r0_action` NULL everywhere,
+`council_json` NULL everywhere; newest 2026-06-14) because the engine has been down, so
+the blind-review council has never persisted a cycle. Every redesign display path is thus
+validated SYNTHETICALLY; today's dashboard renders exactly as before (arbiter data), and
+the redesign paths first show real data at the next engine bring-up. Fixes made era-aware:
+- **CS1** — B1 made only `observer.backfill_seat_accuracy_scores` era-aware, NOT the
+  dashboard's `database.get_agent_accuracy`, so the accuracy panel and the Langfuse seat
+  scores could diverge on the same cycle. New `database._score_action_seat` grades each
+  seat's `{seat}_r0_action` through the SAME `_grade_action_row` the Langfuse path uses;
+  `get_agent_accuracy` dispatches to it for blind-review data and falls back to the legacy
+  per-role scorer for arbiter-era windows. Zero blind-review rows today → every seat takes
+  the legacy fallback (CS1 is inert until the engine writes blind-review data). Verified
+  on synthetic rows: dashboard count == independent re-derivation; arbiter-only →
+  `eligible_calls==0` → legacy path.
+- **CS2** — (a) `_fetch_agent_health` keyed "degraded" off the arbiter-era SAFE_DEFAULTS
+  sentinel the blind-review council never writes (a non-responder is simply absent,
+  columns NULL), so every seat read green forever; now era-aware (blind-review: seat
+  degraded iff its `{seat}_r0_action` is NULL while a peer responded; arbiter: legacy
+  sentinel). (b) Model labels now from `magi/agents/seats.py:MODELS` not the stale
+  `agent_registry` table (which still said Balthasar `claude-sonnet-4-6`; live is
+  `claude-haiku-4-5`) — no DB write. (c) Hero: dropped relay-order `· 1/2/3` markers
+  (equal seats); added a blind-review decision strip from `council_json`. (d) Deadlock
+  banner: blind-review NO_CONSENSUS is a valid P3 outcome → calm "NO CONSENSUS" wording,
+  not "HUMAN REVIEW REQUESTED". (e) Council Log "Debate" → "Consensus" column, era-aware
+  cell. (f) `_SEAT_CALL_NAMES`: dropped dead `:rebuttal`/`:synthesis` span names (the
+  phase lives in span metadata, not the name). Verified both eras render (live arbiter →
+  200; synthetic blind-review fires the redesign branches). Engine stayed down; display
+  only, no feedback into council decisions.
+
+Full detail: `05_COUNCIL_REDESIGN.md` §7 + §7c.
 
 ## Session 2026-06-11 — OUTCOME-SCOPE POISONING FOUND + FIXED (paper cycles recorded fake zeros), data repaired, convergent Langfuse score delivery + live-flip gate 4 shipped; observer.db daily GCS backup committed
 

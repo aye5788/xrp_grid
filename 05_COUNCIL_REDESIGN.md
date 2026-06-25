@@ -12,10 +12,12 @@ older docs, this doc wins.
 ---
 
 ## TL;DR — where we are right now (updated 2026-06-25)
-- **Code:** branch `council-redesign`, latest commit `f692e81` (the redesign
-  `fc62b93` plus the 2026-06-25 fixes in §7). Commits past `fc62b93` are **local,
-  NOT pushed** — operator pushes manually. **NOT merged to `main`** — `main` still
-  holds the dead arbiter.
+- **Code:** branch `council-redesign`, latest commit `60cf20b` (the redesign
+  `fc62b93`, the 2026-06-25 Langfuse/dashboard fixes in §7, and the CS1+CS2
+  era-aware dashboard alignment in §7c). The branch **was pushed 2026-06-25**
+  through `7090f50` (docs); the CS1/CS2 commits `4274f3e`+`60cf20b` and this doc
+  update are **local until the next manual push**. **NOT merged to `main`** —
+  `main` still holds the dead arbiter.
 - **This box:** `observer.db` restored (brain through **2026-06-14**), `.env` →
   symlink to `/root/magi.env`, `.venv` built. The **trading engine (`magi.service`)
   is deliberately SHUT DOWN** (paper mode). The **dashboard IS running** —
@@ -26,6 +28,12 @@ older docs, this doc wins.
   consensus, no council_error).
 - **Langfuse instrumentation rebuilt** for the blind-review council; **per-seat
   symmetric grading + decision-quality scores + session grouping** shipped (§7).
+- **Dashboard aligned to the redesign (era-aware, §7c):** seat-accuracy panel now
+  shares the Langfuse grader, agent-health degraded-detection fixed, model labels
+  sourced from `seats.MODELS`, NO_CONSENSUS / equal-seat / consensus vocabulary.
+  **Finding:** `observer.db` has **zero blind-review rows** (engine never persisted
+  one), so the redesign display paths are validated synthetically and first show real
+  data at the next engine bring-up.
 
 ---
 
@@ -276,3 +284,61 @@ weight**; the tally stays flat):
 
 **These take effect only when the council runs again** (engine is down). The
 instrumentation is correct and ready for the next bring-up.
+
+### 7c. Dashboard alignment to the redesign — era-aware (commits `4274f3e`, `60cf20b`)
+A review of `dashboard.py` after 7a/7b found the panels still rendered arbiter-era
+vocabulary and one dead degradation check. **Material finding:** the live
+`observer.db` holds **zero blind-review rows** — all 253 `debate_records` rows are
+arbiter-era (`casper_r0_action` NULL everywhere, `council_json` NULL everywhere; the
+newest is 2026-06-14). The blind-review council has never persisted a live cycle
+because the engine has been down. So every redesign display path is validated
+*synthetically*; today's dashboard renders exactly as before (arbiter data), and the
+redesign paths first light up when the engine next runs. The fixes were made
+**era-aware** so both eras render correctly:
+
+- **CS1 — dashboard seat accuracy uses the shared grader (`4274f3e`).** B1 made only
+  `observer.backfill_seat_accuracy_scores` era-aware, NOT the dashboard's
+  `database.get_agent_accuracy`, so the accuracy panel and the Langfuse seat scores
+  could disagree on the same cycle. New `database._score_action_seat` grades each
+  seat's `{seat}_r0_action` through the SAME `_grade_action_row` the Langfuse path
+  uses (two axes: grid run/stop on forward alpha, exposure direction on forward
+  drift, anchored to `FEE_FLOOR`). `get_agent_accuracy` dispatches to it when
+  blind-review rows exist and falls back to the legacy per-role scorer
+  (Casper regime / Melchior verdict / Balthasar reality+counterfactual) only for
+  arbiter-era windows. With zero blind-review rows today, every seat takes the legacy
+  fallback — CS1 changes nothing visible until the engine writes blind-review data
+  (verified: synthetic blind-review rows grade identically to an independent
+  re-derivation; arbiter-only window → `eligible_calls==0` → legacy path).
+
+- **CS2 — panel vocabulary + dead checks (`60cf20b`).**
+  - `_fetch_agent_health` keyed "degraded" off the arbiter-era SAFE_DEFAULTS sentinel
+    (`conviction=0 AND crux '(no response)%'`) that the blind-review council never
+    writes (a non-responder is simply absent, columns NULL), so every seat read green
+    forever. Now era-aware: a blind-review row degrades a seat iff its own
+    `{seat}_r0_action` is NULL while a peer responded; arbiter rows keep the sentinel.
+  - Model labels now come from `magi/agents/seats.py:MODELS` (the declared single
+    source of truth), not the `agent_registry` table — that table still said
+    Balthasar = `claude-sonnet-4-6` while the redesign dropped Balthasar to
+    `claude-haiku-4-5`. (No DB write; the dashboard just stopped reading the stale
+    table for model labels.)
+  - Hero: dropped the relay-order `· 1/2/3` markers (equal seats have no order);
+    added a blind-review decision strip (decision / vote multiset / consensus class)
+    from `council_json`.
+  - Deadlock banner: blind-review NO_CONSENSUS is a valid P3 outcome, not a
+    human-review event — shows a calm "NO CONSENSUS … defaulted to safe stance"
+    instead of "DEADLOCK — HUMAN REVIEW REQUESTED".
+  - Council Log "Debate" column → "Consensus"; blind-review rows show the consensus
+    class (clear / reconciled / no-consensus) from `council_json`, arbiter rows keep
+    the `debate_triggered` flag.
+  - `_SEAT_CALL_NAMES`: dropped the dead `:rebuttal`/`:synthesis` arbiter-era span
+    names (blind-review seat generations are named by the bare seat; the phase —
+    propose / review / reconcile — lives in span metadata, not the name).
+
+  **Correction to 7a:** the line above worrying about a stale "regime" label for
+  Casper was over-cautious — the dashboard shows `casper_r0_position` directly with no
+  "regime" wording, so there was nothing to relabel there. Nothing was changed for it.
+
+  Verified: live arbiter render → HTTP 200, relay markers gone, "Consensus" header,
+  no blind-review strip; a synthetic blind-review context fires the redesign branches
+  (calm NO CONSENSUS banner, decision strip, `no-consensus` log cell). Engine stayed
+  down; display-only, no feedback into council decisions.
