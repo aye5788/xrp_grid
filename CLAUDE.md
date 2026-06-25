@@ -37,7 +37,10 @@ disagree, the handoff docs win for state; this file wins for how to work.
 > timeouts; pytz dropped from scheduler). LETTA FULLY
 > DECOUPLED. Decision layer = the hand-rolled arbiter orchestrator
 > (`magi/council_v2.py`), live on a GATE-PRIMARY cadence.**
-> `magi.service` and `magi-dashboard.service` are **active + enabled**. The engine is
+> **As of 2026-06-25: the trading engine `magi.service` is SHUT DOWN (deliberate,
+> paper-mode hold); `magi-dashboard.service` IS running — waitress on :5000, public
+> at `https://api.ethobs.uk`. The Casper propose 400 is FIXED and the Langfuse
+> instrumentation was rebuilt — see `05_COUNCIL_REDESIGN.md` §7.** The engine is
 > in PAPER mode — the live toggle is disarmed (`.env` `MAGI_LIVE_CONFIRM=NO`,
 > `CONFIRM_LIVE` renamed `CONFIRM_LIVE.disarmed.20260609`), so no real Kraken orders
 > are placed; fills are SIMULATED against real market prices into a paper ledger
@@ -398,9 +401,14 @@ re-derive these.
 - **Dashboard auth** is app-side: a Flask signed-cookie session in
   `dashboard.py` (`/login`, `/logout`, `before_request` gate; password in
   `.env:DASHBOARD_PASSWORD`, `SECRET_KEY` in `.env`; 365-day cookie).
-  nginx `auth_basic` was removed — the cloudflared tunnel hits Flask:5000
-  directly, so nginx was never in the public path. Token-authenticated
-  API calls (`X-Magi-Token`) bypass the login gate for automation.
+  Served by **waitress** (a real WSGI server, not Flask's dev `app.run()`) via
+  `magi-dashboard.service` (ExecStart uses `.venv`). The cloudflared tunnel hits
+  Flask:5000 directly (nginx is NOT in the public path). **Tunnel rebuilt 2026-06-25
+  (see `05` §7):** now a locally-managed `eth-observer` tunnel
+  (`e4d95b41…`) driven by on-disk `/etc/cloudflared/config.yml`, public at
+  `https://api.ethobs.uk` (the old embedded-token tunnel `0a3c34dc…` had been
+  deleted and its connector was dead). Token-authenticated API calls
+  (`X-Magi-Token`) bypass the login gate for automation.
 - **Letta-era operational facts removed 2026-06-06** (restart cost in Letta
   credits, the Letta SDK `model_settings` note, `provision_agents.py:AGENT_CONFIG`
   sync, the Letta Evals suites/`run_all.sh`) described the replaced agent layer.

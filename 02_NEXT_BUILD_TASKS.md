@@ -1,5 +1,13 @@
 # Next Build Tasks
 
+> **CURRENCY NOTE 2026-06-25 — the trading engine is currently SHUT DOWN (paper
+> hold), so the "watching" direction below is paused. This session reconnected the
+> dashboard, rebuilt the Langfuse instrumentation, and fixed the Casper propose 400 —
+> none of which ran the engine. See `05_COUNCIL_REDESIGN.md` §7 and "Session
+> 2026-06-25" in `01_CURRENT_STATE.md`. The blind-review council (`05`) supersedes the
+> arbiter-era council items below. The next real build decision is whether/when to
+> bring `magi.service` back up (out of scope until the operator directs it).**
+
 > **DIRECTION 2026-06-12 — RESTARTED ON PAPER; THE QUEUE IS NOW WATCHING, NOT
 > BUILDING.** F5 ran (PASS on its pre-committed criteria, then DEMOTED by the
 > operator to skeleton-floor evidence — the replay cannot model the judgment

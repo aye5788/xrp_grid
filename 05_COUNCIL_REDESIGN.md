@@ -11,15 +11,21 @@ older docs, this doc wins.
 
 ---
 
-## TL;DR — where we are right now
-- **Code:** branch `council-redesign`, commit `fc62b93`, **pushed** to `origin`
-  (`aye5788/xrp_grid`). **NOT merged to `main`** — `main` still holds the dead arbiter.
-- **This box:** revival prep is done — `observer.db` restored (brain through
-  **2026-06-14**), `.env` → symlink to `/root/magi.env`, `.venv` built. **MAGI is
-  SHUT DOWN** (no services running or installed). Paper mode.
-- **Smoke-tested:** boots end-to-end and produces a valid decision. Melchior and
-  Balthasar (haiku) work. **Casper's *propose* call is broken (Gemini schema 400).
-  FIX THAT FIRST — see §4.**
+## TL;DR — where we are right now (updated 2026-06-25)
+- **Code:** branch `council-redesign`, latest commit `f692e81` (the redesign
+  `fc62b93` plus the 2026-06-25 fixes in §7). Commits past `fc62b93` are **local,
+  NOT pushed** — operator pushes manually. **NOT merged to `main`** — `main` still
+  holds the dead arbiter.
+- **This box:** `observer.db` restored (brain through **2026-06-14**), `.env` →
+  symlink to `/root/magi.env`, `.venv` built. The **trading engine (`magi.service`)
+  is deliberately SHUT DOWN** (paper mode). The **dashboard IS running** —
+  `magi-dashboard.service` under waitress on `:5000`, public at
+  `https://api.ethobs.uk` (see §7).
+- **Council is HEALTHY:** the Casper propose 400 is **FIXED** (§4). A full standalone
+  smoke test produces a valid 3-seat decision (3/3 propose return 200, clear
+  consensus, no council_error).
+- **Langfuse instrumentation rebuilt** for the blind-review council; **per-seat
+  symmetric grading + decision-quality scores + session grouping** shipped (§7).
 
 ---
 
@@ -119,17 +125,30 @@ filtered by `config_version`; it is the council's own replay-safe memory, inject
   integrity ok).
 - **Env:** code does `load_dotenv()` expecting `/root/xrp_grid/.env`; that's a symlink
   to `/root/magi.env` (which holds all keys: ANTHROPIC/GOOGLE/DEEPSEEK + Langfuse/NTFY).
-- **Smoke test (`cyc_smoketest_boot`, frozen ws from `cyc_1781395248`):** decision
-  `STAND_ASIDE` (`grid_verdict=THESIS_HOLDS, stance=STAND_ASIDE, risk_action=PAUSE_LONGS`),
+- **Smoke test (frozen ws from `cyc_1781395248`):** decision `STAND_ASIDE`
+  (`grid_verdict=THESIS_HOLDS, stance=STAND_ASIDE, risk_action=PAUSE_LONGS`),
   consensus clear, no council_error, **no DB write** (the standalone runner does not
-  insert a cycle row). Melchior 200, Balthasar/haiku 200 (×2 each), **Casper 400 on
-  propose** / 200 on review.
+  insert a cycle row). After the §4 fix: **all 3 seats return 200 on propose** — the
+  vote_multiset has 3 candidates (`2x STAND_ASIDE, 1x MAINTAIN`), confirming the
+  equal-seats council is whole (was a 2-seat propose council while Casper 400'd).
 
 ---
 
-## 4. KNOWN BUG — fix this first
+## 4. RESOLVED BUG (was: "fix this first") — Casper propose 400, FIXED 2026-06-25
 
-**Casper (Gemini) cannot PROPOSE.** Its propose call 400s:
+**FIX (commit `f0bc8f9`):** the nested `Geometry` model inside `CandidateDecision`
+still carried `model_config = ConfigDict(extra="forbid")` — an arbiter-era leftover.
+ADK's `output_schema` mirrors the pydantic schema and bypasses
+`schema_for_tool`'s central `additionalProperties` strip, so Geometry emitted
+`additionalProperties: false` and native Gemini 400'd on it. Flipping `Geometry` to
+`extra="ignore"` (matching what `CandidateDecision`/`Ranking` already do for the same
+reason) removes the key at the source. Verified: 3/3 propose calls 200, 3-candidate
+vote_multiset. `requirements.txt` also gained the two deps the `.venv` rebuild was
+missing (`google-adk`, `icontract`). The original diagnosis is kept below for context.
+
+---
+
+**(historical) Casper (Gemini) cannot PROPOSE.** Its propose call 400s:
 `Invalid JSON payload ... Unknown name "additional_properties" at
 response_schema.properties[1].value` — `properties[1]` is the nested **`Geometry`**
 object in `CandidateDecision`.
@@ -190,3 +209,70 @@ These describe the **dead arbiter** and do **not** reflect the running council:
   synthesis vote, and the regime grader.
 The engine, hard rules, gate, data layout, paper/live toggle, and PnL scoping in
 those docs are **still accurate** — only the council/decision-layer parts changed.
+
+---
+
+## 7. 2026-06-25 update — dashboard reconnect + Langfuse instrumentation rebuild
+
+Two work areas landed after the Casper fix. The **trading engine stayed down**
+throughout (paper, deliberate); none of this runs the engine. All commits are local
+on `council-redesign`, not pushed.
+
+### 7a. Dashboard reconnected publicly (commit `bba6218`)
+The public path was broken at the infra level, not the app level:
+- The box's `cloudflared` was running a **deleted tunnel** (`0a3c34dc…`), so its
+  connector showed **"down"**; and `api.ethobs.uk` had **no public DNS** because it
+  had been set up (in the Cloudflare dashboard) as a *private* application route
+  (Gateway/WARP-only), not a public hostname.
+- Fix: repointed the box to the real tunnel **`eth-observer` =
+  `e4d95b41-e5fa-453a-b7ca-309703478094`**, now **locally-managed** via on-disk
+  `/etc/cloudflared/config.yml` (ingress `api.ethobs.uk → http://localhost:5000`,
+  catch-all 404) + credentials in `/root/.cloudflared/` (from `cloudflared tunnel
+  login`). `cloudflared.service` ExecStart is now `--config … tunnel run` (the
+  embedded `--token` is gone — chosen for on-disk reproducibility). Public DNS CNAME
+  created with `cloudflared tunnel route dns`. cloudflared upgraded apt 2026.6.0 →
+  2026.6.1.
+- The dashboard now serves under **waitress** (a real WSGI server), not Flask's dev
+  `app.run()`, via `magi-dashboard.service` (ExecStart uses **`.venv`**, not the
+  archived unit's `venv/`). The `.venv` rebuild was missing `waitress` + `sentry-sdk`
+  (the latter was the startup crash) — both now pinned.
+- Verified end-to-end: `https://api.ethobs.uk/login → 200`; authenticated dashboard
+  renders all panels. **NOTE:** `dashboard.ethobs.uk → localhost:8501` is a SEPARATE
+  live Streamlit app — leave it alone.
+- The dashboard reads only the legacy per-seat `*_r0_position` / `final_*` columns,
+  which `council_v2._own_r0` still populates (Casper's column now carries an ACTION,
+  not a regime — any "regime" label for Casper in the UI is now stale wording, not a
+  break).
+
+### 7b. Langfuse instrumentation rebuilt for the blind-review council
+The plumbing (trace per cycle, 6 named seat generations, convergent 1h/6h outcome
+delivery, deep-links) was intact; the eval/monitoring layer was thin/stale. Changes
+(all observability-only — **nothing feeds back into a council decision or vote
+weight**; the tally stays flat):
+- **Seat grading made symmetric (B1, commit `f139fd0`).** The redesign retired
+  Casper's regime grader but left only 2 of 3 seats graded (a P1 violation), and the
+  Melchior/Balthasar graders only saw lossy verdict/risk *projections*. Fix: persist
+  each seat's RAW proposed action in **3 additive columns** `casper_r0_action` /
+  `melchior_r0_action` / `balthasar_r0_action` (written by `_build_debate_record`;
+  kept OUT of `council_json` so grading authorship can't leak into the blind review),
+  and grade all three co-equal seats with ONE anchored predicate
+  (`database._grade_action_row`): grid-run/stop actions (MAINTAIN/RECONFIGURE/HALT)
+  on grid-vs-hold alpha vs `FEE_FLOOR`; exposure-direction actions
+  (STAND_ASIDE/PAUSE_LONGS/PAUSE_SHORTS) on realized forward price drift. Reuses the
+  same `forward_sim` truth-standard as every other grader.
+  `observer.backfill_seat_accuracy_scores` dispatches by era (blind-review rows →
+  symmetric grader for all three; arbiter-era rows → legacy graders unchanged).
+- **Decision-quality scores (B3) + sessions (B4), commit `5b01c34`.** On the 1h push,
+  mirror from `council_json`: `decision_action`, `consensus_type`, `reconciled`,
+  `vote_spread`, `vote_unanimous` (previously scored nowhere). And group cycles into
+  Langfuse **sessions** (one per paper run, via `tracing.set_trace_session`).
+- **Delivery alert (B5) + in-code score schema (B6), commit `f692e81`.** A sustained
+  Langfuse outage now raises an edge-triggered `langfuse_delivery_degraded` warn alert
+  (was silent retry); `observer.py` carries a SCORE SCHEMA reference block (every
+  score family, type, maturity, owning function — all attach to the TRACE).
+- **Deferred:** per-observation score attachment (B2) — per-seat scores are already
+  distinct by NAME (`casper_correct`…), so it was a UI nicety, not worth the
+  live-tracing complexity.
+
+**These take effect only when the council runs again** (engine is down). The
+instrumentation is correct and ready for the next bring-up.

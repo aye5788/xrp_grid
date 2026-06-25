@@ -1,5 +1,13 @@
 # MAGI — Current State
 
+> **2026-06-25 — LATEST. Dashboard reconnected publicly (new locally-managed
+> cloudflared tunnel) + Langfuse instrumentation rebuilt for the blind-review
+> council + the Casper propose 400 FIXED. The trading ENGINE (`magi.service`) stayed
+> SHUT DOWN (paper hold) throughout — none of this session's work runs the engine.
+> Full detail: `05_COUNCIL_REDESIGN.md` §7 and "Session 2026-06-25" below. Reminder:
+> the blind-review council in `05` supersedes the arbiter-era council descriptions
+> elsewhere in this doc.**
+
 > **2026-06-12 — MAGI RESTARTED ON PAPER (16:10 UTC) after F5 + a full
 > reactivation audit; all 4 audit blockers and 3 degraded items FIXED, each with
 > per-fix operator approval and a verification artifact.**
@@ -398,6 +406,57 @@ credit-burn guard shipped** — see Session 2026-05-25 below. Prior: 2026-05-24 
 `ORDER_SIZE_XRP` constant; live service restarted 12:37 UTC, live mode
 confirmed preserved. See Session 2026-05-24 below. Prior: 2026-05-23 —
 **BOT IS LIVE** — flipped paper→live, live order + fill-reconcile path shipped, fee constants corrected to tier-0 0.25%/0.40%, dashboard auth moved to Flask cookie, renewal READINESS panel removed — see Session 2026-05-23 below. Prior: 2026-05-22 — council restructured to R1-always-fires + two new structural vote fields the engine reads; gate layer with calibrated triggers + Kraken WebSocket v2 substrate shipped; agent state wiped + recreated; freshness validator + retry + warn-alert shipped. See "Session 2026-05-22" entries below).
+
+## Session 2026-06-25 — Casper propose FIXED; dashboard reconnected publicly (new on-disk tunnel); Langfuse instrumentation rebuilt for the blind-review council; ENGINE STAYED DOWN
+
+Trading engine (`magi.service`) deliberately SHUT DOWN throughout (paper hold) —
+nothing here runs the engine. All commits are local on `council-redesign`, not pushed.
+Each area had per-step operator approval; the cloudflared `tunnel login` was operator-run.
+
+**Casper propose 400 FIXED (commit `f0bc8f9`).** The nested `Geometry` model in
+`CandidateDecision` still carried `extra="forbid"`; ADK's `output_schema` bypasses
+`schema_for_tool`'s `additionalProperties` strip, so native Gemini 400'd on the nested
+object. Flipped `Geometry` to `extra="ignore"` (matching `CandidateDecision`/`Ranking`).
+Verified via the standalone smoke test: 3/3 propose calls 200, 3-candidate vote_multiset.
+`requirements.txt` gained `google-adk` + `icontract` (both missing from the `.venv`
+rebuild). See `05_COUNCIL_REDESIGN.md` §4.
+
+**Dashboard reconnected publicly (commit `bba6218`).** The box's cloudflared was running
+a DELETED tunnel (`0a3c34dc…`) so its connector showed "down", and `api.ethobs.uk` had
+NO public DNS (it had been configured as a private/WARP application route, not a public
+hostname). Fix: repointed to the real tunnel `eth-observer` (`e4d95b41…`), now
+**locally-managed** via on-disk `/etc/cloudflared/config.yml` (ingress
+`api.ethobs.uk → http://localhost:5000`) + credentials from `cloudflared tunnel login`;
+created the public DNS CNAME with `cloudflared tunnel route dns`; cloudflared upgraded
+2026.6.0→2026.6.1. The dashboard now serves under **waitress** (not Flask's dev server)
+via `magi-dashboard.service` (ExecStart uses `.venv`, NOT the archived `venv/`). `.venv`
+was missing `waitress` + `sentry-sdk` (the latter was the startup crash) — both pinned.
+Verified `https://api.ethobs.uk/login → 200` + full authenticated render.
+(`dashboard.ethobs.uk → localhost:8501` is a SEPARATE live Streamlit app — left alone.)
+
+**Langfuse instrumentation rebuilt (commits `f139fd0`, `5b01c34`, `f692e81`).** All
+observability only — nothing feeds back into a council decision or vote weight.
+- **B1** — symmetric forward-realized seat grading restoring P1 (the redesign retired
+  Casper's regime grader, leaving only 2/3 seats graded on lossy projections). Persist
+  each seat's RAW proposed action in 3 additive columns `{seat}_r0_action` (kept OUT of
+  the authorship-free `council_json`); grade all three co-equal seats with one anchored
+  predicate `database._grade_action_row` — grid-run/stop (MAINTAIN/RECONFIGURE/HALT) on
+  grid-vs-hold alpha vs `FEE_FLOOR`, exposure-direction (STAND_ASIDE/PAUSE_LONGS/
+  PAUSE_SHORTS) on realized forward drift. `observer.backfill_seat_accuracy_scores`
+  dispatches by era (blind-review → symmetric grader for all three; arbiter-era → legacy
+  graders). Adversarial self-review caught + fixed a STAND_ASIDE axis bug pre-commit.
+- **B3+B4** — decision-quality scores from `council_json` (`decision_action`,
+  `consensus_type`, `reconciled`, `vote_spread`, `vote_unanimous`) on the 1h push +
+  Langfuse session grouping (one session per paper run, `tracing.set_trace_session`).
+- **B5+B6** — edge-triggered `langfuse_delivery_degraded` alert (delivery failures were
+  retried silently) + an in-code SCORE SCHEMA reference in `observer.py`.
+- **Deferred B2** (per-observation score attachment) — per-seat scores are already
+  distinct by NAME (`casper_correct`…), so it was a UI nicety, not a usefulness unlock.
+- Also corrected a mis-diagnosis: `seat_scores_pushed=0` / `stance_scores_pushed=0` are
+  a SHUTDOWN-TIMING artifact (the observer was stopped before those rows hit 72h
+  maturity), not broken graders. These scores populate only when the council runs again.
+
+Full detail: `05_COUNCIL_REDESIGN.md` §7.
 
 ## Session 2026-06-11 — OUTCOME-SCOPE POISONING FOUND + FIXED (paper cycles recorded fake zeros), data repaired, convergent Langfuse score delivery + live-flip gate 4 shipped; observer.db daily GCS backup committed
 
