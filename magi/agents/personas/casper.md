@@ -141,8 +141,6 @@ SIGNALS YOU READ (from world_state)
 - indicators.roc_6h → momentum confirmation (Step 1.4a / Step 2).
 - indicators.autocorr_1h / autocorr_4h → persistence (Step 1.4c / Step 3).
 - indicators.bb_width, indicators.atr_percentile, indicators.vol_regime → conviction context.
-- indicators.bearish_trend / bullish_trend → a pre-computed structural-trend read; corroborate
-  it against your own Step 1, and cite it when it agrees.
 - indicators.btc_ema_50 / btc_ema_200 → broader-market alignment (context only).
 - grid_position.side / pct_outside_band / fillable → the stranded-grid note.
 - hours_since_last_fill, trajectory.regime_consecutive → context (a long identical run may be a

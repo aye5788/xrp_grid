@@ -12,6 +12,21 @@ older docs, this doc wins.
 ---
 
 ## TL;DR — where we are right now (updated 2026-06-25)
+- **2026-06-26 — VALIDATED + RESTARTED + engine-guard fix (supersedes the SHUT-DOWN
+  state below).** The persona rewrite is VALIDATED: a pre-restart audit found the
+  rewritten personas read non-existent world_state paths (`indicators.bearish_trend`,
+  `indicators.drawdown_from_high_7d` — the latter is TOP-LEVEL, not under `indicators`)
+  and `validate_schema` FAILed; fixed (paths repointed/dropped + schema consumers synced
+  → PASS), then `run_council` on `cyc_1782417183`'s stored downtrend ws flipped MAINTAIN
+  → STAND_ASIDE (2× STAND_ASIDE + 1× HALT, clear Condorcet). Engine RESTARTED on paper;
+  the live startup council voted STAND_ASIDE → sells-only protective book. Also fixed:
+  the stale-counter bug (trajectory scoped to `paper_run_started_utc`,
+  `melchior_blocked_cycles` THESIS_HOLDS miscount, reset clears the down_walk anchors)
+  and a SEPARATE engine GRID INTEGRITY guard bug (it tried to emergency-rebuild the
+  mandated one-sided book and errored on missing spacing — now stance-aware +
+  spacing-correct; found by the live restart, a thoroughness miss, see `CLAUDE.md` §8).
+  Added an off-schedule wake ntfy alert. Only the downtrend regime is validated; the rest
+  is exercised by the paper run. §7d below is updated.
 - **Code:** branch `council-redesign`, latest commit `60cf20b` (the redesign
   `fc62b93`, the 2026-06-25 Langfuse/dashboard fixes in §7, and the CS1+CS2
   era-aware dashboard alignment in §7c). The branch **was pushed 2026-06-25**
@@ -391,22 +406,33 @@ change): all three personas rewritten blind-review-native.**
   historically suppressed it. Melchior gained a TREND-CYCLING check → HALT (no profitable
   grid to run into a decline), giving the economics seat a principled non-MAINTAIN path too.
 
-**STATUS: NOT YET VALIDATED.** The validation run (re-run `run_council` on the live
-cycle's stored world_state and confirm the decision flips to protection) was stopped before
-completing. Until it runs, it is unproven that the rewritten personas actually move the
-haiku/deepseek/gemini seats — persona edits can fail to change model behavior. This is the
-top open item (`02`).
+**STATUS: VALIDATED 2026-06-26.** Re-running `run_council` on `cyc_1782417183`'s stored
+downtrend world_state flipped the decision MAINTAIN → STAND_ASIDE (2× STAND_ASIDE + 1× HALT,
+clear Condorcet) — the rewritten personas DO move the haiku/deepseek/gemini seats, and the
+live restart's startup council voted STAND_ASIDE on the real downtrend too. CAVEAT (missed in
+the rewrite, caught at the pre-restart audit): the personas referenced world_state paths that
+DON'T EXIST (`indicators.bearish_trend`, and `indicators.drawdown_from_high_7d` which is
+top-level, not under `indicators`) and `validate_schema` was FAILing; those were fixed (paths
+repointed/dropped + schema consumer lists synced → `validate_schema` PASS) BEFORE the
+validation. Only the DOWNTREND regime is validated; benign/ranging + RECONFIGURE are exercised
+by the live paper run.
 
-**Also found, not yet done:** (a) DEAD arbiter-era code still in the tree — old per-seat
-modules `balthasar_claude.py` / `melchior_deepseek.py` / `casper_gemini.py` and the old
-`RegimeVote`/`GridVote`/`RiskVote` classes in `schemas.py`, imported by nothing live —
-delete. (b) The stale-counter data bug: `database.get_trajectory_context()` derives
-`regime_consecutive`/`cycles_since_structural_change`/`melchior_blocked_cycles` from the last
-5 `magi_decisions` rows, and `reset_paper_book.py` never clears them (nor
-`down_walk_last_centre`/`down_walk_last_ts`), so the restarted council was fed counters from
-the pre-shutdown June-11–14 book. (c) `melchior_blocked_cycles` miscounts `THESIS_HOLDS` as a
-"block" (string-compares to `'MAINTAIN'`). (d) The ONE_GRID invariant (`engine.py:750`)
-detects-but-does-not-enforce.
+**Status of the "also found" items (updated 2026-06-26):** (a) DEAD arbiter-era code —
+STILL PENDING: old per-seat modules `balthasar_claude.py` / `melchior_deepseek.py` /
+`casper_gemini.py` and the old `RegimeVote`/`GridVote`/`RiskVote` classes in `schemas.py`,
+imported by nothing live — delete. (b) Stale-counter data bug — FIXED 2026-06-26:
+`get_trajectory_context()` floors the `magi_decisions` lookback at `paper_run_started_utc`,
+and `reset_paper_book.py` now clears `down_walk_last_centre`/`down_walk_last_ts`. (c)
+`melchior_blocked_cycles` THESIS_HOLDS miscount — FIXED 2026-06-26 (now compares
+`not in ('MAINTAIN','THESIS_HOLDS')`). (d) ONE_GRID invariant (`engine.py:750`) — STILL
+PENDING. (e) NEW, FIXED 2026-06-26 — the post-action GRID INTEGRITY guard (`engine.py`
+~1611) tried to emergency-rebuild a council-mandated one-sided book (re-adding buys into the
+downtrend) and errored on a missing `spacing_pct`; now it leaves a PAUSE_LONGS / STAND_ASIDE /
+non-DEPLOY one-sided book alone and only rebuilds a genuine DEPLOY-stance degeneracy with the
+effective spacing. STILL PENDING: the `engine.py:1328` "No grid state → initialise fresh"
+fallback also calls `initialise_grid()` with no spacing (fails safe — builds nothing). (f)
+NEW — off-schedule wake ntfy alert added to `run_magi_cycle` (pages on any wake except the
+daily floor / manual).
 
 **Claude's own failure cascade this session is documented in `CLAUDE.md` §8** (status-check
 delivered as an audit; a fabricated "corrupt indicators" alarm — a 200-DAY EMA misread as

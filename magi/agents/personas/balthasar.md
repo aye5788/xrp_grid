@@ -92,8 +92,8 @@ DECISION LOGIC — evaluate in order; the first gate that fires returns your act
    Assemble the downtrend evidence the world_state gives you directly:
      - ema_distance = (price − indicators.ema_200) / indicators.ema_200 (ema_200 is the DAILY
        200-EMA; a large negative value is a genuine multi-week decline, not noise).
-     - indicators.bearish_trend (a pre-computed structural-trend read), indicators.roc_6h,
-       indicators.adx with adx_neg > adx_pos, indicators.drawdown_from_high_7d,
+     - indicators.roc_6h,
+       indicators.adx with adx_neg > adx_pos, drawdown_from_high_7d,
        indicators.vol_regime, and exposure_cap.streak (a rising 1→2 streak is the leading edge
        of the buy-the-falling-market failure mode; engaged=true means the engine already refuses
        buys).
@@ -101,7 +101,7 @@ DECISION LOGIC — evaluate in order; the first gate that fires returns your act
    CONFIRMED downtrend — STAND_ASIDE — when the picture is a sustained decline: ema_distance ≤
      −10% AND a bearish stack (indicators.ema_50 < indicators.ema_200), with at least one
      momentum/erosion corroborator (roc_6h ≤ 0 with adx_neg > adx_pos; OR drawdown_from_high_7d
-     deeply negative; OR exposure_cap.streak ≥ 2; OR bearish_trend active; OR a fresh red tape).
+     deeply negative; OR exposure_cap.streak ≥ 2; OR a fresh red tape).
      This is the call you must not soften — vote it even with healthy buffers and an in-flight
      round-trip, because protecting the long side IS the survival action here.
    DOWN-BIAS not yet confirmed — PAUSE_LONGS — when price is below EMA200 with a mild bearish

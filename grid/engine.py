@@ -1609,11 +1609,21 @@ class GridEngine:
             )
 
         # GRID INTEGRITY GUARD — defense-in-depth.
-        # If the council + hard-rule layer somehow still produced a degenerate
-        # book (zero buys or zero sells), emergency-rebuild at current price.
-        # The orchestrator's [GRID_DEGENERATE] hard rule should handle this
-        # earlier, but state can also become degenerate after PAUSE_LONGS /
-        # PAUSE_SHORTS cancellations on a thin starting book.
+        # If the council + hard-rule layer produced a GENUINELY degenerate book
+        # (a side empty for no intentional reason) under an active DEPLOY stance,
+        # emergency-rebuild at current price with the effective spacing.
+        #
+        # CRITICAL (fixed 2026-06-26): a side the council intentionally stood down
+        # is NOT degeneracy and must NOT be rebuilt — rebuilding re-creates exactly
+        # what the council protected against:
+        #   - PAUSE_LONGS (and the STAND_ASIDE stance, which forces PAUSE_LONGS):
+        #     buys=0 is the MANDATE; rebuilding buys would buy back into the very
+        #     downtrend the council stood aside from.
+        #   - PAUSE_SHORTS: sells=0 is the mandate.
+        #   - non-DEPLOY stance (STAND_ASIDE / HOLD): an emergency rebuild would
+        #     deploy capital the council declined — suppress it regardless.
+        # And the rebuild must carry spacing_pct (the engine has no static default
+        # anymore) or initialise_grid errors.
         # Not invoked when HALT was applied (HALT cancels everything intentionally).
         if grid_action != 'HALT' and risk_action != 'HALT':
             post_buys = sum(
@@ -1624,20 +1634,37 @@ class GridEngine:
                 1 for o in self.paper_orders.values()
                 if o.get('status') == 'open' and o.get('side') == 'sell'
             )
-            if post_buys == 0 or post_sells == 0:
+            stance = (get_system_state('council_stance', default='DEPLOY')
+                      or 'DEPLOY')
+            buys_intentionally_off = (
+                risk_action == 'PAUSE_LONGS' or stance == 'STAND_ASIDE')
+            sells_intentionally_off = (risk_action == 'PAUSE_SHORTS')
+            genuinely_degenerate = (
+                (post_buys == 0 and not buys_intentionally_off) or
+                (post_sells == 0 and not sells_intentionally_off)
+            )
+            if genuinely_degenerate and stance == 'DEPLOY':
                 rebuild_price = self.get_current_price()
-                log.warning(
-                    "GRID INTEGRITY: post-action book is degenerate "
-                    "(buys=%d sells=%d) — emergency-rebuilding at %s",
-                    post_buys, post_sells, rebuild_price,
-                )
-                if rebuild_price:
-                    self.initialise_grid(centre=rebuild_price)
+                if rebuild_price and eff_spacing and float(eff_spacing) > 0:
+                    log.warning(
+                        "GRID INTEGRITY: post-action book is degenerate "
+                        "(buys=%d sells=%d) — emergency-rebuilding at %s "
+                        "spacing=%s",
+                        post_buys, post_sells, rebuild_price, eff_spacing,
+                    )
+                    self.initialise_grid(centre=rebuild_price,
+                                         spacing_pct=float(eff_spacing))
                 else:
                     log.error(
-                        "GRID INTEGRITY: cannot emergency-rebuild — "
-                        "no current price available"
+                        "GRID INTEGRITY: cannot emergency-rebuild — price=%s "
+                        "spacing=%s (need both > 0)", rebuild_price, eff_spacing,
                     )
+            elif post_buys == 0 or post_sells == 0:
+                log.info(
+                    "GRID INTEGRITY: one-sided book (buys=%d sells=%d) is the "
+                    "council mandate (risk=%s stance=%s) — not rebuilding",
+                    post_buys, post_sells, risk_action, stance,
+                )
 
     def update_inventory(self, price: float):
         """Sync inventory state to database."""

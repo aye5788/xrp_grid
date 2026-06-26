@@ -122,20 +122,24 @@ FIELDS = {
     "indicators.ema_50": {
         "type": "float",
         "description": "50-period EMA, daily timeframe",
-        "consumers": ["casper"],
+        "consumers": ["casper", "melchior", "balthasar"],
         "casper_usage": "Step 1 EMA stack check vs ema_200",
+        "melchior_usage": "Step 2 TREND-CYCLING check — EMA stack vs ema_200",
+        "balthasar_usage": "Step 2 capital-erosion gate — bearish stack (ema_50 < ema_200)",
     },
     "indicators.ema_200": {
         "type": "float",
         "description": "200-period EMA, daily timeframe",
-        "consumers": ["casper"],
+        "consumers": ["casper", "balthasar"],
         "casper_usage": "Step 1 EMA stack reference + ema_distance_pct denominator",
+        "balthasar_usage": "Step 2 capital-erosion gate — ema_distance denominator + bearish stack",
     },
     "indicators.adx": {
         "type": "float",
         "description": "average directional index, daily timeframe",
-        "consumers": ["casper"],
+        "consumers": ["casper", "balthasar"],
         "casper_usage": "Step 1 conviction calibration (ADX >= 20 = high); Step 3 RANGING ADX < 20 check",
+        "balthasar_usage": "Step 2 capital-erosion gate — adx_neg > adx_pos corroborator",
     },
     "indicators.adx_pos": {
         "type": "float",
@@ -152,8 +156,9 @@ FIELDS = {
     "indicators.roc_6h": {
         "type": "float",
         "description": "6-hour rate of change (percent)",
-        "consumers": ["casper"],
+        "consumers": ["casper", "balthasar"],
         "casper_usage": "Step 1 condition 4a — momentum confirmation (>= +0.3 bullish, <= -0.3 bearish)",
+        "balthasar_usage": "Step 2 capital-erosion gate — roc_6h <= 0 momentum corroborator",
     },
     "indicators.bb_width": {
         "type": "float",
@@ -215,7 +220,8 @@ FIELDS = {
     "indicators.vol_regime": {
         "type": "str",
         "description": "volatility regime label — LOW / MEDIUM / HIGH",
-        "consumers": ["melchior", "balthasar"],
+        "consumers": ["casper", "melchior", "balthasar"],
+        "casper_usage": "context — Step 3 RANGING / conviction calibration (HIGH-vol context)",
         "melchior_usage": "Step 3 spacing-band gating (LOW/HIGH paths)",
         "balthasar_usage": "Step 4 market-context elevation when HIGH combined with skew",
     },

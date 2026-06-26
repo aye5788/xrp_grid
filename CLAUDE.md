@@ -37,6 +37,30 @@ disagree, the handoff docs win for state; this file wins for how to work.
 > timeouts; pytz dropped from scheduler). LETTA FULLY
 > DECOUPLED. Decision layer = the hand-rolled arbiter orchestrator
 > (`magi/council_v2.py`), live on a GATE-PRIMARY cadence.**
+> **As of 2026-06-26 (CURRENT — supersedes the 2026-06-25 block below): the trading
+> engine `magi.service` is RUNNING ON PAPER again (restarted 2026-06-26, `enabled` +
+> `active`); the dashboard is up at `https://api.ethobs.uk`. The blind-review persona
+> rewrite is VALIDATED — a pre-restart audit found the rewritten personas read
+> world_state paths that DON'T EXIST (`indicators.bearish_trend`,
+> `indicators.drawdown_from_high_7d`) and `validate_schema` was FAILing; fixed (paths
+> repointed/dropped + schema consumer lists synced → `validate_schema` PASS), and
+> `run_council` on the stored downtrend world_state then flipped MAINTAIN →
+> STAND_ASIDE (2× STAND_ASIDE + 1× HALT, clear Condorcet). On the live restart the
+> startup council voted STAND_ASIDE on the real downtrend → buys cancelled, the book
+> is sells-only (the correct protective posture). FIXED this session: the stale-counter
+> bug (`get_trajectory_context` floors at `paper_run_started_utc`;
+> `melchior_blocked_cycles` no longer miscounts `THESIS_HOLDS`; `reset_paper_book.py`
+> clears the down_walk anchors); and a SEPARATE engine bug found by the live restart
+> (NOT the audit — a thoroughness miss, see §8) — the post-action GRID INTEGRITY guard
+> (`engine.py` ~1611) tried to emergency-rebuild the council-mandated one-sided book
+> (re-adding buys into the downtrend) and errored on a missing `spacing_pct`; now the
+> guard leaves a PAUSE_LONGS/STAND_ASIDE/non-DEPLOY one-sided book alone and only
+> rebuilds a genuine DEPLOY-stance degeneracy (with the effective spacing). ADDED: an
+> off-schedule wake alert (ntfy, existing MAGI topic) on any council wake that is not
+> the daily 20:00 ET floor or a manual run (startup/backstop/W1/W2). Only the DOWNTREND
+> regime is validated so far; benign/ranging + RECONFIGURE are exercised by the live
+> paper run. The 2026-06-25 block below is now historical (its SHUT-DOWN /
+> NOT-validated / reset-INCOMPLETE claims are superseded).**
 > **As of 2026-06-25 (END of session): the trading engine `magi.service` is SHUT
 > DOWN by operator order; `magi-dashboard.service` IS running — waitress on :5000,
 > public at `https://api.ethobs.uk`. SEQUENCE this session: the engine was

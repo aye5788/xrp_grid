@@ -1,5 +1,47 @@
 # Next Build Tasks
 
+> **TOP OF QUEUE 2026-06-26 — PERSONA REWRITE VALIDATED; ENGINE RESTARTED ON PAPER.**
+> The blind-review persona rewrite (item 1 of the 2026-06-25 block below) is now
+> **VALIDATED** and `magi.service` is **RUNNING on paper again** (restarted
+> 2026-06-26). Done this session, in order:
+> 1. **Persona rewrite VALIDATED.** A pre-restart audit found the rewritten personas
+>    referenced world_state paths that DON'T EXIST (`indicators.bearish_trend`,
+>    `indicators.drawdown_from_high_7d` — the latter is TOP-LEVEL, not under
+>    `indicators`) and `validate_schema` was FAILing (10 ERROR). Fixed (paths
+>    repointed/dropped, schema consumer lists synced) → `validate_schema` PASS. Then
+>    `run_council` on `cyc_1782417183`'s stored downtrend `world_state` flipped
+>    MAINTAIN → **STAND_ASIDE** (2× STAND_ASIDE + 1× HALT, clear Condorcet). Only the
+>    DOWNTREND regime is validated; benign/ranging + RECONFIGURE are exercised by the
+>    live paper run.
+> 2. **Stale-counter data bug FIXED.** `get_trajectory_context` floors the lookback at
+>    `paper_run_started_utc`; `melchior_blocked_cycles` no longer miscounts
+>    `THESIS_HOLDS`; `reset_paper_book.py` clears `down_walk_last_centre`/`_ts`.
+> 3. **Engine GRID INTEGRITY guard FIXED** (found by the live restart, NOT the audit —
+>    a thoroughness miss, see `CLAUDE.md` §8). On a STAND_ASIDE the engine cancelled
+>    buys (correct) but the post-action guard (`engine.py` ~1611) tried to
+>    "emergency-rebuild" the one-sided book — which would re-add buys into the downtrend
+>    AND errored on a missing `spacing_pct`. Now the guard leaves a council-mandated
+>    one-sided book (PAUSE_LONGS / STAND_ASIDE / non-DEPLOY stance) alone; a genuine
+>    DEPLOY-stance degeneracy rebuilds with the effective spacing.
+> 4. **Off-schedule wake alert ADDED.** `run_magi_cycle` pages the operator via ntfy
+>    (existing MAGI topic) on any wake that is NOT the daily 20:00 ET floor or a manual
+>    run (startup, 25h backstop, W1/W2). Priority 3 (buzz; bump to 5 for DND bypass).
+> 5. **Paper restart done.** Clean reset → fresh 2.5%/5-level grid ~$1.016 → startup
+>    council STAND_ASIDE → sells-only protective book. The stance is re-judged at the
+>    next daily floor (and W1/backstop); it stays sells-only until the council votes
+>    DEPLOY on a recovered regime.
+>
+> **STILL OPEN (hygiene / follow-ups):** delete dead arbiter modules
+> (`balthasar_claude.py`/`melchior_deepseek.py`/`casper_gemini.py` + `RegimeVote`/
+> `GridVote`/`RiskVote`); the `engine.py:1328` "No grid state → initialise fresh"
+> fallback also calls `initialise_grid()` with no spacing (fails safe — logs + builds
+> nothing — but should route through geometry); ONE_GRID invariant (`engine.py:750`)
+> detects-but-does-not-enforce; W2's off-schedule re-judge is DARK while the tape
+> collector is stood down (its verdict arm), so the STAND_ASIDE EXIT is daily-floor-
+> driven until the tape returns or a price/indicator W2 arm is added.
+>
+> The 2026-06-25 block below is the prior state — its items 1–2 are now DONE.
+
 > **TOP OF QUEUE 2026-06-25 (end of session) — council-layer open items, in order.
 > Engine SHUT DOWN by operator order; do NOT restart until at least (1) and (2) are
 > done and the operator directs it. Full context: `05_COUNCIL_REDESIGN.md` §7d,

@@ -292,6 +292,27 @@ def run_magi_cycle(trigger='scheduled'):
     """
     log.info(f"--- MAGI CYCLE (trigger={trigger}) ---")
 
+    # Off-schedule wake alert (phone via ntfy, existing MAGI topic). The daily
+    # 20:00 ET floor ('scheduled') is the expected once-a-day cycle, and an
+    # operator-initiated 'manual' run is self-evident; EVERY other trigger means
+    # the council was woken autonomously off-schedule — the startup gate
+    # ('startup'), the 25h max-silence backstop ('backstop_silence'), or a
+    # W-series gate wake ('gate_wake:W1' / 'gate_wake:W2'). Those are exactly the
+    # cases the operator asked to be paged on. Best-effort: wrapped so a notify
+    # failure can never affect the cycle.
+    if trigger not in ('scheduled', 'manual'):
+        try:
+            from magi.notify import send_ntfy
+            send_ntfy(
+                title="MAGI woken off-schedule",
+                body=(f"trigger={trigger} — council convened outside the daily "
+                      f"20:00 ET floor. Open dashboard."),
+                severity='warning',
+                category='offschedule_wake',
+            )
+        except Exception as e:
+            log.warning(f"off-schedule wake ntfy failed (non-blocking): {e}")
+
     # Record cycle time for the gate-wake throttle. Set for EVERY cycle
     # (scheduled, startup, manual, gate wake) so an off-schedule wake can't
     # fire within WAKE_MIN_INTERVAL_MIN of any prior cycle.

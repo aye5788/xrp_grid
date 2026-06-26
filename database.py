@@ -860,12 +860,23 @@ def get_trajectory_context():
     from datetime import timedelta
     conn = get_conn()
 
-    # Last 5 MAGI decisions for trajectory
-    decisions = conn.execute(
-        "SELECT timestamp, melchior_action, balthasar_action, "
-        "casper_action, consensus_risk_action, consensus_grid_action "
-        "FROM magi_decisions ORDER BY timestamp DESC LIMIT 5"
-    ).fetchall()
+    # Last 5 MAGI decisions for trajectory — scoped to the CURRENT paper run so a
+    # restart cannot feed pre-reset (different-book) cycles into trajectory context.
+    # paper_run_started_utc is blank in live mode -> no filter (full history), correct
+    # there. Mirrors the pnl scope-cutoff discipline.
+    _run_cutoff = get_system_state('paper_run_started_utc', default=None)
+    _dec_sql = ("SELECT timestamp, melchior_action, balthasar_action, "
+                "casper_action, consensus_risk_action, consensus_grid_action "
+                "FROM magi_decisions ")
+    if _run_cutoff:
+        decisions = conn.execute(
+            _dec_sql + "WHERE timestamp >= ? ORDER BY timestamp DESC LIMIT 5",
+            (_run_cutoff,)
+        ).fetchall()
+    else:
+        decisions = conn.execute(
+            _dec_sql + "ORDER BY timestamp DESC LIMIT 5"
+        ).fetchall()
 
     # Last 5 inventory snapshots for skew trajectory
     inv_rows = conn.execute(
@@ -947,11 +958,12 @@ def get_trajectory_context():
         result['regime_consecutive'] = count
 
         # How many consecutive cycles has Melchior's recommendation been blocked
-        # (grid action was MAINTAIN but Melchior didn't say MAINTAIN)
+        # (grid action was MAINTAIN but Melchior's verdict was not a maintain —
+        # 'THESIS_HOLDS' in the blind-review era, 'MAINTAIN' in the arbiter era)
         blocked = 0
         for d in decisions:
             if (d['consensus_grid_action'] == 'MAINTAIN' and
-                    d['melchior_action'] != 'MAINTAIN'):
+                    d['melchior_action'] not in ('MAINTAIN', 'THESIS_HOLDS')):
                 blocked += 1
             else:
                 break

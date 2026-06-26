@@ -69,6 +69,10 @@ print(f"[3] paper_run_started_utc -> {now_iso}")
 
 # --- 4. reset streak + assert pause flags clear ---
 set_system_state("down_walk_streak", "0")
+# also clear the down-walk LINK anchors (engine reads '' as "no anchor" -> streak 0),
+# so the first post-restart rebuild cannot link to the pre-reset centre/timestamp.
+set_system_state("down_walk_last_centre", "")
+set_system_state("down_walk_last_ts", "")
 gs2 = get_current_grid_state() or {}
 if gs2.get("pause_longs") or gs2.get("pause_shorts"):
     print(f"[4] WARNING: pause flags set (longs={gs2.get('pause_longs')} "

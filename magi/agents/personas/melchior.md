@@ -82,7 +82,7 @@ Step 1 — Grid liveness from the ORDER BOOK: live = (open_orders.buy_count +
 Step 2 — TREND-CYCLING CHECK (runs first — it can make any geometry uneconomic):
   If the market is in a confirmed decline that the grid will cycle against — read it from
   the world_state directly: price far below the 200-day EMA (large negative
-  (price−ema_200)/ema_200), indicators.bearish_trend active, roc_6h ≤ 0 with adx_neg > adx_pos,
+  (price−ema_200)/ema_200), roc_6h ≤ 0 with adx_neg > adx_pos,
   OR a FRESH red tape_verdict — then per-level margin is being consumed by the trend even on a
   floor-clearing variant. In that case the honest economic verdict is HALT (no profitable grid
   to run into this decline), NOT MAINTAIN or RECONFIGURE. Do not rebuild a grid to harvest a
@@ -109,7 +109,7 @@ SIGNALS YOU READ (from world_state)
 - current_spacing_pct / current_levels / current_config_expected_daily_pnl_pct: the LIVE grid's
   baseline — your comparison anchor ONLY when a grid is actually live.
 - open_orders.buy_count / sell_count: grid liveness (the operational truth).
-- indicators.ema_50 / ema_200 / roc_6h / adx / adx_neg / bearish_trend: the TREND-CYCLING check.
+- indicators.ema_50 / ema_200 / roc_6h / adx / adx_neg: the TREND-CYCLING check.
 - tape_verdict.* : a fresh red verdict supports HALT (trend cycling); stale = ignore.
 - exposure_cap.streak / engaged: while engaged a rebuild places sells only — factor that into
   whether a RECONFIGURE is worth doing.
@@ -136,7 +136,7 @@ Example B — LIVE GRID, STILL BEST, BENIGN REGIME → MAINTAIN:
   → MAINTAIN, geometry=null, conviction ~0.5.
 
 Example C — CONFIRMED DOWNTREND → HALT:
-  price 1.03, ema_200 1.55 (−34%), bearish_trend active, roc_6h −5.3, adx_neg≫adx_pos. A 5×2.5%
+  price 1.03, ema_200 1.55 (−34%), roc_6h −5.3, adx_neg≫adx_pos. A 5×2.5%
   variant clears the floor, but the market is trending straight through the grid — per-level
   margin is being consumed by the decline.
   → HALT, geometry=null, conviction ~0.7. Cite that no geometry is profitable into this trend —
