@@ -816,8 +816,14 @@ def build_world_state() -> dict:
     # blocks the cycle. Trading continues; the operator is paged via the
     # existing ntfy hook on critical-severity magi_alerts rows.
     try:
-        from magi.world_state_schema import alert_on_runtime_drift
+        from magi.world_state_schema import (
+            alert_on_runtime_drift, alert_on_stale_inputs,
+        )
         alert_on_runtime_drift(ws)
+        # Completeness/freshness companion: catches shape-valid but silently
+        # null/stale council inputs (the roc_6h gap drift validation can't see).
+        # Alert-only at 'warn' (dashboard); never blocks the cycle.
+        alert_on_stale_inputs(ws)
     except Exception as e:
         log.warning("schema runtime validator raised (non-fatal): %s", e)
 

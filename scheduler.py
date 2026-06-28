@@ -213,6 +213,23 @@ def run_observer_cycle():
                             "replacement orders"
                         )
                     elif spacing_pct:
+                        # Honor the council's protective posture (and the engine's
+                        # exposure cap) before re-arming a side. The council cancels
+                        # buys at decision time (STAND_ASIDE/PAUSE_LONGS); without
+                        # this gate the next opposite-side fill silently re-creates
+                        # them between council cycles — re-arming the grid into the
+                        # downtrend the posture exists to avoid. Reads existing
+                        # protective state only; makes no market call of its own.
+                        from config import DOWN_WALK_CAP_STREAK
+                        from database import get_system_state
+                        pause_longs = bool(grid_state.get('pause_longs'))
+                        pause_shorts = bool(grid_state.get('pause_shorts'))
+                        try:
+                            _streak = int(get_system_state('down_walk_streak',
+                                                           default='0') or 0)
+                        except (TypeError, ValueError):
+                            _streak = 0
+                        buys_off = pause_longs or _streak >= DOWN_WALK_CAP_STREAK
                         replacements = 0
                         for order in filled:
                             try:
@@ -226,6 +243,24 @@ def run_observer_cycle():
                                         market_price * (1 + spacing_pct), 5
                                     )
                                     replacement_side = 'sell'
+
+                                if replacement_side == 'buy' and buys_off:
+                                    log.info(
+                                        f"[GRID REPLENISH] {order['side'].upper()} fill "
+                                        f"@ {(order.get('fill_price') or order['price']):.4f} "
+                                        f"— buy re-arm SUPPRESSED "
+                                        f"(pause_longs={pause_longs}, "
+                                        f"down_walk_streak={_streak}): honoring "
+                                        f"protective posture, not re-arming into the trend"
+                                    )
+                                    continue
+                                if replacement_side == 'sell' and pause_shorts:
+                                    log.info(
+                                        f"[GRID REPLENISH] {order['side'].upper()} fill "
+                                        f"@ {(order.get('fill_price') or order['price']):.4f} "
+                                        f"— sell re-arm SUPPRESSED (pause_shorts)"
+                                    )
+                                    continue
 
                                 fill_ref = order.get('fill_price') or order['price']
                                 drift_pct = abs(market_price - fill_ref) / market_price
@@ -279,6 +314,152 @@ def run_observer_cycle():
         log.warning(f"Grid config outcome update failed: {e}")
 
 
+def _build_wake_alert(trigger):
+    """Compose a graded, self-explaining off-schedule wake notification.
+
+    Returns (title, body, severity, category). Severity is keyed to the
+    SYSTEM STATE that woke the council, never to a fitted threshold — the
+    DND-bypassing 'critical' tier is reserved for the exposure cap being
+    engaged (a genuine structural 'forced sells-only into a fall' state),
+    not for an ordinary dip. Drawdown is shown as CONTEXT only (the docs
+    rejected drawdown as a trigger: >=6%-from-7d-high is ~60% of all hours).
+
+    Severity ladder:
+      critical  (p5, bypasses DND) — exposure cap engaged
+      attention (p4)               — W2 evidence flip, or W1 DOWNWARD breach
+      warning   (p3)               — W1 UPWARD breach (benign for a protective book)
+      info      (p2)               — startup / max-silence backstop
+
+    The body cites the STANDING stance (pre-cycle, from system_state) and
+    labels it as such — at notification time the council has not yet voted,
+    so it must not claim the new decision. Every read is best-effort; on any
+    failure this returns the plain legacy message at 'warning' severity so a
+    data hiccup never silences the page. The caller wraps the whole thing,
+    so a notify failure can never affect the cycle.
+    """
+    # --- safe fallback (today's bare message) -------------------------------
+    fallback = (
+        "MAGI woken off-schedule",
+        (f"trigger={trigger} — council convened outside the daily "
+         f"20:00 ET floor. Open dashboard."),
+        'warning',
+        'offschedule_wake',
+    )
+    try:
+        import json
+        from database import get_conn, get_system_state
+        from config import DOWN_WALK_CAP_STREAK
+
+        # Standing posture + structural context (pre-cycle).
+        stance = get_system_state('council_stance', default='UNKNOWN') or 'UNKNOWN'
+        try:
+            streak = int(get_system_state('down_walk_streak', default=0) or 0)
+        except (TypeError, ValueError):
+            streak = 0
+
+        # Latest drawdown (context only).
+        dd = None
+        conn = get_conn()
+        try:
+            row = conn.execute(
+                "SELECT details FROM magi_gate_events WHERE trigger_id='T16' "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if row and row['details']:
+                dd = json.loads(row['details']).get('drawdown_pct')
+
+            # Detail of the W-event that caused this wake (if a gate wake).
+            wdet = {}
+            if trigger.startswith('gate_wake:'):
+                wid = trigger.split(':', 1)[1]
+                wrow = conn.execute(
+                    "SELECT details FROM magi_gate_events WHERE trigger_id=? "
+                    "AND fired=1 ORDER BY id DESC LIMIT 1", (wid,)
+                ).fetchone()
+                if wrow and wrow['details']:
+                    wdet = json.loads(wrow['details']) or {}
+        finally:
+            conn.close()
+
+        # drawdown_pct is a positive magnitude of decline from the 7d high;
+        # always render it as a decline so it can't read like a gain.
+        if not isinstance(dd, (int, float)):
+            dd_txt = "dd n/a"
+        elif abs(dd) < 0.05:
+            dd_txt = "at 7d high"
+        else:
+            dd_txt = f"dd -{abs(dd):.1f}%"
+        cap_on = streak >= DOWN_WALK_CAP_STREAK
+
+        # --- non-gate wakes -------------------------------------------------
+        if trigger == 'startup':
+            return ("ℹ️ MAGI woke — service restart",
+                    f"Startup council cycle running. Standing stance {stance}. "
+                    f"Operational — no action expected.",
+                    'info', 'offschedule_wake')
+        if trigger == 'backstop_silence':
+            return ("ℹ️ MAGI woke — 25h heartbeat",
+                    f"Max-silence backstop fired (no cycle in 25h). Standing "
+                    f"stance {stance}. Routine check.",
+                    'info', 'offschedule_wake')
+
+        # --- W2: evidence under the stance shifted --------------------------
+        if trigger == 'gate_wake:W2':
+            if cap_on or wdet.get('cap_engaged'):
+                return ("\U0001f6a8 MAGI woke — EXPOSURE CAP engaged",
+                        f"W2: cap engaged (down-walk x{streak}) → grid forced "
+                        f"sells-only. Standing stance {stance}, {dd_txt}. "
+                        f"Check dashboard.",
+                        'critical', 'offschedule_wake')
+            verdict = wdet.get('verdict')
+            vtxt = f"tape {verdict}" if verdict else "evidence shift"
+            return ("⚠️ MAGI woke — stance evidence shifted",
+                    f"W2: {vtxt}. Standing stance {stance}, {dd_txt}. "
+                    f"Re-judging — worth a look.",
+                    'attention', 'offschedule_wake')
+
+        # --- W1: price left the grid band and stayed out --------------------
+        if trigger == 'gate_wake:W1':
+            direction = wdet.get('direction')
+            consec = wdet.get('consecutive')
+            bars = f"{consec} bars" if consec else "held"
+            # Distance of the last close past the breached band edge.
+            dist_txt = ""
+            try:
+                closes = wdet.get('closes') or []
+                last = float(closes[-1]) if closes else None
+                if last is not None and direction == 'above' and wdet.get('upper'):
+                    dist_txt = f"~{(last/float(wdet['upper'])-1)*100:.1f}% above band, "
+                elif last is not None and direction == 'below' and wdet.get('lower'):
+                    dist_txt = f"~{(1-last/float(wdet['lower']))*100:.1f}% below band, "
+            except (TypeError, ValueError, ZeroDivisionError, IndexError):
+                dist_txt = ""
+
+            if cap_on:
+                return ("\U0001f6a8 MAGI woke — EXPOSURE CAP engaged",
+                        f"W1 breach while cap engaged (down-walk x{streak}) → "
+                        f"sells-only. Standing stance {stance}, {dd_txt}. "
+                        f"Check dashboard.",
+                        'critical', 'offschedule_wake')
+            if direction == 'below':
+                return ("⚠️ MAGI woke — price broke band ↓",
+                        f"W1: price {dist_txt}{bars} — into the downtrend. "
+                        f"Standing stance {stance}, {dd_txt}. Worth a look.",
+                        'attention', 'offschedule_wake')
+            # Upward (or unknown-direction) breach: benign for a protective book.
+            arrow = "↑" if direction == 'above' else "·"
+            return (f"ℹ️ MAGI woke — price poke {arrow} (minor)",
+                    f"W1: price {dist_txt}{bars}. Standing stance {stance}, "
+                    f"cap off, {dd_txt}. Minor — likely no action.",
+                    'warning', 'offschedule_wake')
+
+        # Unknown off-schedule trigger: legacy message, but tag the trigger.
+        return fallback
+    except Exception as e:
+        log.warning(f"wake-alert compose failed, using plain message: {e!r}")
+        return fallback
+
+
 def run_magi_cycle(trigger='scheduled'):
     """Run full MAGI supervision cycle and apply to grid.
 
@@ -303,12 +484,12 @@ def run_magi_cycle(trigger='scheduled'):
     if trigger not in ('scheduled', 'manual'):
         try:
             from magi.notify import send_ntfy
+            title, body, severity, category = _build_wake_alert(trigger)
             send_ntfy(
-                title="MAGI woken off-schedule",
-                body=(f"trigger={trigger} — council convened outside the daily "
-                      f"20:00 ET floor. Open dashboard."),
-                severity='warning',
-                category='offschedule_wake',
+                title=title,
+                body=body,
+                severity=severity,
+                category=category,
             )
         except Exception as e:
             log.warning(f"off-schedule wake ntfy failed (non-blocking): {e}")

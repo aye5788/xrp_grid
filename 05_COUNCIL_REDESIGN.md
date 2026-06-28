@@ -11,7 +11,26 @@ older docs, this doc wins.
 
 ---
 
-## TL;DR — where we are right now (updated 2026-06-25)
+## TL;DR — where we are right now (updated 2026-06-28)
+- **2026-06-28 — AUDIT + 3 FIXES (engine running on paper; all committed).** A real
+  audit found a HIGH **council-bypass**: the observer's grid-replenishment
+  (`scheduler.py`) re-armed a BUY on every sell fill ignoring the council's
+  `pause_longs`/STAND_ASIDE and the exposure cap, silently re-creating longs into the
+  downtrend between cycles (verified firing 06-26/06-27, cancelled by luck) — fixed by
+  gating re-arm on `pause_longs` OR exposure-cap engagement (`pause_shorts` for sells);
+  it reads existing protective state and makes no market call (vetted as
+  council-restoring, NOT a new hard rule — the live bug was itself the bypass). Also:
+  `roc_6h` was nulled hourly by `gate_monitor` (empty-6h-list 2nd writer to
+  `indicators`) — fixed via 1h→6h resample, verified live; and a new ALERT-ONLY
+  freshness monitor (`world_state_schema.alert_on_stale_inputs`) for silently
+  null/stale council inputs (drift validation is shape-only — which is why the roc_6h
+  outage produced zero alerts). The aggregation (Condorcet/Borda), anonymizer, schema
+  invariants, GRID INTEGRITY guard, stance translation, exposure cap and paper fills
+  were re-VERIFIED SOUND. `tape_verdict` is permanently dead (`tape/history.db` absent
+  on the box). Open follow-ups: seat-grader vs stance-grader STAND_ASIDE predicate
+  mismatch (observability), `Ranking` schema doesn't enforce a permutation. Lesson
+  (`CLAUDE.md` §8): the first audit pass was a status-check that MISSED the live
+  council-bypass — again; it surfaced only when the operator pushed for a real audit.
 - **2026-06-26 — VALIDATED + RESTARTED + engine-guard fix (supersedes the SHUT-DOWN
   state below).** The persona rewrite is VALIDATED: a pre-restart audit found the
   rewritten personas read non-existent world_state paths (`indicators.bearish_trend`,

@@ -385,11 +385,16 @@ class GateMonitor:
         instead of on the 10-min REST poll."""
         try:
             from database import get_candles, upsert_indicators
-            from observer import compute_indicators, get_candles_coinbase
+            from observer import (
+                compute_indicators, get_candles_coinbase, _resample_6h_from_1h,
+            )
             # XRP candles from our DB (which the WS just updated)
             xrp_1h = list(reversed(get_candles('1h', limit=300)))
-            xrp_6h = list(reversed(get_candles('6h', limit=100))) if False else []
-            # No 6h candles stored — observer's pipeline accepts empty list
+            # Resample 6h bars from the 1h candles already in hand (the DB stores
+            # no 6h candles). Mirrors observer.poll_cycle's flaky-fetch fallback so
+            # roc_6h stays populated — otherwise this hourly recompute upserts
+            # roc_6h=null over poll_cycle's value and blinds the council's momentum read.
+            xrp_6h = _resample_6h_from_1h(xrp_1h)
             xrp_1d = list(reversed(get_candles('1d', limit=300)))
             # BTC daily from Coinbase (always — same as observer)
             btc_1d = get_candles_coinbase("BTC-USD", "ONE_DAY", 300)

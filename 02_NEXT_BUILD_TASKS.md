@@ -1,5 +1,30 @@
 # Next Build Tasks
 
+> **TOP OF QUEUE 2026-06-28 — AUDIT + 3 FIXES SHIPPED (committed this session).**
+> A real audit (4 parallel finders + own verification) found & fixed:
+> 1. **HIGH — replenishment council-bypass FIXED.** `scheduler.py`'s post-fill grid
+>    replenishment re-armed a BUY on every sell fill checking only price-drift — never
+>    `pause_longs`/stance/exposure-cap — so the council's STAND_ASIDE was silently
+>    undone between cycles (re-arming longs into the downtrend; verified firing
+>    06-26/06-27, cancelled by luck). Now gated on `pause_longs` OR
+>    `down_walk_streak>=DOWN_WALK_CAP_STREAK` (buys) and `pause_shorts` (sells).
+> 2. **MED — `roc_6h` nulled by gate_monitor FIXED.** A 2nd writer to `indicators`
+>    passed an empty 6h list → overwrote poll_cycle's value with NULL hourly. Now
+>    resamples 6h from the 1h bars (`_resample_6h_from_1h`); verified live.
+> 3. **MED — freshness monitor ADDED.** `world_state_schema.alert_on_stale_inputs`,
+>    edge-triggered, ALERT-ONLY (`warn`, magi_alerts `stale_council_input`); catches
+>    silently null/stale council inputs that shape-only drift validation misses.
+>
+> **OPEN FOLLOW-UPS (not done):**
+> - **tape_verdict dead** — `tape/history.db` absent on the box; restore from GCS
+>   (`gs://xrp-grid-tape-backups-ayn88/history/history.db.gz`) or demote it from
+>   Balthasar's "primary" stance input in schema/persona.
+> - **Grader predicate mismatch** — seat grader (`database._grade_action_row`:
+>   STAND_ASIDE correct iff endpoint drift<0) ≠ stance grader (5%-band down-break);
+>   the "Matches the stance grader" comment is false. Observability only.
+> - **`Ranking` schema** doesn't enforce a permutation (`order` can dup/omit a label
+>   → silently distorts the Condorcet/Borda tally). Low prob, unbounded effect.
+
 > **TOP OF QUEUE 2026-06-26 — PERSONA REWRITE VALIDATED; ENGINE RESTARTED ON PAPER.**
 > The blind-review persona rewrite (item 1 of the 2026-06-25 block below) is now
 > **VALIDATED** and `magi.service` is **RUNNING on paper again** (restarted

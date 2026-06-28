@@ -1,5 +1,14 @@
 # MAGI — XRP Grid Bot — Project Overview
 
+> **2026-06-28 — CURRENT (supersedes all status blocks below for live state).**
+> `magi.service` is RUNNING on paper (blind-review council; see `05` and the STATE
+> LEDGER in `01`). A 2026-06-28 audit fixed a HIGH council-bypass in the observer's
+> grid replenishment (re-armed buys ignoring the council's STAND_ASIDE), fixed `roc_6h`
+> being nulled hourly by `gate_monitor`, and added an alert-only council-input
+> freshness monitor (`alert_on_stale_inputs`). The tape warehouse `history.db` is GONE
+> from the box → `tape_verdict` is dead (restore from GCS). Everything below is older
+> context. Full detail: `01` (latest block) + `05` (2026-06-28 TL;DR).
+
 > **STATUS — AGENT LAYER MIGRATED TO GOOGLE ADK (in code, 2026-05-31); NOT RUN LIVE.**
 > MAGI is still shut down at the service level (stopped + disabled 2026-05-28; no
 > live orders). The council's agent-call layer has been **rebuilt off Letta onto

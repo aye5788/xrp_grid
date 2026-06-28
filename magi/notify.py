@@ -33,9 +33,11 @@ _NTFY_TIMEOUT_SEC = 3
 _BODY_MAX_CHARS = 200
 
 _SEVERITY_PRIORITY = {
-    'critical': 5,
-    'warning':  3,
-    'warn':     3,
+    'critical':  5,
+    'attention': 4,
+    'warning':   3,
+    'warn':      3,
+    'info':      2,
 }
 
 

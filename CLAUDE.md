@@ -37,7 +37,23 @@ disagree, the handoff docs win for state; this file wins for how to work.
 > timeouts; pytz dropped from scheduler). LETTA FULLY
 > DECOUPLED. Decision layer = the hand-rolled arbiter orchestrator
 > (`magi/council_v2.py`), live on a GATE-PRIMARY cadence.**
-> **As of 2026-06-26 (CURRENT — supersedes the 2026-06-25 block below): the trading
+> **As of 2026-06-28 (CURRENT — supersedes the 2026-06-26 block below): `magi.service`
+> is RUNNING on paper. A real audit (4 parallel finders + own verification) found &
+> fixed 3 bugs (committed): (1) HIGH — the observer grid-replenishment (`scheduler.py`)
+> re-armed a BUY on every sell fill ignoring `pause_longs`/stance/exposure-cap — a
+> council-BYPASS that silently undid STAND_ASIDE between cycles (verified firing
+> 06-26/06-27; cancelled by luck) — now gated on the council's protective flags
+> (`pause_longs` OR exposure-cap for buys, `pause_shorts` for sells; reads existing
+> state, makes no market call). (2) MED — `roc_6h` was nulled hourly by `gate_monitor`'s
+> empty-6h-list recompute (a 2nd writer to the `indicators` table); fixed to resample
+> 6h from the 1h bars, verified live. (3) MED — added alert-only
+> `world_state_schema.alert_on_stale_inputs` (catches shape-valid-but-null/stale council
+> inputs that drift-validation can't see). Aggregation/anonymizer/engine-guards/
+> paper-fills re-VERIFIED SOUND. Tape `history.db` is gone from the box → `tape_verdict`
+> dead. §8 lesson: the first audit pass was a status-check that MISSED the live
+> council-bypass — again. Detail: `01` (latest) + `05` (2026-06-28 TL;DR). Open:
+> grader-predicate mismatch, `Ranking` permutation guard, tape restore/demote.**
+> **As of 2026-06-26 (supersedes the 2026-06-25 block below): the trading
 > engine `magi.service` is RUNNING ON PAPER again (restarted 2026-06-26, `enabled` +
 > `active`); the dashboard is up at `https://api.ethobs.uk`. The blind-review persona
 > rewrite is VALIDATED — a pre-restart audit found the rewritten personas read

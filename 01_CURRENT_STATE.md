@@ -1,6 +1,29 @@
 # MAGI — Current State
 
-> **2026-06-25 — LATEST. Dashboard reconnected publicly (new locally-managed
+> **2026-06-28 — LATEST. Real audit (4 parallel finders + own DB verification) found
+> & fixed 3 bugs; engine RUNNING on paper throughout; all fixes committed.**
+> (1) **HIGH — council-bypass.** The observer's grid-replenishment (`scheduler.py`)
+> re-armed a BUY on every sell fill checking only price-drift — never `pause_longs`,
+> stance, or the exposure cap — silently undoing the council's STAND_ASIDE between
+> cycles (verified firing 06-26/06-27; both re-armed buys cancelled by luck before
+> price reached them). Fixed: gate buy re-arm on `pause_longs` OR
+> `down_walk_streak>=DOWN_WALK_CAP_STREAK`, sell re-arm on `pause_shorts` (reads
+> existing protective state, makes no market call). (2) **MED — `roc_6h` nulled
+> hourly** by `gate_monitor`'s recompute (a 2nd writer to the `indicators` table that
+> passed an empty 6h list → overwrote poll_cycle's value with NULL on ~99% of
+> completed-hour rows for ~3 days); fixed to resample 6h from the 1h bars; verified
+> live (21:00/22:00 rows now carry roc_6h). (3) **MED — freshness monitor added**
+> (`world_state_schema.alert_on_stale_inputs`): edge-triggered, ALERT-ONLY (`warn`,
+> magi_alerts `stale_council_input`) — catches silently null/stale council inputs that
+> shape-only drift validation misses. ALSO: tape `history.db` is GONE from the box →
+> `tape_verdict` permanently dead (restore from GCS or demote). Aggregation/anonymizer/
+> engine-guards/paper-fills re-VERIFIED SOUND; `roc_6h` was the ONLY partial-write
+> instance. Open: grader-predicate mismatch, `Ranking` permutation guard, tape decision.
+> Design-goal status unchanged: surviving, but no round trip since 06-12 (fee-positive
+> untestable) and no STAND_ASIDE stance matured to 72h (accuracy not yet measurable).
+> Detail: `05` (2026-06-28 TL;DR), `CLAUDE.md` STATUS.**
+
+> **2026-06-25. Dashboard reconnected publicly (new locally-managed
 > cloudflared tunnel) + Langfuse instrumentation rebuilt for the blind-review
 > council + the Casper propose 400 FIXED. The trading ENGINE (`magi.service`) stayed
 > SHUT DOWN (paper hold) throughout — none of this session's work runs the engine.
