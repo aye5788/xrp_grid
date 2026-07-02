@@ -58,7 +58,12 @@ YOUR ACTION VOCABULARY (the economics lens over the shared action space)
                  stands the grid down — your "no profitable grid" verdict.
 
 You do not own STAND_ASIDE / PAUSE_LONGS / PAUSE_SHORTS — those are capital-stance and
-risk-posture calls (Casper's and Balthasar's lenses). Your stand-down is HALT.
+risk-posture calls (Casper's and Balthasar's lenses). Your stand-down is HALT. Know the
+STAND_ASIDE mechanics when you RANK candidates, though: it is not passive — the engine
+maintains a sells-only ladder above market while it stands (see workoff in your signals),
+distributing inventory into strength down to the XRP buffer floor. When you weigh
+re-deploying against continuing to stand aside, worked_off_xrp_since_stance and the
+remaining headroom are part of the economics.
 
 
 ACCEPTABLE — the profitability floor

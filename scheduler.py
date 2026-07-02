@@ -145,6 +145,108 @@ def _first_boot_geometry():
     return float(rank1['spacing_pct']), int(rank1['levels'])
 
 
+def maintain_workoff_ladder(engine, market_price):
+    """STAND_ASIDE inventory work-off ladder (2026-07-02).
+
+    The council's STAND_ASIDE action promises "cancel buys, work inventory off"
+    (magi/agents/schemas.py:CandidateDecision), but the fill replenisher above
+    can only re-arm the OPPOSITE side of a fill — under STAND_ASIDE no buys
+    exist, so once the grid's pre-existing sell rungs fill, the book goes empty
+    and the bulk of the inventory sits unmanaged (verified 2026-07-02: 6.6 of
+    ~30 XRP worked off, then inert). This maintains a resting sells-only ladder
+    ABOVE market while the STANDING stance is STAND_ASIDE: maker-only resting
+    rungs (no taker anchor), ORDER_SIZE_XRP per rung, ladder depth capped at
+    the grid's level count, and never committing XRP past the
+    [XRP_BUFFER_FLOOR] headroom (min_xrp_buffer_usd). Bootstrap and re-arm are
+    the same operation: top the resting sell count back up to target, anchored
+    to current market. Reads the council's standing mandate and existing
+    protective state only; makes no market call of its own (same class as the
+    replenishment posture gate).
+
+    Activation gate: inert until a council cycle exists at/after
+    system_state['workoff_armed_after_utc'] (operator-approved arming point,
+    set 2026-07-02 to the next daily wake) — the ladder starts from the
+    system's own decision loop, never from a code deploy. A missing key means
+    no gate (armed).
+
+    Exit: any standing stance other than STAND_ASIDE makes this a no-op;
+    resting rungs are left to the normal decision path (a DEPLOY rebuild
+    replaces the book via rule 6; HOLD keeps resting orders by definition).
+    """
+    from database import (get_system_state, get_conn,
+                          get_current_grid_state)
+    from config import ORDER_SIZE_XRP
+    from magi.orchestrator import HARD_RULES
+
+    if not market_price:
+        return
+    stance = (get_system_state('council_stance', default='') or '').strip()
+    if stance != 'STAND_ASIDE':
+        return
+
+    armed_after = (get_system_state('workoff_armed_after_utc',
+                                    default='') or '').strip()
+    conn = get_conn()
+    try:
+        last_cycle = conn.execute(
+            'SELECT MAX(timestamp) FROM debate_records').fetchone()[0]
+        if not last_cycle or (armed_after and last_cycle < armed_after):
+            return
+        inv = conn.execute(
+            'SELECT xrp_held FROM inventory ORDER BY timestamp DESC LIMIT 1'
+        ).fetchone()
+        resting = [float(r['price']) for r in conn.execute(
+            "SELECT price FROM grid_orders "
+            "WHERE status='open' AND side='sell'").fetchall()]
+    finally:
+        conn.close()
+
+    grid_state = get_current_grid_state() or {}
+    spacing = grid_state.get('spacing_pct')
+    levels = int(grid_state.get('levels') or 0) or 5
+    if not spacing or not inv:
+        return
+    if grid_state.get('pause_shorts'):
+        # [XRP_BUFFER_FLOOR] (or the council) has the sell side off — honor it.
+        return
+
+    xrp_held = float(inv['xrp_held'] or 0)
+    floor_xrp = HARD_RULES['min_xrp_buffer_usd'] / market_price
+    committed = len(resting) * ORDER_SIZE_XRP
+    affordable_new = int((xrp_held - floor_xrp - committed) / ORDER_SIZE_XRP)
+    target = min(levels, len(resting) + max(0, affordable_new))
+    needed = target - len(resting)
+    if needed <= 0:
+        return
+
+    placed = 0
+    k = 1
+    tolerance = spacing * market_price * 0.5
+    while placed < needed and k <= levels + len(resting):
+        rung = round(market_price * (1 + spacing * k), 5)
+        if all(abs(rung - p) > tolerance for p in resting):
+            try:
+                result = engine.place_order('sell', rung, ORDER_SIZE_XRP)
+            except Exception as e:
+                log.warning(f"[WORKOFF] place failed @ {rung:.5f}: {e}")
+                break
+            if result.get('status') in ('open', 'filled'):
+                placed += 1
+                resting.append(rung)
+                log.info(
+                    f"[WORKOFF] SELL rung placed @ {rung:.5f} "
+                    f"(STAND_ASIDE work-off; {len(resting)}/{target} resting, "
+                    f"floor headroom {(xrp_held - floor_xrp - len(resting)*ORDER_SIZE_XRP):.2f} XRP)"
+                )
+            else:
+                log.warning(
+                    f"[WORKOFF] rung rejected @ {rung:.5f}: "
+                    f"status={result.get('status')}"
+                )
+                break
+        k += 1
+
+
 def run_observer_cycle():
     """Run data collection cycle, shadow tick, and paper fill simulation."""
     log.info("--- OBSERVER CYCLE ---")
@@ -303,6 +405,12 @@ def run_observer_cycle():
                             "[GRID REPLENISH] No grid state found — skipping "
                             "replacement orders"
                         )
+            # STAND_ASIDE work-off ladder — runs every observer cycle (not
+            # just on fills) because the bootstrap case is an EMPTY book.
+            try:
+                maintain_workoff_ladder(engine, price)
+            except Exception as e:
+                log.error(f"[WORKOFF] ladder maintenance error: {e}")
     except Exception as e:
         log.error(f"Shadow tick error: {e}")
 

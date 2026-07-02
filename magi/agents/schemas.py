@@ -253,8 +253,11 @@ class CandidateDecision(BaseModel):
             "The single final action over the shared action space. MAINTAIN: keep "
             "the live grid as-is. RECONFIGURE: rebuild to a better geometry (carries "
             "geometry). PAUSE_LONGS / PAUSE_SHORTS: hold one side off. STAND_ASIDE: "
-            "structural downtrend / capital-erosion risk — cancel buys, work "
-            "inventory off. HALT: stand the grid down entirely."
+            "structural downtrend / capital-erosion risk — cancel buys and ACTIVELY "
+            "work inventory off: the engine maintains a sells-only resting ladder "
+            "above market (down to the XRP buffer floor) for as long as this stance "
+            "stands, so a persisting STAND_ASIDE keeps distributing inventory into "
+            "strength (see world_state.workoff). HALT: stand the grid down entirely."
         )
     )
     geometry: Optional[Geometry] = Field(

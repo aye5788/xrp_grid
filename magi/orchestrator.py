@@ -654,6 +654,57 @@ def _council_stance_block() -> dict:
     return out
 
 
+def _workoff_block(price) -> dict:
+    """STAND_ASIDE work-off ladder state (2026-07-02) for the council's eyes —
+    the same standing-mandate keys scheduler.maintain_workoff_ladder acts on.
+    While the standing stance is STAND_ASIDE (and the ladder is armed), the
+    engine maintains a sells-only resting ladder above market, so the seats
+    must know their stance is actively distributing inventory, not passively
+    waiting. worked_off_xrp_since_stance = sell fills since the stance was
+    set — realized distribution the seats should weigh against re-deploying.
+    Never raises."""
+    out = {"active": False, "rungs_resting": 0,
+           "xrp_headroom_above_floor": None,
+           "worked_off_xrp_since_stance": None}
+    try:
+        from database import get_conn
+        stance = get_system_state('council_stance', default='') or ''
+        armed_after = get_system_state('workoff_armed_after_utc',
+                                       default='') or ''
+        conn = get_conn()
+        try:
+            last_cycle = conn.execute(
+                'SELECT MAX(timestamp) FROM debate_records').fetchone()[0]
+            out["rungs_resting"] = conn.execute(
+                "SELECT COUNT(*) FROM grid_orders "
+                "WHERE status='open' AND side='sell'").fetchone()[0]
+            inv = conn.execute(
+                'SELECT xrp_held FROM inventory '
+                'ORDER BY timestamp DESC LIMIT 1').fetchone()
+            since = get_system_state('council_stance_since', default='') or ''
+            if since:
+                worked = conn.execute(
+                    "SELECT COALESCE(SUM(size), 0) FROM grid_orders "
+                    "WHERE status='filled' AND side='sell' "
+                    "AND COALESCE(filled_at, timestamp) >= ?",
+                    (since,)).fetchone()[0]
+                out["worked_off_xrp_since_stance"] = round(float(worked), 4)
+        finally:
+            conn.close()
+        out["active"] = bool(
+            stance == 'STAND_ASIDE'
+            and last_cycle
+            and (not armed_after or last_cycle >= armed_after)
+        )
+        if inv and price:
+            floor_xrp = HARD_RULES['min_xrp_buffer_usd'] / price
+            out["xrp_headroom_above_floor"] = round(
+                float(inv['xrp_held'] or 0) - floor_xrp, 4)
+    except Exception as e:
+        log.warning("workoff block read failed (emitting inert): %s", e)
+    return out
+
+
 def build_world_state() -> dict:
     """Snapshot of all market/portfolio context for the cycle."""
     from grid.engine import GridEngine
@@ -798,6 +849,9 @@ def build_world_state() -> dict:
         "tape_verdict":             _tape_verdict_block(),
         "exposure_cap":             _exposure_cap_block(),
         "council_stance":           _council_stance_block(),
+        # 2026-07-02: STAND_ASIDE work-off ladder state — the stance now
+        # actively distributes inventory; the seats must see that.
+        "workoff":                  _workoff_block(price),
     }
 
     # Gate trip-wire events since the last cycle. List of dicts:

@@ -64,10 +64,16 @@ YOUR ACTION VOCABULARY (the survival lens over the shared action space)
                  building, OR a down-bias is feeding the long side (stop buying the dip
                  before it becomes a confirmed bleed).
   PAUSE_SHORTS — stop placing sells: the XRP leg is exhausted / USD-heavy concentration.
-  STAND_ASIDE  — a CONFIRMED capital-eroding downtrend: cancel buys and work inventory off
-                 into any strength. This is your protective vote and you MUST cast it when
-                 the downtrend evidence aligns (below) — it is the call that was historically
-                 missed by holding CLEAR.
+  STAND_ASIDE  — a CONFIRMED capital-eroding downtrend: cancel buys and ACTIVELY work
+                 inventory off into any strength — the engine maintains a sells-only
+                 ladder above market for as long as the stance stands (see workoff in
+                 your signals), distributing inventory rung by rung down to the XRP
+                 buffer floor. This is your protective vote and you MUST cast it when
+                 the downtrend evidence aligns (below) — it is the call that was
+                 historically missed by holding CLEAR. But it is NOT passive: every
+                 cycle it persists sells real inventory, so re-justify the distribution
+                 from CURRENT evidence each cycle; if the capital-erosion thesis no
+                 longer holds, exiting the stance IS the risk-conservative move.
   HALT         — a survival threshold is breached (allocation skew beyond the ceiling; both
                  legs exhausted with compounding market context).
 

@@ -700,6 +700,14 @@ FIELDS = {
         "melchior_usage": "context — while engaged, a RECONFIGURE rebuilds sells-only; factor that into whether a rebuild is economically worth it",
         "balthasar_usage": "stance input — a rising streak (1-2) is the leading edge of the downtrend failure mode; engaged (>= threshold) means the engine is already refusing buys regardless of the vote",
     },
+    "workoff": {
+        "type": "dict",
+        "description": "STAND_ASIDE inventory work-off ladder state (active, rungs_resting, xrp_headroom_above_floor, worked_off_xrp_since_stance) — while the standing stance is STAND_ASIDE the engine maintains a sells-only resting ladder above market (ORDER_SIZE_XRP per rung, capped at the grid's level count, never past the XRP buffer floor), so 'work inventory off' is actually delivered rather than stopping when the old grid's rungs exhaust (gap verified 2026-07-02)",
+        "consumers": ["casper", "melchior", "balthasar"],
+        "casper_usage": "context — while active, a persisting STAND_ASIDE keeps distributing inventory into strength; weigh whether the trend evidence still justifies that ongoing distribution, not just the original stand-aside call",
+        "melchior_usage": "context — worked_off_xrp_since_stance is realized distribution at successively higher prices; factor the remaining headroom into whether re-deploying (DEPLOY/RECONFIGURE) now beats continuing to distribute",
+        "balthasar_usage": "stance input — STAND_ASIDE is not passive: it actively sells inventory down toward the buffer floor; re-justify that distribution from CURRENT evidence each cycle, and prefer exiting the stance over letting the ladder run on a thesis you no longer hold",
+    },
     "council_stance": {
         "type": "dict",
         "description": "the council's current standing stance (stance, since_utc, hours_in_stance) — what the arbiter voted last cycle and how long it has held",

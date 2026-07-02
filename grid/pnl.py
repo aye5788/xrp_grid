@@ -121,6 +121,15 @@ def get_pnl_snapshot(current_price: float, paper: bool = False) -> dict:
     realized   = FIFO-matched profit from closed live round trips (net of fees).
     unrealized = total - realized (mark-to-market on the net open position).
 
+    DECOMPOSITION (2026-07-02) — do not cite `total` alone as the profitability
+    verdict; it is dominated by inventory beta (the price path of the standing
+    ~23-30 XRP book vs 1.65-XRP trades). Judge the grid on:
+      harvest             = realized (alias) — what the grid actually earned.
+      alpha_vs_hold       = current_equity - (run-start book marked at today's
+                            price) — the bot's contribution vs doing nothing.
+      inventory_hold_delta = pure beta of the run-start book
+                            (total = alpha_vs_hold + inventory_hold_delta).
+
     Returns a dict with:
       realized, unrealized, total, fees, fill_count, fills_today,
       win_rate, avg_pnl_per_round_trip, time_since_last_fill_minutes,
@@ -178,11 +187,24 @@ def get_pnl_snapshot(current_price: float, paper: bool = False) -> dict:
     conn.close()
 
     baseline_equity = current_equity = None
+    alpha_vs_hold = hold_equity_now = inventory_hold_delta = None
     if base_row and cur_row and first_live_px > 0:
         baseline_equity = float(base_row['xrp_held']) * first_live_px + float(base_row['usd_held'])
         current_equity = float(cur_row['xrp_held']) * current_price + float(cur_row['usd_held'])
         total = current_equity - baseline_equity
         unrealized = total - realized
+        # Decomposition (2026-07-02): `total` is dominated by the market's price
+        # path over the standing inventory (~23-30 XRP held vs 1.65-XRP trades),
+        # so it is NOT a grid-performance verdict. hold_equity_now marks the
+        # RUN-START book at today's price — the do-nothing counterfactual.
+        # alpha_vs_hold = what the bot's actions (trades + posture) added or
+        # subtracted vs. that passive hold. inventory_hold_delta is the pure
+        # beta component (total = alpha_vs_hold + inventory_hold_delta).
+        hold_equity_now = (
+            float(base_row['xrp_held']) * current_price + float(base_row['usd_held'])
+        )
+        alpha_vs_hold = current_equity - hold_equity_now
+        inventory_hold_delta = hold_equity_now - baseline_equity
     else:
         # No inventory baseline available — fall back to FIFO realized only.
         log.warning('pnl: no inventory baseline for equity total; using FIFO realized only')
@@ -226,8 +248,12 @@ def get_pnl_snapshot(current_price: float, paper: bool = False) -> dict:
 
     return {
         'realized': round(realized, 4),
+        'harvest': round(realized, 4),  # first-class alias: fee-adjusted round-trip PnL
         'unrealized': round(unrealized, 4),
         'total': round(total, 4),
+        'alpha_vs_hold': round(alpha_vs_hold, 4) if alpha_vs_hold is not None else None,
+        'hold_baseline_equity_now': round(hold_equity_now, 4) if hold_equity_now is not None else None,
+        'inventory_hold_delta': round(inventory_hold_delta, 4) if inventory_hold_delta is not None else None,
         'fees': round(fees, 4),
         'fill_count': len(fills),
         'fills_today': fills_today,

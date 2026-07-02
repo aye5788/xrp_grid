@@ -1,5 +1,40 @@
 # Next Build Tasks
 
+> **TOP OF QUEUE 2026-07-02 — PnL DECOMPOSITION + STAND_ASIDE WORK-OFF LADDER
+> SHIPPED (uncommitted; operator-approved; engine restart required to load, ladder
+> arms at the 2026-07-03T00:00 UTC daily wake via
+> `system_state['workoff_armed_after_utc']`). See `01_CURRENT_STATE.md` 2026-07-02
+> block for full detail. Remaining from this session:**
+> - **Restart `magi.service` + `magi-dashboard.service`** to load the new code
+>   BEFORE the 07-03 00:00 UTC daily wake (engine restart may fire a gated startup
+>   council cycle — price is outside the old band — ~6 seat calls).
+> - **Watch the first armed ladder cycle** (first observer tick after the 00:00 UTC
+>   council cycle, if the stance is still STAND_ASIDE): expect [WORKOFF] log lines
+>   seeding 5 sells ~2.5% apart above market; verify rung count, floor headroom,
+>   and that a stance exit stops the top-up.
+> - **72h stance grading now has teeth both ways:** with `alpha_vs_hold` live, a
+>   wrong persistent STAND_ASIDE shows up as realized distribution into a rally
+>   (negative alpha), not silent paper regret — fold into the next accuracy review.
+> - **FIXED during the restart (same session): engine `NameError` crash.** The
+>   2026-06-26 GRID INTEGRITY guard fix (`grid/engine.py` ~1637) calls
+>   `get_system_state` but the module never imported it — latent because the guard
+>   path only runs when the post-action book looks degenerate, and 2026-07-02 was
+>   the first cycle ever with a fully EMPTY book. The 16:57 UTC startup council
+>   cycle crashed `apply_magi_decision` on it (decision itself stood: STAND_ASIDE,
+>   2x STAND_ASIDE + 1x MAINTAIN, clear Condorcet; grid/pause actions had already
+>   no-opped). One-line fix: added `get_system_state` to the module-level
+>   `from database import (...)`.
+> - **NEW BUG (found live, NOT fixed — needs operator go): wake-notification ntfy
+>   send crashes on emoji.** The off-schedule wake alert title starts with `ℹ️`,
+>   which fails latin-1 header encoding in the HTTP POST
+>   (`magi/notify.py`: `UnicodeEncodeError` at 16:57 UTC startup wake) — the
+>   2026-06-27 notification feature has never actually delivered. Fix is to strip/
+>   encode non-latin-1 characters for the ntfy title header (body is fine as UTF-8
+>   data).
+>
+> **OPEN FOLLOW-UPS carried from 2026-06-28 (unchanged, below): tape_verdict
+> restore-or-demote, grader-predicate mismatch, `Ranking` permutation guard.**
+
 > **TOP OF QUEUE 2026-06-28 — AUDIT + 3 FIXES SHIPPED (committed this session).**
 > A real audit (4 parallel finders + own verification) found & fixed:
 > 1. **HIGH — replenishment council-bypass FIXED.** `scheduler.py`'s post-fill grid

@@ -59,10 +59,16 @@ rebuilding, vote MAINTAIN and let Melchior carry the geometry.
   MAINTAIN     — grid-favourable regime (RANGING, or a low flat base): the grid can
                  harvest oscillations; keep it working.
   STAND_ASIDE  — confirmed HOSTILE regime, primarily a confirmed DOWNTREND: gridding
-                 here accumulates losses. This cancels buys and works inventory off.
-                 This is your protective vote and you must cast it when the regime is
-                 a confirmed downtrend — do not soften it to MAINTAIN because the book
-                 currently looks fine.
+                 here accumulates losses. This cancels buys and ACTIVELY works
+                 inventory off — the engine maintains a sells-only ladder above
+                 market for as long as the stance stands (see workoff in your
+                 signals), so a persisting STAND_ASIDE keeps distributing inventory
+                 into strength, down to the XRP buffer floor. This is your protective
+                 vote and you must cast it when the regime is a confirmed downtrend —
+                 do not soften it to MAINTAIN because the book currently looks fine.
+                 The flip side: because it distributes real inventory every cycle it
+                 persists, re-earn it from CURRENT trend evidence each cycle rather
+                 than holding it by habit.
   PAUSE_LONGS  — down-BIASED chop that is not yet a full confirmed trend (Step 2): the
                  drift is down but momentum/ADX are not yet decisive — stop buying into
                  the drift without standing the whole grid down.

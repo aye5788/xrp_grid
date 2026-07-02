@@ -1,7 +1,62 @@
 # MAGI — Current State
 
-> **2026-06-28 — LATEST. Real audit (4 parallel finders + own DB verification) found
-> & fixed 3 bugs; engine RUNNING on paper throughout; all fixes committed.**
+> **2026-07-02 — LATEST. Two operator-approved builds shipped (UNCOMMITTED, code on
+> disk; `magi.service` still runs pre-change code until restarted): (1) PnL
+> DECOMPOSITION and (2) the STAND_ASIDE WORK-OFF LADDER.**
+> Background: the operator asked whether the ~23.4 XRP left after the protective
+> sells should be sold to lock in the rally, and the verification that followed
+> found two real defects. **(a) The equity-scoped PnL headline is inventory beta,
+> not grid performance** — `grid/pnl.py:get_pnl_snapshot`'s `total` is
+> `current_equity − baseline_equity`, and with ~23–30 XRP standing inventory
+> against 1.65-XRP trades that number is dominated by XRP's price path (the live
+> run's −$6.95 verdict carried the same distortion). FIXED (reporting only, no
+> behavior change): the snapshot now also returns `harvest` (the existing
+> FIFO fee-adjusted round-trip PnL, promoted to first-class), `alpha_vs_hold`
+> (current equity minus the RUN-START book marked at today's price — the bot's
+> contribution vs doing nothing) and `inventory_hold_delta` (pure beta;
+> total = alpha + beta, identity verified on live data: +2.02 = −0.12 + 2.14).
+> Dashboard tile now shows Grid Harvest / Alpha vs Hold / Total Equity Δ; the
+> readiness gates already used FIFO realized and needed no change. **Evaluation
+> rule going forward: never cite `total` alone as the profitability verdict.**
+> **(b) STAND_ASIDE's "work inventory off" promise was ~78% unimplemented** — the
+> fill replenisher can only re-arm the OPPOSITE side of a fill, so under
+> STAND_ASIDE (no buys) nothing can ever create a new sell: the old grid's 4 sell
+> rungs (6.6 of ~30 XRP) were the entire work-off capacity, after which the book
+> went EMPTY (verified: last rung filled 2026-07-02 13:09, 0 open orders) and the
+> residual inventory sat unmanaged — no seat reasons about it (verified across all
+> cruxes since restart), no persona assigns it, and the action space has no verb
+> for it. FIXED as engine FIDELITY to the council's own mandate (the
+> `CandidateDecision` action text itself promises work-off — this implements the
+> stance, it does not bypass the council): `scheduler.maintain_workoff_ladder`
+> keeps a sells-only resting ladder above market while the STANDING stance is
+> STAND_ASIDE — maker-only rungs of exactly `ORDER_SIZE_XRP` (1.65), depth capped
+> at the grid's level count, never committing XRP past the `[XRP_BUFFER_FLOOR]`
+> headroom ($10), no taker anchor; bootstrap (empty book) and re-arm are the same
+> top-up operation, anchored to current market. Any other standing stance makes it
+> a no-op; a DEPLOY rebuild replaces the book via rule 6 as before. **Activation
+> is operator-gated:** inert until a council cycle exists at/after
+> `system_state['workoff_armed_after_utc']` = 2026-07-03T00:00 UTC (the next daily
+> wake) — the ladder starts from the system's own decision loop, never from the
+> code deploy. The council was kept informed in the SAME change (world_state
+> `workoff` block: active/rungs_resting/xrp_headroom_above_floor/
+> worked_off_xrp_since_stance; new schema FIELDS entry, all three seats
+> consumers; `validate_schema` PASS 0 ERROR) and all three personas + the
+> `CandidateDecision` STAND_ASIDE description were updated to the new active
+> semantics symmetrically (personas snapshotted `*.md.bak.20260702`), so no
+> future vote is cast under the old passive reading. Dry-run verified with a stub
+> engine: at $1.0917 it would place 5 sells at $1.119→$1.228 (8.25 XRP committed,
+> floor headroom +6.0 XRP); pre-arm no-op verified; dashboard renders 200 with
+> the new tiles. Current alpha reading: the protective sells cost $0.12 vs pure
+> hold so far — the insurance premium, now measurable instead of hidden.
+> DEPLOYED SAME SESSION: both services restarted; the gated startup council wake
+> fired (config fingerprint changed — the persona/schema edits) and voted
+> STAND_ASIDE (2x STAND_ASIDE + 1x MAINTAIN, clear Condorcet) — and EXPOSED a
+> latent 06-26 bug: `grid/engine.py:apply_magi_decision`'s integrity guard calls
+> `get_system_state` without importing it (`NameError` crashed the apply step on
+> the first-ever fully-empty book; the decision itself stood). Fixed by adding it
+> to the module import list. ALSO found live (open, in `02`): the off-schedule
+> wake ntfy alert crashes on its `ℹ️` title (latin-1 header encoding) — the
+> 06-27 notification feature has never actually delivered.**
 > (1) **HIGH — council-bypass.** The observer's grid-replenishment (`scheduler.py`)
 > re-armed a BUY on every sell fill checking only price-drift — never `pause_longs`,
 > stance, or the exposure cap — silently undoing the council's STAND_ASIDE between

@@ -1230,19 +1230,24 @@ HTML_TEMPLATE = """
     </div>
     <div class="grid">
         <div class="card">
-            <div class="label">Realized P&amp;L</div>
+            <div class="label">Grid Harvest</div>
             <div class="value {{ 'pnl-pos' if pnl_realized >= 0 else 'pnl-neg' }}">${{ pnl_realized_fmt }}</div>
-            <div class="sub">{{ pnl_fill_count }} live fills &nbsp;|&nbsp; {{ pnl_matched_trips }} round trips</div>
+            <div class="sub">fee-adjusted round trips &nbsp;|&nbsp; {{ pnl_fill_count }} fills, {{ pnl_matched_trips }} trips</div>
         </div>
         <div class="card">
-            <div class="label">Unrealized P&amp;L</div>
-            <div class="value {{ 'pnl-pos' if pnl_unrealized >= 0 else 'pnl-neg' }}">${{ pnl_unrealized_fmt }}</div>
-            <div class="sub">mark-to-market on held inventory</div>
+            <div class="label">Alpha vs Hold</div>
+            {% if pnl_alpha is not none %}
+            <div class="value {{ 'pnl-pos' if pnl_alpha >= 0 else 'pnl-neg' }}">${{ pnl_alpha_fmt }}</div>
+            <div class="sub">bot's contribution vs holding the run-start book</div>
+            {% else %}
+            <div class="value">—</div>
+            <div class="sub">no inventory baseline</div>
+            {% endif %}
         </div>
         <div class="card">
-            <div class="label">Total P&amp;L</div>
+            <div class="label">Total Equity &Delta;</div>
             <div class="value {{ 'pnl-pos' if pnl_total >= 0 else 'pnl-neg' }}">${{ pnl_total_fmt }}</div>
-            <div class="sub">equity ${{ pnl_baseline_equity_fmt }} &rarr; ${{ pnl_current_equity_fmt }} &nbsp;|&nbsp; fees ${{ pnl_fees_fmt }}</div>
+            <div class="sub">equity ${{ pnl_baseline_equity_fmt }} &rarr; ${{ pnl_current_equity_fmt }} &nbsp;|&nbsp; incl. inventory beta ${{ pnl_beta_fmt }} &nbsp;|&nbsp; fees ${{ pnl_fees_fmt }}</div>
         </div>
         <div class="card">
             <div class="label">Win Rate</div>
@@ -2549,6 +2554,9 @@ def index():
         pnl_unrealized_fmt=f"{snap['unrealized']:.4f}",
         pnl_total=snap['total'],
         pnl_total_fmt=f"{snap['total']:.4f}",
+        pnl_alpha=snap.get('alpha_vs_hold'),
+        pnl_alpha_fmt=(f"{snap['alpha_vs_hold']:.4f}" if snap.get('alpha_vs_hold') is not None else "—"),
+        pnl_beta_fmt=(f"{snap['inventory_hold_delta']:.4f}" if snap.get('inventory_hold_delta') is not None else "—"),
         pnl_fees_fmt=f"{snap['fees']:.4f}",
         pnl_fill_count=snap['fill_count'],
         pnl_matched_trips=snap['matched_round_trips'],

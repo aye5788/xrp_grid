@@ -18,7 +18,7 @@ from config import (
 from database import (
     insert_grid_state, get_current_grid_state,
     get_latest_indicators, upsert_inventory,
-    get_latest_inventory,
+    get_latest_inventory, get_system_state,
     insert_grid_order, update_grid_order_status
 )
 from grid.exchanges.coinbase import CoinbaseExchange
