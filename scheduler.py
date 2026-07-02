@@ -1294,30 +1294,80 @@ def main():
                     log.warning("startup gate: fingerprint check failed "
                                 "(%s) — skipping condition (a)", e)
 
-                # (b) unconsumed fired wake-class events
+                # (b) unconsumed fired wake-class events — EPISODE-AWARE
+                # (2026-07-02). The gate re-fires W1 hourly during a standing
+                # breach; the running wake wire suppresses re-fires for an
+                # already-answered episode (_t2_episode_already_answered →
+                # 'wake_episode_answered'), but a row written inside the
+                # 60-min post-cycle throttle sits unmarked for up to an hour,
+                # and this check used to grab ANY unconsumed fired row — so a
+                # restart in that window re-asked a question the council had
+                # already answered (2026-07-02: two of three restart wakes
+                # were exactly this). Now each pending W1 runs the SAME
+                # episode guard the wake wire uses, on the event's own
+                # recorded direction+band; answered episodes are consumed
+                # with the wire's own sentinel and stay quiet. W2 carries no
+                # band/direction — a pending W2 still wakes. Fails open
+                # (wake) on any parse error.
                 if startup_wake_reason is None:
+                    import json as _json
                     ph = ",".join("?" for _ in WAKE_CLASS_TRIGGERS)
-                    pend = conn.execute(
-                        f"SELECT trigger_id FROM magi_gate_events "
+                    pend_rows = conn.execute(
+                        f"SELECT trigger_id, details FROM magi_gate_events "
                         f"WHERE consumed_in_cycle IS NULL AND fired=1 "
-                        f"AND trigger_id IN ({ph}) LIMIT 1",
+                        f"AND trigger_id IN ({ph}) ORDER BY timestamp",
                         tuple(WAKE_CLASS_TRIGGERS),
-                    ).fetchone()
-                    if pend:
+                    ).fetchall()
+                    for pe in pend_rows:
+                        answered = False
+                        if pe['trigger_id'] == 'W1':
+                            try:
+                                det = _json.loads(pe['details'] or '{}')
+                                d = det.get('direction')
+                                u, l = float(det['upper']), float(det['lower'])
+                                if d:
+                                    answered = _t2_episode_already_answered(
+                                        conn, d, u, l)
+                            except (KeyError, TypeError, ValueError):
+                                pass  # fails open → wake
+                        if answered:
+                            log.info(
+                                "Startup gate: pending W1 suppressed — "
+                                "breach episode already answered by a "
+                                "council cycle (consuming with the wake "
+                                "wire's sentinel)")
+                            _consume_wake_gate_event(
+                                'W1', 'wake_episode_answered')
+                            continue
                         startup_wake_reason = (
-                            f"unconsumed wake event {pend['trigger_id']} "
+                            f"unconsumed wake event {pe['trigger_id']} "
                             f"pending from before restart")
+                        break
 
-                # (c) price outside the current grid band
+                # (c) price outside the current grid band — EPISODE-AWARE
+                # (2026-07-02, same defect as (b)): out-of-band asks the W1
+                # breach question, and if a council cycle already answered it
+                # for this same side+band, a restart must not re-ask — the
+                # daily floor still re-judges. A NEW breach (fresh band after
+                # a rebuild, or flipped side) has no answered match → wakes.
                 if startup_wake_reason is None:
                     try:
                         _, b_upper, b_lower = _grid_band(conn)
                         px = engine.get_current_price()
                         if (b_upper is not None and px is not None
                                 and (px > b_upper or px < b_lower)):
-                            startup_wake_reason = (
-                                f"price {px} outside grid band "
-                                f"[{b_lower:.4f}, {b_upper:.4f}]")
+                            side = "above" if px > b_upper else "below"
+                            if _t2_episode_already_answered(
+                                    conn, side, b_upper, b_lower):
+                                log.info(
+                                    "Startup gate: price %s outside band "
+                                    "[%.4f, %.4f] but the breach episode "
+                                    "is already council-answered — staying "
+                                    "quiet", px, b_lower, b_upper)
+                            else:
+                                startup_wake_reason = (
+                                    f"price {px} outside grid band "
+                                    f"[{b_lower:.4f}, {b_upper:.4f}]")
                     except Exception as e:
                         log.warning("startup gate: band check failed (%s) "
                                     "— skipping condition (c)", e)
@@ -1330,8 +1380,9 @@ def main():
         else:
             log.info(
                 "Startup council gate: quiet restart — config unchanged, "
-                "no pending wake events, price in band. No startup cycle "
-                "(daily floor / 25h backstop / W-wakes carry the cadence)."
+                "no unanswered wake events, no unanswered band breach. "
+                "No startup cycle (daily floor / 25h backstop / W-wakes "
+                "carry the cadence)."
             )
     except Exception as e:
         log.warning(f"Startup gate check failed, running cycle anyway: {e}")

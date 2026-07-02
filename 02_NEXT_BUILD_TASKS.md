@@ -38,10 +38,24 @@
 >    the "Matches the stance grader" comment was false. SCORING-BASIS CHANGE:
 >    matured STAND_ASIDE rows now score 0/6 for Casper/Melchior (no 5% break
 >    happened — price rallied), where drift<0 had flattered them.
-> **Observation (not changed):** startup-gate condition (c) (price outside grid
-> band) has no episode guard, so EVERY restart fires a ~6-call startup wake
-> while price sits outside a stale band (3× today). Consider respecting the W1
-> episode-answered guard — needs operator sign-off.
+> **FIXED (operator go, later same session): startup gate is now EPISODE-AWARE.**
+> Root cause verified row-by-row in `magi_gate_events`: the gate re-fires W1
+> hourly during a standing breach; the running wake wire suppresses re-fires of
+> an already-answered episode (`_t2_episode_already_answered` →
+> `wake_episode_answered`), but rows written inside the 60-min post-cycle
+> throttle sit unmarked up to an hour, and startup condition (b) grabbed ANY
+> unconsumed fired row — so 2 of today's 3 restart wakes (17:10, 18:10) re-asked
+> the breach question the 11:00 W1 cycle had already answered. Condition (c)
+> (price outside band) had the same blind spot and would have fired once (b) was
+> clean — BOTH now run the SAME episode guard the wake wire uses (b: on the
+> event's own recorded direction+band, consuming answered rows with the wire's
+> sentinel; c: on the current side+band). A NEW breach (fresh band after a
+> rebuild, or flipped side) still wakes on restart, and the daily floor still
+> re-judges standing conditions. VERIFIED: offline (guard True for the standing
+> above-breach, False for flipped-side / different-band) and LIVE — the 20:14 UTC
+> restart with price 1.083 outside [0.965, 1.067] logged "breach episode is
+> already council-answered — staying quiet" and fired NO council cycle: the
+> first genuinely quiet restart during a standing breach.
 
 > **TOP OF QUEUE 2026-07-02 — PnL DECOMPOSITION + STAND_ASIDE WORK-OFF LADDER
 > SHIPPED (uncommitted; operator-approved; engine restart required to load, ladder
