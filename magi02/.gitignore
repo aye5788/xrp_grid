@@ -1,0 +1,5 @@
+# Generated artifacts — never commit run outputs or snapshots.
+last_report.json
+proposals.json
+observer_snapshot.db*
+nightly.log

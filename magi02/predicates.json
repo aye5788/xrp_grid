@@ -1,0 +1,59 @@
+{
+  "_format": "MAGI-02 predicate ledger. Each predicate is a FALSIFIABLE claim mined from the project docs (source = doc citation), compiled to read-only SQL over an observer.db snapshot. expect: 'zero_rows' means any returned row is a violation (the row itself is the evidence). status: only 'approved' predicates can fail the run — 'proposed' (miner output) runs in report-only mode until the operator promotes it, because LLM spec-extraction is known to fabricate claims (SpecGen/KBSpec literature; see 02_NEXT_BUILD_TASKS.md PLAN block). effective_from scopes out rows from before the promise existed or was fixed.",
+  "predicates": [
+    {
+      "id": "P1_one_wake_per_episode",
+      "claim": "A breach episode is answered by the council at most once: no two real council cycles may consume W1 gate events carrying the same direction and band.",
+      "source": "CLAUDE.md gate-driven cadence block ('one wake per breach episode'); scheduler.py _t2_episode_already_answered docstring",
+      "effective_from": "2026-07-02T21:00:00",
+      "sql": "SELECT a.id AS event_a, b.id AS event_b, a.consumed_in_cycle AS cycle_a, b.consumed_in_cycle AS cycle_b, json_extract(a.details,'$.direction') AS direction, json_extract(a.details,'$.upper') AS upper FROM magi_gate_events a JOIN magi_gate_events b ON b.id > a.id AND a.trigger_id='W1' AND b.trigger_id='W1' AND a.fired=1 AND b.fired=1 AND a.consumed_in_cycle LIKE 'cyc%' AND b.consumed_in_cycle LIKE 'cyc%' AND a.consumed_in_cycle != b.consumed_in_cycle AND json_extract(a.details,'$.direction') = json_extract(b.details,'$.direction') AND ABS(json_extract(a.details,'$.upper') - json_extract(b.details,'$.upper')) < 0.0001 * json_extract(a.details,'$.upper') AND (b.timestamp - a.timestamp) < 172800 WHERE datetime(a.timestamp,'unixepoch') >= :effective_from",
+      "expect": "zero_rows",
+      "status": "approved"
+    },
+    {
+      "id": "P2_no_buys_under_protection",
+      "claim": "While the council's protective posture stands (pause_longs, or standing stance STAND_ASIDE), no buy order is open on the book.",
+      "source": "CLAUDE.md Fix 3 stance mandate ('STAND_ASIDE: buys cancelled'); 01_CURRENT_STATE.md 2026-06-28 replenishment council-bypass fix",
+      "effective_from": "2026-06-28T00:00:00",
+      "sql": "SELECT o.order_id, o.price, o.timestamp FROM grid_orders o WHERE o.status='open' AND o.side='buy' AND (EXISTS (SELECT 1 FROM grid_state g WHERE g.id=(SELECT MAX(id) FROM grid_state) AND g.pause_longs=1) OR EXISTS (SELECT 1 FROM system_state s WHERE s.key='council_stance' AND s.value='STAND_ASIDE'))",
+      "expect": "zero_rows",
+      "status": "approved"
+    },
+    {
+      "id": "P3_workoff_ladder_executing",
+      "claim": "While the standing stance is STAND_ASIDE, the work-off ladder is armed, the sell side is not paused, and at least one rung of XRP headroom exists above the buffer floor, resting sell orders exist ('cancel buys and work inventory off' must actually execute).",
+      "source": "magi/agents/schemas.py CandidateDecision STAND_ASIDE description; balthasar.md STAND_ASIDE definition; 01_CURRENT_STATE.md 2026-07-02 work-off ladder block",
+      "effective_from": "2026-07-03T00:00:00",
+      "sql": "SELECT 'no_resting_sells' AS violation, (SELECT value FROM system_state WHERE key='council_stance') AS stance, inv.xrp_held, c.close AS last_price FROM (SELECT xrp_held FROM inventory ORDER BY timestamp DESC LIMIT 1) inv, (SELECT close FROM candles WHERE timeframe='1h' ORDER BY timestamp DESC LIMIT 1) c WHERE (SELECT value FROM system_state WHERE key='council_stance')='STAND_ASIDE' AND (SELECT MAX(timestamp) FROM debate_records) >= COALESCE((SELECT value FROM system_state WHERE key='workoff_armed_after_utc'),'') AND (SELECT pause_shorts FROM grid_state ORDER BY timestamp DESC LIMIT 1)=0 AND (inv.xrp_held - 10.0/c.close) / 1.65 >= 1 AND (SELECT COUNT(*) FROM grid_orders WHERE status='open' AND side='sell')=0",
+      "expect": "zero_rows",
+      "status": "approved"
+    },
+    {
+      "id": "P4_stance_grading_liveness",
+      "claim": "Every council cycle that recorded a stance is graded within 5 days (72h maturity + retry slack) — the 72h stance grader must not silently die.",
+      "source": "CLAUDE.md Fix 3 ('stance is recorded per cycle and graded at 72h maturity'); observer.backfill_stance_grades docstring",
+      "effective_from": "2026-06-12T00:00:00",
+      "sql": "SELECT cycle_id, timestamp, stance FROM debate_records WHERE stance IS NOT NULL AND stance_correct IS NULL AND timestamp >= :effective_from AND timestamp < datetime('now', '-5 days')",
+      "expect": "zero_rows",
+      "status": "approved"
+    },
+    {
+      "id": "P5_candles_pipeline_liveness",
+      "claim": "The 1h candle pipeline is alive: the newest 1h candle is within 3 hours of the newest inventory snapshot (both ride the observer; a large skew means one pipeline died silently).",
+      "source": "00_PROJECT_OVERVIEW.md observer data layout; 2026-06-25 stale-candles pre-restart blocker",
+      "effective_from": "2026-06-12T00:00:00",
+      "sql": "SELECT newest_candle, newest_inventory FROM (SELECT (SELECT MAX(timestamp) FROM candles WHERE timeframe='1h') AS newest_candle, (SELECT MAX(timestamp) FROM inventory) AS newest_inventory) WHERE (julianday(newest_inventory) - julianday(newest_candle)) * 24 > 3",
+      "expect": "zero_rows",
+      "status": "approved"
+    },
+    {
+      "id": "P6_decision_rows_carry_stance",
+      "claim": "Every post-redesign council cycle that produced a final grid action also recorded a stance — the stance mandate is never silently skipped.",
+      "source": "CLAUDE.md Fix 3 stance mandate; 05_COUNCIL_REDESIGN.md aggregator action->cons translation",
+      "effective_from": "2026-06-26T00:00:00",
+      "sql": "SELECT cycle_id, timestamp, final_grid_action FROM debate_records WHERE timestamp >= :effective_from AND final_grid_action IS NOT NULL AND stance IS NULL AND (hard_rule_overrides IS NULL OR hard_rule_overrides NOT LIKE '%COUNCIL_COLLAPSED%')",
+      "expect": "zero_rows",
+      "status": "approved"
+    }
+  ]
+}
