@@ -22,7 +22,16 @@ if [ "$MODE" = gcs ]; then
     exit 1; }
 fi
 
-CRON_LINE="0 $NIGHTLY_HOUR * * * cd $HERE && ./fetch_snapshot.sh $MODE && python3 falsifier.py --db observer_snapshot.db >> nightly.log 2>&1"
+# Bake rsync's SSH target into the cron line — cron runs with a bare
+# environment, so an exported MAGI_DROPLET_SSH would work interactively and
+# then silently fall back to the placeholder at 05:00.
+ENV_PREFIX=""
+if [ "$MODE" = rsync ]; then
+  : "${MAGI_DROPLET_SSH:?rsync mode: export MAGI_DROPLET_SSH=root@<droplet-ip> before installing}"
+  ENV_PREFIX="MAGI_DROPLET_SSH=$MAGI_DROPLET_SSH "
+fi
+
+CRON_LINE="0 $NIGHTLY_HOUR * * * cd $HERE && ${ENV_PREFIX}./fetch_snapshot.sh $MODE && python3 falsifier.py --db observer_snapshot.db >> nightly.log 2>&1"
 ( crontab -l 2>/dev/null | grep -v "magi02/falsifier\|fetch_snapshot" ; echo "$CRON_LINE" ) | crontab -
 chmod +x "$HERE/fetch_snapshot.sh"
 
