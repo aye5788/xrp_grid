@@ -65,6 +65,33 @@ def load_1h(conn):
             for (t, h, l, c) in rows if None not in (h, l, c)]
 
 
+def stance_band(spacing_pct, levels):
+    """Band width (fraction) from grid geometry: spacing × max(1, levels//2) —
+    the distance from centre to the outermost rung pair. This is the ONE
+    definition shared by the stance grader (observer.backfill_stance_grades)
+    and the seat action grader (database._grade_action_row); they diverged
+    once (seat grader used bare drift<0) and must not again. Exogenous anchor:
+    fee-driven spacing × level count, never fitted to outcomes. Missing/zero
+    spacing falls back to 0.05 (max spacing 2.5% × 2 pairs)."""
+    try:
+        spacing = float(spacing_pct or 0)
+        lv = int(levels or 0)
+    except (TypeError, ValueError):
+        spacing, lv = 0.0, 0
+    return spacing * max(1, lv // 2) if spacing > 0 else 0.05
+
+
+def path_breaks(closes, decision_price, band):
+    """(down_break, up_run) over forward closes vs the band, path-based (any
+    bar, not the endpoint): down_break = some close < price*(1-band) — the
+    grid would have bled through its buy rungs; up_run = some close >
+    price*(1+band). Shared by both graders (see stance_band)."""
+    if not closes or not decision_price:
+        return False, False
+    return (min(closes) < decision_price * (1 - band),
+            max(closes) > decision_price * (1 + band))
+
+
 def simulate(bars, i, spacing_pct=SPACING_PCT, n_levels=N_LEVELS):
     """Run a recycling grid forward WINDOW_H hours from bar i. Return diagnostics.
 

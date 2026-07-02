@@ -1,13 +1,55 @@
 # Next Build Tasks
 
+> **TOP OF QUEUE 2026-07-02 (LATER SAME SESSION) — FOUR FOLLOW-UPS SHIPPED
+> (operator-approved; deployed via restart, cycle verified clean):**
+> 1. **ntfy emoji crash FIXED** (`magi/notify.py`): titles are sanitized to
+>    latin-1 (em-dashes mapped to '-') before the header POST — the 06-27 wake
+>    notification delivered for the FIRST time (verified 2xx + a clean live wake
+>    push at 18:10 UTC). Body stays UTF-8.
+> 2. **tape_verdict RESTORED + kept current collector-independently.**
+>    `history.db` restored from the GCS snapshot (2026-06-17, integrity ok),
+>    then the 15-day tail + all internal gaps refilled from Bitstamp (27,644
+>    real bars, 0 residual — series gap-free 2016-12-16 → now). TWO warehouse
+>    changes: `cmd_refill` now also treats MAX(ts_begin)→now as a gap (LEAD
+>    detection couldn't see past the last row), and a new hourly `tail`
+>    subcommand (Bitstamp fetch + incremental rollup + incremental signals)
+>    keeps signals_1h alive while the collector stays STOOD DOWN. New systemd
+>    timers: `tape-tail.timer` (hourly :07) and `tape-backup.timer` (daily
+>    04:10 UTC — this had been DEAD since ~06-17, meaning observer.db had NO
+>    GCS backup for 15 days; now restored). Verified: `_tape_verdict_block()`
+>    returns stale=False (verdict yellow, regime green, drawdown −2.1%) and the
+>    18:10 council cycle consumed it live. NOTE: trades/spread/flow stay frozen
+>    — only the collector being stood back up feeds those.
+> 3. **`Ranking` permutation guard ADDED** (`magi/agents/aggregate.py`):
+>    ballots are sanitized at the single `aggregate()` entry — duplicate labels
+>    keep first occurrence (unambiguous repair, counted; a dup used to
+>    double-score in Borda and flip pairwise positions), foreign labels
+>    dropped; a ballot still not covering every presented label exactly once is
+>    EXCLUDED like a non-responder (warn alert `ranking_ballot_excluded`), and
+>    <2 surviving ballots returns the existing winner=None (reconcile →
+>    NO_CONSENSUS) path. Counts HOW ballots tally, never touches what seats
+>    chose. Unit-tested across clean/dup/repairable/foreign/under-2 shapes.
+> 4. **Grader-predicate mismatch FIXED** — ONE shared definition
+>    (`grid/forward_sim.py:stance_band` + `path_breaks`) now backs BOTH the
+>    stance grader and the seat action grader: STAND_ASIDE/PAUSE_LONGS correct
+>    iff a band-depth down-break happened (band = spacing × max(1, levels//2),
+>    row's own world_state geometry, 0.05 fallback), PAUSE_SHORTS iff an
+>    up-run. The old seat predicate (bare drift<0) credited a −0.01% wiggle;
+>    the "Matches the stance grader" comment was false. SCORING-BASIS CHANGE:
+>    matured STAND_ASIDE rows now score 0/6 for Casper/Melchior (no 5% break
+>    happened — price rallied), where drift<0 had flattered them.
+> **Observation (not changed):** startup-gate condition (c) (price outside grid
+> band) has no episode guard, so EVERY restart fires a ~6-call startup wake
+> while price sits outside a stale band (3× today). Consider respecting the W1
+> episode-answered guard — needs operator sign-off.
+
 > **TOP OF QUEUE 2026-07-02 — PnL DECOMPOSITION + STAND_ASIDE WORK-OFF LADDER
 > SHIPPED (uncommitted; operator-approved; engine restart required to load, ladder
 > arms at the 2026-07-03T00:00 UTC daily wake via
 > `system_state['workoff_armed_after_utc']`). See `01_CURRENT_STATE.md` 2026-07-02
 > block for full detail. Remaining from this session:**
-> - **Restart `magi.service` + `magi-dashboard.service`** to load the new code
->   BEFORE the 07-03 00:00 UTC daily wake (engine restart may fire a gated startup
->   council cycle — price is outside the old band — ~6 seat calls).
+> - ~~Restart both services~~ DONE same session (startup wakes fired as
+>   disclosed; a latent engine NameError was exposed and fixed — see below).
 > - **Watch the first armed ladder cycle** (first observer tick after the 00:00 UTC
 >   council cycle, if the stance is still STAND_ASIDE): expect [WORKOFF] log lines
 >   seeding 5 sells ~2.5% apart above market; verify rung count, floor headroom,
@@ -32,8 +74,9 @@
 >   encode non-latin-1 characters for the ntfy title header (body is fine as UTF-8
 >   data).
 >
-> **OPEN FOLLOW-UPS carried from 2026-06-28 (unchanged, below): tape_verdict
-> restore-or-demote, grader-predicate mismatch, `Ranking` permutation guard.**
+> **OPEN FOLLOW-UPS carried from 2026-06-28: ALL THREE CLOSED later this same
+> session (tape_verdict restored, grader predicates unified, Ranking permutation
+> guard added — see the block above this one).**
 
 > **TOP OF QUEUE 2026-06-28 — AUDIT + 3 FIXES SHIPPED (committed this session).**
 > A real audit (4 parallel finders + own verification) found & fixed:

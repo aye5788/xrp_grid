@@ -1,7 +1,30 @@
 # MAGI — Current State
 
-> **2026-07-02 — LATEST. Two operator-approved builds shipped (UNCOMMITTED, code on
-> disk; `magi.service` still runs pre-change code until restarted): (1) PnL
+> **2026-07-02 (SECOND BATCH — LATEST). Four operator-approved follow-ups shipped
+> and DEPLOYED (services restarted, cycle verified clean): (1) ntfy emoji-title
+> crash fixed — the wake-notification feature delivered for the first time ever;
+> (2) tape `history.db` RESTORED from the 06-17 GCS snapshot + refilled gap-free
+> to now from Bitstamp (27,644 bars, 0 residual) — `tape_verdict` is LIVE again
+> (stale=False, verdict yellow/regime green) and kept current by a new hourly
+> `tape-tail.timer` (Bitstamp-fed `warehouse tail` subcommand; collector stays
+> stood down; trades/spread/flow remain frozen) plus the restored daily
+> `tape-backup.timer` (observer.db had had NO GCS backup since ~06-17);
+> (3) `Ranking` ballots sanitized at `aggregate()` — dup labels repaired
+> keep-first, non-permutation ballots excluded like a non-responder
+> (`ranking_ballot_excluded` warn alert), <2 surviving ballots → the existing
+> NO_CONSENSUS path; (4) the stance grader and seat action grader now share ONE
+> band-break predicate (`grid/forward_sim.py:stance_band`/`path_breaks`) — the
+> seat grader's bare drift<0 was false-advertised as "matches the stance grader";
+> matured STAND_ASIDE seat grades drop to 0/6 under the honest predicate (price
+> rallied; no 5% down-break). The 18:10 UTC startup council cycle ran with the
+> live tape verdict and voted STAND_ASIDE (2×STAND_ASIDE+1×MAINTAIN, clear
+> Condorcet), its synthesis explicitly citing the workoff telemetry. Known smell
+> left unchanged (needs sign-off): startup-gate condition (c) fires a ~6-call
+> wake on EVERY restart while price sits outside a stale grid band. Detail in
+> `02` top-of-queue block.**
+
+> **2026-07-02 (first batch). Two operator-approved builds shipped
+> (now COMMITTED as `dab17a1` and deployed): (1) PnL
 > DECOMPOSITION and (2) the STAND_ASIDE WORK-OFF LADDER.**
 > Background: the operator asked whether the ~23.4 XRP left after the protective
 > sells should be sold to lock in the rally, and the verification that followed

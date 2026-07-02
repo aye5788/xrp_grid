@@ -2075,10 +2075,19 @@ def _grade_action_row(r, bars, ts_keys, n):
                                 -> sim alpha_pct >  FEE_FLOOR
         HALT                    correct iff running it would have bled vs hold
                                 -> sim alpha_pct < -FEE_FLOOR
-      exposure-direction — graded on realized PRICE DIRECTION (not grid alpha; a
-        de-risk through a rally must score wrong, which the alpha axis would miss):
-        STAND_ASIDE / PAUSE_LONGS  correct iff price fell -> forward drift < 0
-        PAUSE_SHORTS               correct iff price rose -> forward drift > 0
+      exposure-direction — graded on a BAND-DEPTH PATH BREAK (not grid alpha; a
+        de-risk through a rally must score wrong, which the alpha axis would miss;
+        and not bare drift sign — a -0.01% wiggle does not vindicate parking the
+        book). Band + break definitions are the SHARED grid.forward_sim helpers
+        (stance_band / path_breaks), the same predicate backfill_stance_grades
+        uses, so the two graders cannot diverge again (fixed 2026-07-02; the old
+        seat predicate here was bare drift<0 while the stance grader required a
+        band break — the prior "Matches the stance grader" claim was false):
+        STAND_ASIDE / PAUSE_LONGS  correct iff a down-break happened (some forward
+                                   close < decision*(1-band))
+        PAUSE_SHORTS               correct iff an up-run happened (some forward
+                                   close > decision*(1+band))
+        band from the row's own world_state grid geometry (fallback 0.05).
 
     Anchored ONLY to FEE_FLOOR (exogenous: 2*MAKER_FEE, the round-trip break-even) and
     the forward price direction — no thresholds fit to data — and it reuses the exact
@@ -2105,17 +2114,32 @@ def _grade_action_row(r, bars, ts_keys, n):
         correct = a < -FEE_FLOOR
         note = (f"halted; forward grid alpha {a:+.2f}% vs -{FEE_FLOOR:.2f}% "
                 f"bleed floor over {WINDOW_H}h")
-    elif action in ('STAND_ASIDE', 'PAUSE_LONGS'):
-        # withhold / shed LONG exposure: graded on realized DIRECTION, not grid
-        # alpha — these are right iff price fell (a de-risk through a rally is wrong,
-        # which the grid-alpha axis would mis-score). Matches the stance grader.
-        correct = drift < 0
-        verb = 'stood aside' if action == 'STAND_ASIDE' else 'paused longs'
-        note = f"{verb} ({action}); forward drift {drift:+.2f}% over {WINDOW_H}h"
-    elif action == 'PAUSE_SHORTS':
-        # withhold SELL side: right iff price rose.
-        correct = drift > 0
-        note = f"paused shorts; forward drift {drift:+.2f}% over {WINDOW_H}h"
+    elif action in ('STAND_ASIDE', 'PAUSE_LONGS', 'PAUSE_SHORTS'):
+        # withhold/shed exposure: graded on a band-depth PATH BREAK via the
+        # SHARED forward_sim helpers — the same predicate the stance grader
+        # uses (see docstring; keeps the two graders from diverging again).
+        from grid.forward_sim import stance_band, path_breaks
+        import json as _json
+        spacing = lv = None
+        try:
+            _gs = (_json.loads(r.get('world_state') or '{}')
+                   .get('grid_state') or {})
+            spacing, lv = _gs.get('spacing_pct'), _gs.get('levels')
+        except (TypeError, ValueError):
+            pass
+        band = stance_band(spacing, lv)
+        decision_price = bars[i][3]
+        closes = [b[3] for b in bars[i + 1: i + 1 + WINDOW_H]]
+        down_break, up_run = path_breaks(closes, decision_price, band)
+        if action == 'PAUSE_SHORTS':
+            correct = up_run
+            note = (f"paused shorts; up_run={up_run} "
+                    f"(band {band*100:.1f}%, drift {drift:+.2f}%) over {WINDOW_H}h")
+        else:
+            correct = down_break
+            verb = 'stood aside' if action == 'STAND_ASIDE' else 'paused longs'
+            note = (f"{verb} ({action}); down_break={down_break} "
+                    f"(band {band*100:.1f}%, drift {drift:+.2f}%) over {WINDOW_H}h")
     else:
         return None, 'unknown_action'
     return {
@@ -2138,7 +2162,7 @@ def _score_action_seat(conn, seat, bars, ts_keys, cutoff):
     n = len(bars)
     col = f"{seat}_r0_action"
     rows = conn.execute(
-        f"SELECT {col} AS action, timestamp FROM debate_records "
+        f"SELECT {col} AS action, timestamp, world_state FROM debate_records "
         f"WHERE timestamp >= ? AND {col} IS NOT NULL",
         (cutoff,)
     ).fetchall()

@@ -1044,15 +1044,12 @@ def backfill_stance_grades():
                 continue
 
             gs = ws.get('grid_state') or {}
-            try:
-                spacing = float(gs.get('spacing_pct') or 0)
-                levels = int(gs.get('levels') or 0)
-            except (TypeError, ValueError):
-                spacing, levels = 0.0, 0
-            if spacing > 0:
-                band = spacing * max(1, levels // 2)
-            else:
-                band = 0.05  # fallback: max spacing 2.5% × 2 pairs
+            # Band + break predicates live in grid.forward_sim (stance_band /
+            # path_breaks) — SHARED with database._grade_action_row so the
+            # stance grader and the seat action grader cannot diverge
+            # (2026-07-02; they had: the seat grader was bare drift<0).
+            from grid.forward_sim import stance_band, path_breaks
+            band = stance_band(gs.get('spacing_pct'), gs.get('levels'))
 
             start = _parse_iso_safe(r['timestamp'])
             if start is None:
@@ -1072,8 +1069,7 @@ def backfill_stance_grades():
             if len(closes) < 48:
                 continue  # window not fully covered yet; retry next pass
 
-            down_break = min(closes) < decision_price * (1 - band)
-            up_run = max(closes) > decision_price * (1 + band)
+            down_break, up_run = path_breaks(closes, decision_price, band)
             stance = r['stance']
             if stance == 'DEPLOY':
                 correct = not down_break

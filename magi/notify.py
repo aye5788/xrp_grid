@@ -59,6 +59,15 @@ def send_ntfy(title, body, severity, agent_id=None, category=None):
     priority = _SEVERITY_PRIORITY[severity]
     safe_body = (body or '')[:_BODY_MAX_CHARS]
     safe_title = (title or 'MAGI alert')[:120]
+    # HTTP headers are latin-1; an emoji in the title raises UnicodeEncodeError
+    # inside requests and the whole send silently fails (bit the 2026-06-27 wake
+    # alerts — 'ℹ️ MAGI woke…' never delivered). Strip non-latin-1 chars from
+    # the header value; the UTF-8 body is unaffected.
+    safe_title = safe_title.replace('—', '-').replace('–', '-')
+    safe_title = safe_title.encode('latin-1', 'ignore').decode('latin-1')
+    safe_title = ' '.join(safe_title.split())
+    if not safe_title:
+        safe_title = 'MAGI alert'
 
     tags = []
     if agent_id:

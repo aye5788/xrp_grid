@@ -28,7 +28,10 @@ cons keys to None so their debate_records columns read NULL harmlessly.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
+
+log = logging.getLogger('magi.aggregate')
 
 # The decision-level value the council emits when no stable winner survives even
 # reconciliation. It is NOT a CandidateDecision.action (a single seat cannot propose
@@ -61,6 +64,59 @@ _ACTION_TO_CONS: dict[str, dict[str, str]] = {
 _NO_CONSENSUS_CONS: dict[str, str] = {
     "grid_verdict": "THESIS_HOLDS", "stance": "HOLD", "risk_action": "CLEAR",
 }
+
+
+def _sanitize_rankings(rankings: list[Any], labels: list[str]) -> list[Any]:
+    """Ballot well-formedness guard (2026-07-02). The Ranking schema asks for
+    every presented label exactly once, but nothing enforced it: a duplicated
+    label silently double-scores in Borda (k inflates and the dup gets two
+    point grants) and flips its pairwise position (dict keeps the LAST index),
+    distorting the tally away from what the seat actually expressed.
+
+    Repairs vs exclusions — chosen to preserve council signal, never invent it:
+      * out-of-set labels dropped, duplicate labels keep their FIRST occurrence
+        (unambiguous — the seat's intent is clear) -> ballot REPAIRED, counted;
+      * a ballot that then does not cover every presented label exactly once is
+        EXCLUDED from the tally (ranking the omitted labels for the seat would
+        be inventing preferences) — same treatment as a non-responding seat.
+    Exclusions raise a dashboard-only 'ranking_ballot_excluded' warn alert so a
+    seat that repeatedly emits malformed ballots is visible, not silent. This
+    guards HOW ballots are counted only — it never touches what any seat chose
+    (no bypass; the malformed tally was the thing overriding seats' judgment).
+    """
+    label_set = set(labels)
+    clean: list[Any] = []
+    for r in rankings:
+        raw = list(getattr(r, "order", []) or [])
+        seen: set = set()
+        order = []
+        for lb in raw:
+            if lb in label_set and lb not in seen:
+                seen.add(lb)
+                order.append(lb)
+        if len(order) == len(label_set):
+            if order != raw:
+                log.warning(
+                    "[aggregate] ballot repaired (dup/foreign labels): %r -> %r",
+                    raw, order)
+                from types import SimpleNamespace
+                r = SimpleNamespace(order=order)
+            clean.append(r)
+        else:
+            log.warning(
+                "[aggregate] ballot EXCLUDED — not a permutation of %r "
+                "after repair: %r", labels, raw)
+            try:
+                from database import insert_alert
+                insert_alert(
+                    'warn', 'ranking_ballot_excluded',
+                    f"Phase-2 ranking excluded from tally: order={raw!r} is not "
+                    f"a permutation of presented labels {labels!r} after "
+                    f"dedup/foreign-label repair. Counted like a non-responding "
+                    f"seat this cycle.")
+            except Exception:
+                pass  # alerting must never break the tally
+    return clean
 
 
 def _pairwise_beats(rankings: list[Any], labels: list[str]) -> dict[tuple[str, str], int]:
@@ -130,6 +186,18 @@ def aggregate(rankings: list[Any],
         only = labels[0]
         return {"winner_label": only, "winner": label_to_candidate[only],
                 "method": "sole_candidate", "borda": {only: 0}, "pairwise": {}}
+
+    rankings = _sanitize_rankings(rankings, labels)
+    if len(rankings) < 2:
+        # Mirrors run_council's own >=2-rankings threshold: a tally over a
+        # single surviving ballot would let one seat decide alone. winner=None
+        # is the existing contract — the caller reconciles or declares
+        # NO_CONSENSUS (the council's own output, P3).
+        log.warning(
+            "[aggregate] only %d well-formed ballot(s) after sanitization — "
+            "no tally", len(rankings))
+        return {"winner_label": None, "winner": None, "method": None,
+                "borda": {}, "pairwise": {}}
 
     pw = _pairwise_beats(rankings, labels)
     borda = _borda_scores(rankings, labels)

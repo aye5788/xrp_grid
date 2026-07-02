@@ -447,6 +447,16 @@ def cmd_refill(args):
     conn = _connect(config.HISTORY_DB_PATH)
     ins = schema.INSERTS["ohlc_1m_provenanced"]
     gaps = _detect_gaps(conn)
+    # Tail gap (2026-07-02): LEAD-based detection only sees INTERNAL gaps — the
+    # range after MAX(ts_begin) has no successor row, so a stopped feed (the
+    # collector stood down, or a restore from an old GCS snapshot) leaves the
+    # head of the series unreachable and "fill every gap" was false. Treat
+    # MAX+1min .. now(-2min live-edge safety) as a gap too.
+    _have = conn.execute(
+        "SELECT COALESCE(MAX(ts_begin), 0) FROM ohlc_1m").fetchone()[0]
+    _now_ms = (int(time.time()) // 60 - 2) * 60_000
+    if _have and _now_ms > _have + _MIN_MS:
+        gaps.append((_have + _MIN_MS, _now_ms))
     total_missing = sum((e - s) // _MIN_MS for s, e in gaps)
     log.info("refill: %d gaps, %d missing minutes — fetching from Bitstamp",
              len(gaps), total_missing)
@@ -496,6 +506,64 @@ def cmd_refill(args):
         for s, e in sorted(resid, key=lambda x: x[1] - x[0], reverse=True)[:8]:
             print(f"    {(e - s) // _MIN_MS:>6} min  {_utc(s)} -> {_utc(e)}")
     cmd_status(args)
+
+
+def cmd_tail(args):
+    """Hourly keep-current (2026-07-02): fetch only the TAIL — 1m bars after
+    MAX(ts_begin) — from Bitstamp's OHLC API, then incremental-roll and
+    incremental-signal. This is the collector-independent feed that keeps
+    signals_1h (and the council's tape_verdict input) alive while the live
+    tape collector is STOOD DOWN: cmd_append's source is the collector's db
+    (frozen since 2026-06-09), and cmd_refill does FULL rollups every run
+    (too heavy hourly). Same-source real Bitstamp bars via the refill
+    machinery — nothing fabricated; INSERT OR IGNORE dedups on the ts_begin
+    PK. Steady-state cost: ~1-2 Bitstamp calls/hour. Rich tape (trades /
+    spread / flow) is NOT fed by this — that returns only if the collector
+    is stood back up."""
+    if not os.path.exists(config.HISTORY_DB_PATH):
+        raise SystemExit("history.db does not exist — run `build` first")
+    conn = _connect(config.HISTORY_DB_PATH)
+    ins = schema.INSERTS["ohlc_1m_provenanced"]
+    added = calls = 0
+    try:
+        have = conn.execute(
+            "SELECT COALESCE(MAX(ts_begin), 0) FROM ohlc_1m").fetchone()[0]
+        if not have:
+            raise SystemExit("ohlc_1m empty — run `build` first")
+        now_ms = (int(time.time()) // 60 - 2) * 60_000  # 2-min live-edge safety
+        cur = have // 1000 + 60
+        while cur * 1000 < now_ms:
+            page = _bitstamp_page(cur)
+            calls += 1
+            if not page:
+                break
+            batch = [(ts * 1000, o, h, l, c, v, c, None, schema.SRC_BITSTAMP)
+                     for ts, o, h, l, c, v in page if ts * 1000 <= now_ms]
+            if batch:
+                conn.executemany(ins, batch)
+                conn.commit()
+                added += len(batch)
+            last = page[-1][0]
+            if last < cur + 60:            # no forward progress
+                break
+            cur = last + 60
+            time.sleep(_REFILL_THROTTLE)
+    finally:
+        conn.close()
+    rollup.run_once(config.HISTORY_DB_PATH, config.ROLLUP_INTERVALS_MIN,
+                    config.ROLLUP_LOOKBACK_HOURS, NO_PRUNE_RETENTION_DAYS,
+                    full=False)
+    nsig = 0
+    try:
+        sconn = _connect(config.HISTORY_DB_PATH)
+        try:
+            nsig = _signals_incremental(sconn, conditions.WINDOW_HOURS)
+        finally:
+            sconn.close()
+    except Exception as e:
+        log.warning("signals_1h snapshot failed (non-fatal): %r", e)
+    log.info("tail: +%d bars (%d Bitstamp calls), %d signal snapshots", added, calls, nsig)
+    return added
 
 
 # ------------------------------------------------------------------ gcs backup
@@ -632,13 +700,14 @@ def main():
     b = sub.add_parser("build"); b.add_argument("--csv-dir", default=None)
     sub.add_parser("refill")
     sub.add_parser("append")
+    sub.add_parser("tail")
     sub.add_parser("build-signals")
     sub.add_parser("backup")
     sub.add_parser("status")
     args = p.parse_args()
     {"build": cmd_build, "refill": cmd_refill, "append": cmd_append,
-     "build-signals": cmd_build_signals, "backup": cmd_backup,
-     "status": cmd_status}[args.cmd](args)
+     "tail": cmd_tail, "build-signals": cmd_build_signals,
+     "backup": cmd_backup, "status": cmd_status}[args.cmd](args)
 
 
 if __name__ == "__main__":
