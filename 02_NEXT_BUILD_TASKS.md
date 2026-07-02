@@ -1,5 +1,77 @@
 # Next Build Tasks
 
+> **PLAN 2026-07-02 — PROACTIVE BUG-CATCHING ARCHITECTURE (operator-approved;
+> build sequence locked; "no spend, stop on surprises" directive).**
+> WHY: every recent bug (replenishment council-bypass, ntfy never-delivering,
+> empty-book NameError, startup-gate episode bypass, grader mismatch, workoff
+> gap) was found REACTIVELY — operator notices a symptom → session reads code →
+> stumbles on the defect — while the evidence sat in the data for days. This
+> plan replaces that with four standing layers, designed OFF-BOX-FIRST (the
+> 1.9GB droplet runs the bot; auditing runs elsewhere; the live decision path
+> gains ZERO inline checks and no latency):
+>
+> 1. **CI gate (GitHub Actions — runs on GitHub's hardware, operator has Pro:
+>    3,000 min/mo).** On every push: (a) `ruff check --select F,E9` over the
+>    whole repo — catches the undefined-name/syntax class (today's engine
+>    NameError was a one-second F821 catch sitting unflagged since 06-26) with
+>    NO project deps; (b) a pytest+Hypothesis PROPERTY suite over the
+>    light-import money-path modules (notify title sanitization vs arbitrary
+>    unicode, aggregate ballot sanitizer vs arbitrary orders, forward_sim
+>    band/break properties, pnl FIFO matcher vs arbitrary fill sequences) —
+>    properties are stated in advance from the system's own rules, and
+>    Hypothesis EXPLORES states nobody enumerated (the forward-looking fix for
+>    the "hindsight-only" critique). Heavy-import modules (engine/scheduler
+>    integration) are deliberately OUT of CI scope v1 — they need the full dep
+>    chain + DB fixtures and belong to the drill layer.
+> 2. **On-box survival invariants (the ONE on-box piece, by design).**
+>    `magi/invariants.py`: a small table of read-only, millisecond SQL checks
+>    riding the existing 10-min observer tick, for promises that deserve
+>    SAME-CYCLE detection: no open BUY while pause_longs/STAND_ASIDE stands
+>    (the June replenishment bypass = one SQL line, critical → ntfy); workoff
+>    ladder active but no resting sells despite headroom (ladder promise);
+>    unconsumed fired W event older than 2h (stuck wake wire). Alerts via the
+>    existing `insert_alert` (category `invariant_violation`; dedup built in).
+> 3. **MAGI-02 (desktop falsifier + promise miner; named for the Matsushiro
+>    backup MAGI that cross-examined the primary).** Lives in repo as
+>    `magi02/`; DEVELOPED+TESTED on the droplet against the live observer.db,
+>    DEPLOYED to the operator's desktop via `git pull` + `install.sh` (one-time,
+>    minutes; auth choice at install: dedicated READ-ONLY GCS key for the
+>    backup bucket, or rsync-over-SSH from the droplet). Nightly: pull the GCS
+>    observer.db snapshot (the daily 04:10 backup), run the PREDICATE LEDGER
+>    (`magi02/predicates.yaml` — each predicate = a falsifiable claim mined
+>    from the DOCS with its doc citation + a read-only SQL check; statuses
+>    proposed/approved — ONLY operator-approved predicates can alert, because
+>    published research on LLM spec-extraction confirms models fabricate specs
+>    and oversimplify boundaries). The MINER reads `git diff` of the docs and
+>    drafts NEW proposed predicates via LOCAL Ollama (zero API spend, private);
+>    stub mode until the desktop install. This is the layer that catches
+>    workoff-class gaps: promises that live in PROSE nobody thought to test.
+> 4. **Chaos drills (LAST; needs the desktop present to build).** A desktop
+>    CLONE of the stack (repo + snapshot, paper mode, sandbox DB) gets
+>    scheduled fault injection — killed seat mid-cycle, malformed ballot,
+>    restart-during-throttle-during-breach, frozen input, crash between
+>    decision and apply — graded on TWO conditions: survival AND detection
+>    (a silently-survived drill is a detection gap). Running on the clone
+>    kills the contamination risk (drill rows never touch the validation
+>    run's debate_records/grading/PnL scopes) and the droplet-load risk.
+>
+> COSTS (verified, sources in session): box load ≈ 0 (CI on GitHub, MAGI-02 +
+> drills on desktop, on-box invariants are ms-scale SQL); recurring spend ≈ 0
+> (local models; Actions inside the Pro allowance); remaining prices = upfront
+> build, the contamination engineering in layer 4, and operator triage
+> attention (mitigated: predicates gated on approval; any check that
+> false-positives twice is demoted to digest).
+> OSS verdicts (checked 2026-07-02): ruff/Hypothesis/pytest adopted as-is;
+> Great Expectations / Soda Core evaluated and REJECTED for this (warehouse-
+> scale frameworks vs one SQLite file — a thin runner is less machinery, and
+> CLAUDE.md forbids new frameworks); Chaos Toolkit evaluated — orchestration
+> shell only, our faults are domain-specific; LLM-spec-mining has NO dominant
+> OSS tool yet (active research: SpecGen/KBSpec/ICPC-2025) → magi02 is a
+> build, with research-confirmed failure modes driving the approval gate.
+> SEQUENCE: docs (this block) → CI gate → on-box invariants (needs ONE quiet
+> restart, verified quiet-capable at 20:14Z) → magi02 package (droplet-built,
+> desktop-installed tonight by operator) → drills (separate session).
+
 > **TOP OF QUEUE 2026-07-02 (LATER SAME SESSION) — FOUR FOLLOW-UPS SHIPPED
 > (operator-approved; deployed via restart, cycle verified clean):**
 > 1. **ntfy emoji crash FIXED** (`magi/notify.py`): titles are sanitized to
