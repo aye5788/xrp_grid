@@ -411,6 +411,13 @@ def run_observer_cycle():
                 maintain_workoff_ladder(engine, price)
             except Exception as e:
                 log.error(f"[WORKOFF] ladder maintenance error: {e}")
+            # Survival invariants (plan layer 2) — AFTER ladder maintenance
+            # so the workoff check never races the top-up it verifies.
+            try:
+                from magi.invariants import check_invariants
+                check_invariants()
+            except Exception as e:
+                log.error(f"[INVARIANTS] check error: {e}")
     except Exception as e:
         log.error(f"Shadow tick error: {e}")
 
