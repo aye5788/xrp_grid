@@ -18,10 +18,15 @@
 > matured STAND_ASIDE seat grades drop to 0/6 under the honest predicate (price
 > rallied; no 5% down-break). The 18:10 UTC startup council cycle ran with the
 > live tape verdict and voted STAND_ASIDE (2×STAND_ASIDE+1×MAINTAIN, clear
-> Condorcet), its synthesis explicitly citing the workoff telemetry. Known smell
-> left unchanged (needs sign-off): startup-gate condition (c) fires a ~6-call
-> wake on EVERY restart while price sits outside a stale grid band. Detail in
-> `02` top-of-queue block.**
+> Condorcet), its synthesis explicitly citing the workoff telemetry.
+> THEN (operator escalation + go): the restart-wake pattern was diagnosed and
+> FIXED — the startup gate's conditions (b) and (c) bypassed the W1
+> episode-answered guard, so during a standing breach every restart fired a
+> ~6-call wake (2 of today's 3 restart wakes re-asked the episode the 11:00 W1
+> cycle had already answered). Both conditions now run the wake wire's own
+> `_t2_episode_already_answered`; verified LIVE at 20:14 UTC — restart with
+> price outside the band stayed QUIET (no council cycle). Detail in `02`
+> top-of-queue block.**
 
 > **2026-07-02 (first batch). Two operator-approved builds shipped
 > (now COMMITTED as `dab17a1` and deployed): (1) PnL
