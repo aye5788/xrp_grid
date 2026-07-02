@@ -71,6 +71,16 @@
 > SEQUENCE: docs (this block) → CI gate → on-box invariants (needs ONE quiet
 > restart, verified quiet-capable at 20:14Z) → magi02 package (droplet-built,
 > desktop-installed tonight by operator) → drills (separate session).
+> STATUS 2026-07-02 ~21:45Z: layers 1–3 LIVE. CI green on GitHub (2 runs,
+> ~20s each); invariants riding the observer tick (loaded via a second quiet
+> restart, clean); MAGI-02 DEPLOYED on the operator's desktop — Windows+WSL,
+> rsync mode with a dedicated WSL ed25519 key, scheduled via Windows Task
+> Scheduler ("MAGI-02 nightly", 5AM local, WakeToRun/StartWhenAvailable —
+> NOT WSL cron, which sleeps with WSL; the whole command ships in-repo as
+> magi02/nightly.sh because pasted PowerShell one-liners hard-wrap and
+> break). Verified unattended end-to-end: a real Start-ScheduledTask run
+> logged 6/6 predicates HOLD at 21:40:51Z. OPEN: first miner run (Ollama
+> not yet installed on the desktop) and layer 4 drills.
 
 > **TOP OF QUEUE 2026-07-02 (LATER SAME SESSION) — FOUR FOLLOW-UPS SHIPPED
 > (operator-approved; deployed via restart, cycle verified clean):**
