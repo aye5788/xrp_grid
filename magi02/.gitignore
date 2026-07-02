@@ -3,3 +3,5 @@ last_report.json
 proposals.json
 observer_snapshot.db*
 nightly.log
+# Local config — the repo is public; the droplet address is not.
+droplet.env
