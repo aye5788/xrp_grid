@@ -37,7 +37,33 @@ disagree, the handoff docs win for state; this file wins for how to work.
 > timeouts; pytz dropped from scheduler). LETTA FULLY
 > DECOUPLED. Decision layer = the hand-rolled arbiter orchestrator
 > (`magi/council_v2.py`), live on a GATE-PRIMARY cadence.**
-> **As of 2026-06-28 (CURRENT — supersedes the 2026-06-26 block below): `magi.service`
+> **As of 2026-07-04 (CURRENT — supersedes the 2026-06-28 block below): `magi.service`
+> is RUNNING on paper, uninterrupted since the 2026-07-02 20:54 UTC restart. The
+> 2026-07-02 sessions shipped and DEPLOYED (all committed + pushed on
+> `council-redesign`): (a) PnL DECOMPOSITION (`harvest` / `alpha_vs_hold` /
+> `inventory_hold_delta` — never cite equity `total` alone) + the STAND_ASIDE
+> WORK-OFF LADDER (`scheduler.maintain_workoff_ladder`, sells-only maker rungs above
+> market, floor-capped, operator-gated arming) as `dab17a1`; (b) the 06-28 Open list
+> ALL CLOSED as `429b6aa` — ntfy emoji-title crash fixed (wake notifications deliver
+> for the first time), `tape_verdict` RESTORED (GCS snapshot + gap-free Bitstamp
+> refill + hourly `tape-tail.timer`; W2's verdict arm is LIVE again — real W2 wake
+> fired 07-03 11:00 UTC), grader predicates UNIFIED (one band-break definition backs
+> both stance and seat graders; matured STAND_ASIDE rows in a rally now honestly
+> score 0/6), `Ranking` ballots sanitized at `aggregate()` (first live catch of a
+> duplicate ballot 07-02); (c) episode-aware startup gate (`4da7b53`) — restarts
+> during an already-answered breach stay QUIET; (d) the proactive bug-catching
+> architecture layers 1–3 LIVE (CI ruff+Hypothesis gate on GitHub; on-box
+> `magi/invariants.py` riding the observer tick; MAGI-02 off-box falsifier deployed
+> on the operator's desktop, 6/6 predicates verified unattended). LADDER VERIFIED
+> LIVE 07-03/07-04: armed at the 07-03 00:00 UTC daily cycle, seeded 5 rungs, fills
+> topped up correctly, headroom respected. MARKET: XRP rallied ~$1.03 → ~$1.15 while
+> the council held STAND_ASIDE since 06-26 — paper `alpha_vs_hold` = −$0.47 (equity
+> +$3.26 is inventory beta; harvest $0, zero round trips); the 07-04 daily cycle
+> split 3 ways (Casper MAINTAIN / Melchior HALT / Balthasar STAND_ASIDE) — the
+> stance-EXIT question and the rally-window accuracy review are the live watch
+> items. Open: MAGI-02 first miner run (Ollama not on the desktop yet), chaos-drill
+> layer 4, dead-arbiter-module deletion + engine hygiene items (see `02`).**
+> **As of 2026-06-28 (supersedes the 2026-06-26 block below): `magi.service`
 > is RUNNING on paper. A real audit (4 parallel finders + own verification) found &
 > fixed 3 bugs (committed): (1) HIGH — the observer grid-replenishment (`scheduler.py`)
 > re-armed a BUY on every sell fill ignoring `pause_longs`/stance/exposure-cap — a

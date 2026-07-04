@@ -140,19 +140,37 @@
 > first genuinely quiet restart during a standing breach.
 
 > **TOP OF QUEUE 2026-07-02 — PnL DECOMPOSITION + STAND_ASIDE WORK-OFF LADDER
-> SHIPPED (uncommitted; operator-approved; engine restart required to load, ladder
-> arms at the 2026-07-03T00:00 UTC daily wake via
-> `system_state['workoff_armed_after_utc']`). See `01_CURRENT_STATE.md` 2026-07-02
-> block for full detail. Remaining from this session:**
+> SHIPPED (CORRECTION 2026-07-04: COMMITTED as `dab17a1` and pushed — the
+> "uncommitted" note this block originally carried went stale the same day;
+> operator-approved; deployed via restart; ladder armed at the 2026-07-03T00:00 UTC
+> daily wake via `system_state['workoff_armed_after_utc']`). See
+> `01_CURRENT_STATE.md` 2026-07-02 block for full detail. Remaining from this
+> session:**
 > - ~~Restart both services~~ DONE same session (startup wakes fired as
 >   disclosed; a latent engine NameError was exposed and fixed — see below).
-> - **Watch the first armed ladder cycle** (first observer tick after the 00:00 UTC
->   council cycle, if the stance is still STAND_ASIDE): expect [WORKOFF] log lines
->   seeding 5 sells ~2.5% apart above market; verify rung count, floor headroom,
->   and that a stance exit stops the top-up.
+> - ~~Watch the first armed ladder cycle~~ ✅ **DONE — VERIFIED 2026-07-04** against
+>   the live journal and book. The ladder armed on the 2026-07-03 00:00 UTC daily
+>   cycle (stance still STAND_ASIDE); the 00:08 observer tick seeded 5 sell rungs
+>   $1.112→$1.221 (~2.44% apart, floor headroom logged 12.55→5.95 XRP as each rung
+>   committed). Two rungs then FILLED into the rally ($1.112 on 07-03 13:08,
+>   $1.139 on 07-03 20:04), each fill immediately topping up a fresh rung above
+>   ($1.247, then $1.269) — the designed re-arm behavior. Book as of 07-04: 5 open
+>   sells $1.166–$1.269, headroom 3.0 XRP (≈2 more fills before the ladder stops
+>   topping up at the `[XRP_BUFFER_FLOOR]` — expected, not a defect). The
+>   stance-exit stop is NOT yet exercised (no DEPLOY vote has occurred) — that
+>   remains a watch point, folded into the item below.
 > - **72h stance grading now has teeth both ways:** with `alpha_vs_hold` live, a
 >   wrong persistent STAND_ASIDE shows up as realized distribution into a rally
 >   (negative alpha), not silent paper regret — fold into the next accuracy review.
+>   **CURRENCY 2026-07-04 — no longer hypothetical.** XRP rallied from ~$1.03
+>   (06-26 restart) to ~$1.15 while the council held STAND_ASIDE continuously
+>   since 06-26. Paper `alpha_vs_hold` reads **−$0.47** (headline equity Δ +$3.26
+>   is inventory beta +$3.73; realized harvest $0 — sells only, zero round trips).
+>   Under the unified band-break grader, matured STAND_ASIDE rows through this
+>   rally score 0/6 for Casper/Melchior. The 07-04 00:00 cycle split three ways
+>   (Casper MAINTAIN, Melchior HALT, Balthasar STAND_ASIDE; applied MAINTAIN,
+>   stance unchanged) — the stance-EXIT question is live. Run the accuracy review
+>   once these rally-window rows mature.
 > - **FIXED during the restart (same session): engine `NameError` crash.** The
 >   2026-06-26 GRID INTEGRITY guard fix (`grid/engine.py` ~1637) calls
 >   `get_system_state` but the module never imported it — latent because the guard
@@ -162,13 +180,13 @@
 >   2x STAND_ASIDE + 1x MAINTAIN, clear Condorcet; grid/pause actions had already
 >   no-opped). One-line fix: added `get_system_state` to the module-level
 >   `from database import (...)`.
-> - **NEW BUG (found live, NOT fixed — needs operator go): wake-notification ntfy
->   send crashes on emoji.** The off-schedule wake alert title starts with `ℹ️`,
->   which fails latin-1 header encoding in the HTTP POST
->   (`magi/notify.py`: `UnicodeEncodeError` at 16:57 UTC startup wake) — the
->   2026-06-27 notification feature has never actually delivered. Fix is to strip/
->   encode non-latin-1 characters for the ntfy title header (body is fine as UTF-8
->   data).
+> - ~~NEW BUG: wake-notification ntfy send crashes on emoji~~ ✅ **FIXED later the
+>   SAME session** (item 1 of the "FOUR FOLLOW-UPS SHIPPED" block above, committed
+>   `429b6aa`): titles are sanitized to latin-1 before the header POST; the wake
+>   notification delivered for the first time at 18:10 UTC 07-02 (verified 2xx).
+>   (Original finding kept for the record: the `ℹ️` title failed latin-1 header
+>   encoding in `magi/notify.py` — `UnicodeEncodeError` at the 16:57 UTC startup
+>   wake — so the 2026-06-27 feature had never actually delivered until this fix.)
 >
 > **OPEN FOLLOW-UPS carried from 2026-06-28: ALL THREE CLOSED later this same
 > session (tape_verdict restored, grader predicates unified, Ranking permutation
@@ -189,15 +207,16 @@
 >    edge-triggered, ALERT-ONLY (`warn`, magi_alerts `stale_council_input`); catches
 >    silently null/stale council inputs that shape-only drift validation misses.
 >
-> **OPEN FOLLOW-UPS (not done):**
-> - **tape_verdict dead** — `tape/history.db` absent on the box; restore from GCS
->   (`gs://xrp-grid-tape-backups-ayn88/history/history.db.gz`) or demote it from
->   Balthasar's "primary" stance input in schema/persona.
-> - **Grader predicate mismatch** — seat grader (`database._grade_action_row`:
->   STAND_ASIDE correct iff endpoint drift<0) ≠ stance grader (5%-band down-break);
->   the "Matches the stance grader" comment is false. Observability only.
-> - **`Ranking` schema** doesn't enforce a permutation (`order` can dup/omit a label
->   → silently distorts the Condorcet/Borda tally). Low prob, unbounded effect.
+> **OPEN FOLLOW-UPS — ✅ ALL THREE CLOSED 2026-07-02 (see the "FOUR FOLLOW-UPS
+> SHIPPED" block above; kept here for the record):**
+> - ~~tape_verdict dead~~ RESTORED from the GCS snapshot + refilled gap-free,
+>   kept current by the hourly `tape-tail.timer`. Live proof: the guard caught a
+>   real duplicate ballot on 07-02 and a **W2 gate wake fired 07-03 11:00 UTC**
+>   (the verdict arm is feeding the gate again).
+> - ~~Grader predicate mismatch~~ FIXED — one shared band-break predicate
+>   (`grid/forward_sim.py:stance_band`/`path_breaks`) backs both graders.
+> - ~~`Ranking` schema permutation~~ GUARDED — ballots sanitized at `aggregate()`;
+>   first live catch 07-02 17:44 (`ranking_ballot_excluded`, order=['A','A','B']).
 
 > **TOP OF QUEUE 2026-06-26 — PERSONA REWRITE VALIDATED; ENGINE RESTARTED ON PAPER.**
 > The blind-review persona rewrite (item 1 of the 2026-06-25 block below) is now
@@ -232,12 +251,16 @@
 >
 > **STILL OPEN (hygiene / follow-ups):** delete dead arbiter modules
 > (`balthasar_claude.py`/`melchior_deepseek.py`/`casper_gemini.py` + `RegimeVote`/
-> `GridVote`/`RiskVote`); the `engine.py:1328` "No grid state → initialise fresh"
-> fallback also calls `initialise_grid()` with no spacing (fails safe — logs + builds
-> nothing — but should route through geometry); ONE_GRID invariant (`engine.py:750`)
-> detects-but-does-not-enforce; W2's off-schedule re-judge is DARK while the tape
-> collector is stood down (its verdict arm), so the STAND_ASIDE EXIT is daily-floor-
-> driven until the tape returns or a price/indicator W2 arm is added.
+> `GridVote`/`RiskVote` — verified still on disk 2026-07-04); the `engine.py:1328`
+> "No grid state → initialise fresh" fallback also calls `initialise_grid()` with no
+> spacing (fails safe — logs + builds nothing — but should route through geometry);
+> ONE_GRID invariant (`engine.py:750`) detects-but-does-not-enforce.
+> ~~W2's off-schedule re-judge is DARK while the tape collector is stood down~~
+> **NO LONGER TRUE as of 2026-07-02:** `tape_verdict` was restored (GCS snapshot +
+> hourly Bitstamp-fed `tape-tail.timer`), so W2's verdict arm is live again — a real
+> W2 wake fired 2026-07-03 11:00 UTC. The STAND_ASIDE exit is no longer
+> daily-floor-only. (Trades/spread/flow tape arms remain frozen until the collector
+> itself is stood back up.)
 >
 > The 2026-06-25 block below is the prior state — its items 1–2 are now DONE.
 

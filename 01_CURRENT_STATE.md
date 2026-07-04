@@ -1,6 +1,47 @@
 # MAGI — Current State
 
-> **2026-07-02 (SECOND BATCH — LATEST). Four operator-approved follow-ups shipped
+> **2026-07-04 (LATEST — verification pass, no code changes). The 2026-07-02
+> shipments are all COMMITTED + PUSHED on `council-redesign` (`dab17a1` PnL
+> decomposition + work-off ladder; `429b6aa` ntfy fix + tape restore + grader
+> unification + Ranking guard; `4da7b53` episode-aware startup gate; CI /
+> invariants / MAGI-02 as `21504c5`/`0edb035`/`f86bdf3`+) and the engine has run
+> uninterrupted since the 07-02 20:54 UTC restart. Verified against the live
+> journal and book this session:**
+> - **Work-off ladder: first armed cycle CONFIRMED working.** Armed at the
+>   2026-07-03 00:00 UTC daily council cycle (stance still STAND_ASIDE); the 00:08
+>   observer tick seeded 5 sell rungs $1.112→$1.221 (~2.44% apart), logging floor
+>   headroom at each rung (12.55→5.95 XRP). Rungs filled into the rally at $1.112
+>   (07-03 13:08) and $1.139 (07-03 20:04), each immediately topped up with a new
+>   rung above ($1.247, $1.269). Book as of 07-04 ~13:00 UTC: 5 open sells
+>   $1.166–$1.269, headroom 3.0 XRP (≈2 more fills to the `[XRP_BUFFER_FLOOR]`
+>   stop — expected behavior). The stance-exit stop (ladder stands down on a
+>   DEPLOY) is not yet exercised — no DEPLOY vote has occurred.
+> - **W2 is ALIVE again.** With `tape_verdict` restored (07-02), a real W2 gate
+>   wake fired 2026-07-03 11:00 UTC — the STAND_ASIDE exit is no longer
+>   daily-floor-only, closing the "W2 dark" caveat from 06-26.
+> - **Ranking guard earned its keep immediately:** first live catch 07-02 17:44 —
+>   a seat submitted `order=['A','A','B']` (duplicate label) and the ballot was
+>   excluded from the tally with a `ranking_ballot_excluded` warn alert, exactly
+>   as designed. No invariant violations, no criticals since the restart.
+> - **THE LIVE JUDGMENT QUESTION — stance exit vs the rally.** XRP rallied ~$1.03
+>   (06-26 restart) → ~$1.15 (07-04) while the council held STAND_ASIDE
+>   continuously since 06-26. Paper decomposed PnL at $1.148: equity Δ +$3.26 =
+>   inventory beta +$3.73 + **alpha_vs_hold −$0.47** (realized harvest $0 — sells
+>   only, zero round trips; the protective posture underperformed pure hold by the
+>   insurance premium). Under the unified grader, matured STAND_ASIDE rows through
+>   this window score 0/6 for Casper/Melchior. The 07-04 00:00 daily cycle split
+>   three ways — Casper MAINTAIN, Melchior HALT, Balthasar STAND_ASIDE (applied
+>   MAINTAIN, standing stance unchanged) — the first fracture after a week of
+>   unanimity. Watch: whether the council finds its own DEPLOY exit, and the
+>   rally-window accuracy review once these rows mature at 72h.
+> - Docs alignment: the stale "uncommitted"/"NOT fixed"/"W2 dark"/06-28-Open
+>   markers in `02_NEXT_BUILD_TASKS.md` and the `CLAUDE.md` STATUS block were
+>   corrected this session. The local Ollama "ask-it" assistant idea is DROPPED
+>   (operator kept the Claude subscription); the committed `local_assistant/`
+>   scaffold stays in-repo but is inert and unowned. MAGI-02's desktop MINER
+>   (also Ollama-based) is unaffected and still pending its first run.**
+
+> **2026-07-02 (SECOND BATCH). Four operator-approved follow-ups shipped
 > and DEPLOYED (services restarted, cycle verified clean): (1) ntfy emoji-title
 > crash fixed — the wake-notification feature delivered for the first time ever;
 > (2) tape `history.db` RESTORED from the 06-17 GCS snapshot + refilled gap-free
