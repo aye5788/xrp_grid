@@ -1,9 +1,14 @@
 """ADK agent module for tuning Casper's persona instruction with `adk optimize`.
 
-Exposes `root_agent`: the SAME stateless RegimeVote LlmAgent that
-magi.council._build_agent("casper") builds in the live path — native
+Exposes `root_agent`: a stateless RegimeVote LlmAgent — native
 gemini-2.5-flash, output_schema=RegimeVote, include_contents="none". The only
 thing `adk optimize` rewrites is this agent's `instruction` (i.e. casper.md).
+
+HISTORICAL NOTE (2026-07-05): this mirrored the ARBITER-ERA live Casper seat
+(magi.council._build_agent("casper")). The blind-review council redesign
+(2026-06-25) retired the per-seat RegimeVote in the live path — the schema now
+lives in THIS module (see below) and the scaffold evals a seat shape that no
+longer runs live.
 
 Run `adk optimize` from the repo root so `magi.*` and this package both import.
 """
@@ -27,19 +32,56 @@ from dotenv import load_dotenv
 # Provider keys (GOOGLE_API_KEY) for the Gemini client.
 load_dotenv(_REPO_ROOT / ".env")
 
+from typing import Literal
+
 from google.adk.agents import LlmAgent
 from google.genai import types
+from pydantic import BaseModel, ConfigDict, Field
 
 from magi.agents.personas import load_persona
-from magi.agents.schemas import RegimeVote
 
 # Same model handle as magi.council._CASPER_MODEL.
 _CASPER_MODEL = "gemini-2.5-flash"
 
-# NOTE: RegimeVote is used directly (no Gemini-compat subclass). The live schema
-# was fixed 2026-06-01 to use extra="ignore" so it no longer emits the
-# `additionalProperties` that native Gemini 400s on — so the optimize agent now
-# mirrors the live Casper schema exactly. See magi/agents/schemas.py.
+
+class RegimeVote(BaseModel):
+    """Casper — market-regime classification (ARBITER-ERA schema).
+
+    Moved here 2026-07-05 from magi/agents/schemas.py when the arbiter-era
+    seat schemas (RegimeVote/GridVote/RiskVote) were deleted from the live
+    package — this scaffold is their last consumer. The blind-review council
+    (2026-06-25 redesign) replaced the per-seat split votes with the shared
+    CandidateDecision/Ranking pair, so this scaffold now evals a seat shape
+    that no longer runs live.
+
+    extra="ignore", NOT "forbid": Casper runs on the native Gemini API, whose
+    response_schema rejects the `additionalProperties: false` that
+    extra="forbid" emits — a 400 INVALID_ARGUMENT on every call.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    position: Literal["RANGING", "TRENDING", "UNCERTAIN"] = Field(
+        description="Casper's regime classification for this cycle."
+    )
+    conviction: float = Field(
+        ge=0.0, le=1.0, description="Confidence in the regime call, 0.0-1.0."
+    )
+    key_evidence: list[str] = Field(
+        description=(
+            "3-5 short strings citing the specific world_state indicators/values "
+            "that drove the regime call."
+        )
+    )
+    crux: str = Field(
+        description="One sentence: the single thing that would change the call."
+    )
+    regime_action: Literal["EXECUTE", "DEFER_STRUCTURAL", "STAND_DOWN"] = Field(
+        description=(
+            "Whether the regime supports executing structural grid changes this "
+            "cycle. Read by the downstream consensus/hard-rule layer."
+        )
+    )
 
 # Free-tier survival: ride out 429 RESOURCE_EXHAUSTED with client-side backoff
 # instead of failing the optimize loop. Per the ADK Gemini-models doc

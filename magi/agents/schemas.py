@@ -1,24 +1,24 @@
-"""Locked cross-boundary vote schemas for the MAGI council (ADK output_schema).
+"""Locked cross-boundary vote schemas for the blind-review MAGI council.
 
-Each council member's ADK LlmAgent is constructed with one of these as its
-`output_schema`, which forces the model's final response to be JSON conforming to
-the model and stores it in session.state under the agent's `output_key`. council.py
-reads that structured output back and TRANSLATES it into the parsed-vote dict
-shapes orchestrator.py already consumes (see council._translate).
+The blind-review council (2026-06-25 redesign) uses exactly TWO seat-authored
+schemas: every seat authors ONE complete CandidateDecision in isolation
+(Phase 1), then every seat ranks the anonymized candidate set with a Ranking
+(Phase 2). Geometry is the shared nested object a RECONFIGURE candidate
+carries. Seats are built in code (magi/agents/seats.py) with these as forced
+tool schemas via schema_for_tool.
 
-  RegimeVote  -> Casper    -> output_key="casper_r0"
-  GridVote    -> Melchior  -> output_key="melchior_r0"
-  RiskVote    -> Balthasar -> output_key="balthasar_r0"
+The ARBITER-ERA per-seat split schemas (RegimeVote -> Casper, GridVote ->
+Melchior, RiskVote -> Balthasar) were DELETED 2026-07-05 — they had no live
+caller since the redesign collapsed their authority into CandidateDecision's
+single `action`. RegimeVote survives only in the offline tuning scaffold that
+still evals it (optimize/casper/agent.py, where it now lives).
 
-ADK ref (adk-docs MCP, agents/llm-agents): output_schema — "If set, the agent's
-final response *must* be a JSON string conforming to this schema"; output_key
-saves that final response into session state.
-
-conviction is a float 0.0-1.0 on every schema. GridVote/RiskVote use
-extra="forbid"; RegimeVote uses extra="ignore" because Casper runs on the native
-Gemini API, which 400s (INVALID_ARGUMENT) on the `additionalProperties: false`
-that extra="forbid" emits into response_schema. GPT-4o/Claude via LiteLlm accept
-it, so Melchior/Balthasar keep extra="forbid".
+conviction is a float 0.0-1.0 on every schema. Everything here uses
+extra="ignore", NOT "forbid": every seat authors these, including Casper on
+the native Gemini API, whose response_schema 400s (INVALID_ARGUMENT) on the
+`additionalProperties: false` that extra="forbid" emits. The Anthropic-routed
+seats reach these through schema_for_tool, which strips additionalProperties
+centrally, so extra="ignore" is safe there too.
 """
 
 from typing import Literal, Optional
@@ -26,42 +26,8 @@ from typing import Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-class RegimeVote(BaseModel):
-    """Casper — market-regime classification."""
-
-    # extra="ignore", NOT "forbid": Casper runs on the native Gemini API, whose
-    # response_schema rejects the `additionalProperties: false` that extra="forbid"
-    # emits — a 400 INVALID_ARGUMENT on every R0 call. Validated against
-    # gemini-2.5-flash 2026-06-01 (see optimize/casper smoke run). GridVote /
-    # RiskVote keep extra="forbid" — they go through LiteLlm to OpenAI / Anthropic,
-    # which accept (OpenAI requires) additionalProperties.
-    model_config = ConfigDict(extra="ignore")
-
-    position: Literal["RANGING", "TRENDING", "UNCERTAIN"] = Field(
-        description="Casper's regime classification for this cycle."
-    )
-    conviction: float = Field(
-        ge=0.0, le=1.0, description="Confidence in the regime call, 0.0-1.0."
-    )
-    key_evidence: list[str] = Field(
-        description=(
-            "3-5 short strings citing the specific world_state indicators/values "
-            "that drove the regime call."
-        )
-    )
-    crux: str = Field(
-        description="One sentence: the single thing that would change the call."
-    )
-    regime_action: Literal["EXECUTE", "DEFER_STRUCTURAL", "STAND_DOWN"] = Field(
-        description=(
-            "Whether the regime supports executing structural grid changes this "
-            "cycle. Read by the downstream consensus/hard-rule layer."
-        )
-    )
-
-
 class Geometry(BaseModel):
-    """Chosen grid geometry — populated only on a RECONFIGURE GridVote verdict.
+    """Chosen grid geometry — populated only on a RECONFIGURE CandidateDecision.
 
     Values are unbounded here by design; spacing/level range limits are enforced in
     the deterministic hard-rule layer, not in this schema.
@@ -88,141 +54,17 @@ class Geometry(BaseModel):
     )
 
 
-class GridVote(BaseModel):
-    """Melchior — grid-economics judgment (verdict, not an action)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    verdict: Literal["THESIS_HOLDS", "RECONFIGURE", "NO_PROFITABLE_GRID"] = Field(
-        description=(
-            "Melchior's economic judgment. THESIS_HOLDS: a grid is live and its "
-            "economics remain justified. RECONFIGURE: a better/profitable "
-            "configuration is justified (carries geometry). NO_PROFITABLE_GRID: no "
-            "candidate clears the acceptable bar."
-        )
-    )
-    conviction: float = Field(
-        ge=0.0, le=1.0, description="Confidence in the verdict, 0.0-1.0."
-    )
-    key_evidence: list[str] = Field(
-        description=(
-            "3-5 short strings citing specific scored_variants / baseline values "
-            "(rank-1 pnl/day, current-config pnl/day, spacing/levels, acceptable "
-            "counts, ranks)."
-        )
-    )
-    crux: str = Field(
-        description="One sentence: the single thing that would change the verdict."
-    )
-    geometry: Optional[Geometry] = Field(
-        default=None,
-        description=(
-            "Chosen geometry. Present ONLY on RECONFIGURE (target_spacing_pct, "
-            "target_levels from the chosen acceptable variant). Null on "
-            "THESIS_HOLDS and NO_PROFITABLE_GRID."
-        ),
-    )
-
-    @model_validator(mode="after")
-    def _geometry_matches_verdict(self) -> "GridVote":
-        """Enforce: geometry present iff verdict == RECONFIGURE."""
-        if self.verdict == "RECONFIGURE" and self.geometry is None:
-            raise ValueError(
-                "verdict=RECONFIGURE requires geometry "
-                "(target_spacing_pct, target_levels)."
-            )
-        if self.verdict != "RECONFIGURE" and self.geometry is not None:
-            raise ValueError(
-                f"verdict={self.verdict} must not carry geometry; geometry is "
-                "valid only on RECONFIGURE."
-            )
-        return self
-
-
-class RiskVote(BaseModel):
-    """Balthasar — survival/risk gating judgment.
-
-    As the synthesis ARBITER, Balthasar's geometry_veto carries the structural
-    veto that used to live in orchestrator hard-rule 0d: HOLD_GEOMETRY / RISK_BLOCK
-    over a RECONFIGURE holds the grid in-council (the council emits THESIS_HOLDS),
-    PROCEED lets the reconfigure stand. override_justification is the conditional
-    carrier for the one case the schema alone can't gate (it needs Casper's vote):
-    proceeding over a live regime objection. Enforcement lives in
-    council_v2.run_council at synthesis, where all three votes are in hand.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    stance: Literal["DEPLOY", "HOLD", "STAND_ASIDE"] = Field(
-        description=(
-            "The council's capital-deployment mandate (Fix 3, 2026-06-11) — as "
-            "arbiter you own it. DEPLOY: the market warrants grid capital; "
-            "Melchior's verdict pipeline runs unchanged (maintain or rebuild). "
-            "HOLD: keep what is already resting but commit NO new capital — a "
-            "RECONFIGURE will not rebuild while HOLD stands. STAND_ASIDE: "
-            "structural downtrend / capital-erosion risk — buy orders are "
-            "cancelled and no buys are placed; resting sells stay to work "
-            "inventory off. This is the stance the orchestrator translates "
-            "deterministically; it is graded against forward outcomes."
-        )
-    )
-    risk_action: Literal["CLEAR", "PAUSE_LONGS", "PAUSE_SHORTS", "HALT"] = Field(
-        description="Balthasar's risk posture for this cycle."
-    )
-    geometry_veto: Literal["PROCEED", "HOLD_GEOMETRY", "RISK_BLOCK"] = Field(
-        description=(
-            "Whether risk conditions permit a structural grid change this cycle. "
-            "As the arbiter you OWN this veto: HOLD_GEOMETRY / RISK_BLOCK over a "
-            "RECONFIGURE holds the grid (no rebuild this cycle); PROCEED lets it "
-            "stand. Read by the downstream consensus layer."
-        )
-    )
-    conviction: float = Field(
-        ge=0.0, le=1.0, description="Confidence in the vote, 0.0-1.0."
-    )
-    key_evidence: list[str] = Field(
-        description=(
-            "3-5 short strings citing specific world_state risk fields and values."
-        )
-    )
-    crux: str = Field(
-        description="One sentence: the single thing that would change the verdict."
-    )
-    override_justification: Optional[str] = Field(
-        default=None,
-        description=(
-            "Fill this ONLY when you set geometry_veto=PROCEED on a structural "
-            "reconfigure while Casper's regime read objects (regime_action is "
-            "DEFER_STRUCTURAL or STAND_DOWN). State, on the merits, why the "
-            "reconfigure should proceed over that specific objection — engage "
-            "Casper's cited reason, do not merely assert. Leave null when there is "
-            "no live regime objection, or when you are not proceeding (you set "
-            "HOLD_GEOMETRY/RISK_BLOCK), or the verdict is not RECONFIGURE. An "
-            "un-justified proceed over a live objection is NOT honored: the "
-            "objection stands and the grid holds (MAINTAIN)."
-        ),
-    )
-
-
 # ---------------------------------------------------------------------------
 # Blind-review council (council redesign) — the SHARED candidate + ranking
 # ---------------------------------------------------------------------------
-# These two schemas replace the per-seat split votes (RegimeVote / GridVote /
-# RiskVote) for the blind-review council. In that design the three seats are
-# co-equal: each authors ONE complete CandidateDecision in isolation (Phase 1),
-# then every seat ranks the anonymized candidate set (Phase 2). The authority
-# that used to live across three split schemas (Melchior's verdict+geometry,
-# Balthasar's stance/risk/veto, Casper's regime_action) has COLLAPSED into the
-# single `action` of the SHARED candidate that any seat can author and all can
-# rank. Regime itself is no longer an OUTPUT of any seat — it is an INPUT carried
-# in world_state that every seat reads; the Casper regime grader retires with it.
-#
-# Both use extra="ignore", NOT "forbid": in the symmetric council EVERY seat
-# authors BOTH schemas, including Casper on the native Gemini API, whose
-# response_schema 400s (INVALID_ARGUMENT) on the `additionalProperties: false`
-# that extra="forbid" emits — the same constraint that forces RegimeVote to
-# extra="ignore". Melchior/Balthasar reach these through schema_for_tool, which
-# strips additionalProperties centrally, so extra="ignore" is safe there too.
+# The three seats are co-equal: each authors ONE complete CandidateDecision in
+# isolation (Phase 1), then every seat ranks the anonymized candidate set
+# (Phase 2). The authority that used to live across the three arbiter-era
+# split schemas (Melchior's verdict+geometry, Balthasar's stance/risk/veto,
+# Casper's regime_action) has COLLAPSED into the single `action` of the SHARED
+# candidate that any seat can author and all can rank. Regime itself is no
+# longer an OUTPUT of any seat — it is an INPUT carried in world_state that
+# every seat reads; the Casper regime grader retired with it.
 
 
 class CandidateDecision(BaseModel):
@@ -286,7 +128,7 @@ class CandidateDecision(BaseModel):
 
     @model_validator(mode="after")
     def _geometry_matches_action(self) -> "CandidateDecision":
-        """Enforce: geometry present iff action == RECONFIGURE (mirrors GridVote)."""
+        """Enforce: geometry present iff action == RECONFIGURE."""
         if self.action == "RECONFIGURE" and self.geometry is None:
             raise ValueError(
                 "action=RECONFIGURE requires geometry "

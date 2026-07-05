@@ -69,7 +69,7 @@ def strip_additional_properties(d: Any, _seen: set[int] | None = None) -> Any:
     it centrally here makes that 400 structurally impossible to reach a vendor: a
     model's `extra=` setting can no longer re-arm it. Touches ONLY this one key —
     required / optional / nullable / enum / items / anyOf structure is left intact,
-    so conditional contracts (e.g. GridVote's geometry-iff-RECONFIGURE) survive."""
+    so conditional contracts (e.g. CandidateDecision's geometry-iff-RECONFIGURE) survive."""
     if _seen is None:
         _seen = set()
     if isinstance(d, dict):
@@ -89,7 +89,7 @@ def strip_additional_properties(d: Any, _seen: set[int] | None = None) -> Any:
 
 def schema_for_tool(model: type[BaseModel]) -> dict[str, Any]:
     """Native Pydantic schema -> tool input_schema, SAFE transforms only.
-    Preserves optional/nullable fields (e.g. conditional GridVote.geometry) so the
+    Preserves optional/nullable fields (e.g. conditional CandidateDecision.geometry) so the
     vendor sees the real contract, not a strict-mode rewrite.
 
     The final strip_additional_properties pass is a structural guard against the

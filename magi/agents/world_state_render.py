@@ -1,9 +1,10 @@
-"""Single shared world_state -> prompt renderer for the council seat-callers.
+"""Single shared world_state -> prompt renderer for the council seats.
 
-All three standalone seat-callers (casper_gemini.py, melchior_deepseek.py,
-balthasar_claude.py) render the per-cycle world_state through THIS function so the
-world_state block they put in front of their model is byte-identical — no
-per-seat drift, deterministic for trace/debug legibility.
+Every seat call (magi/agents/seats.py) renders the per-cycle world_state
+through THIS function so the world_state block put in front of each model is
+byte-identical — no per-seat drift, deterministic for trace/debug legibility.
+(The arbiter-era standalone seat-callers that originally shared it were
+deleted 2026-07-05.)
 
 Pretty JSON (indent=2, sort_keys=True) is used over flattened "key: value" lines
 because all three vendors (Gemini, DeepSeek, Claude) parse explicit nested JSON

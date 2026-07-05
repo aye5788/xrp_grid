@@ -755,12 +755,15 @@ class GridEngine:
           - After cancel_all_orders before placing an anchor: expected_open=0
           - After initialise_grid completes: expected_open == placed count
 
-        Logs an ERROR if the open-order count doesn't match expected. This
-        is a tripwire, not a fix; if it ever fires, something has either
-        leaked orders between rebuilds, raced two MAGI cycles, or stale
-        rows were restored from DB. The accumulated state is dangerous
-        (multi-generation grids with overlapping levels, double inventory
-        commitments, etc.) and should be investigated before continuing.
+        A violation logs an ERROR and writes a critical magi_alerts row
+        (category one_grid_violation -> ntfy page). If it ever fires,
+        something has either leaked orders between rebuilds, raced two MAGI
+        cycles, or stale rows were restored from DB. The accumulated state
+        is dangerous (multi-generation grids with overlapping levels, double
+        inventory commitments, etc.). Callers own any repair: the anchor
+        entry re-cancels and aborts on a dirty book; the post-rebuild check
+        stays page-only (auto-repairing a partially-placed grid is not
+        safely automatable).
         """
         open_count = sum(
             1 for o in self.paper_orders.values()
@@ -774,6 +777,16 @@ class GridEngine:
                 "inventory commit, race conditions). Investigate.",
                 context, expected_open, open_count,
             )
+            try:
+                from database import insert_alert
+                insert_alert(
+                    'critical', 'one_grid_violation',
+                    f"ONE_GRID violation at {context}: expected "
+                    f"{expected_open} open orders, found {open_count}. "
+                    f"Open dashboard.",
+                )
+            except Exception as e:
+                log.error(f"ONE_GRID alert write failed: {e}")
             return False
         return True
 
@@ -800,9 +813,27 @@ class GridEngine:
         # ONE GRID INVARIANT — anchor must execute from a clean book.
         # initialise_grid() calls cancel_all_orders() before us; this is
         # the post-cancel checkpoint that anything stuck open would trip.
-        self._assert_one_grid_invariant(
+        # ENFORCED (2026-07-05): a dirty book here means that cancel missed
+        # orders — building an anchor on top would stack a second grid.
+        # Retry the cancel once; if the book still is not clean, abort the
+        # anchor (no arms get placed, the grid stays unbuilt this cycle).
+        if not self._assert_one_grid_invariant(
             context="_execute_anchor entry", expected_open=0,
-        )
+        ):
+            self.cancel_all_orders()
+            if not self._assert_one_grid_invariant(
+                context="_execute_anchor entry (post-recancel)",
+                expected_open=0,
+            ):
+                log.error(
+                    "ONE_GRID enforcement: book still dirty after re-cancel "
+                    "— aborting anchor; no grid built this cycle."
+                )
+                return None
+            log.warning(
+                "ONE_GRID enforcement: stray open orders cancelled; anchor "
+                "proceeding from a clean book."
+            )
         xrp_held = float(self.paper_inventory.get('xrp') or 0.0)
         usd_held = float(self.paper_inventory.get('usd') or 0.0)
         xrp_value = xrp_held * current_price
@@ -1324,8 +1355,43 @@ class GridEngine:
 
         current_state = get_current_grid_state()
         if not current_state:
-            log.warning("No grid state — initialising fresh")
-            self.initialise_grid()
+            # No stored grid state at all (virgin/wiped DB). The engine has no
+            # static spacing default, so a fresh build must be geometry-routed:
+            # honor a rebuild-type action carrying decision geometry, refuse
+            # everything else (the scheduler's first-boot scorer path owns the
+            # from-nothing build; fabricating a spacing here would bypass it).
+            # A paused side means the council is protecting the book — a fresh
+            # two-sided build would be a council bypass, so refuse those too.
+            geometry = consensus.get('melchior_geometry') or {}
+            geom_spacing = geometry.get('target_spacing_pct')
+            if (grid_action in ('RECENTRE', 'TIGHTEN', 'WIDEN')
+                    and risk_action not in ('PAUSE_LONGS', 'PAUSE_SHORTS')
+                    and isinstance(geom_spacing, (int, float))
+                    and geom_spacing > 0):
+                from config import MIN_GRID_SPACING_PCT, MAX_GRID_SPACING_PCT
+                new_spacing = max(MIN_GRID_SPACING_PCT,
+                                  min(MAX_GRID_SPACING_PCT, float(geom_spacing)))
+                geom_levels = geometry.get('target_levels')
+                if isinstance(geom_levels, int) and geom_levels > 0:
+                    self.level_count = max(4, min(12, geom_levels))
+                log.warning(
+                    "No grid state — initialising fresh from decision geometry "
+                    "(spacing=%s levels=%d)", new_spacing, self.level_count,
+                )
+                self.last_applied['applied_spacing'] = new_spacing
+                if abs(new_spacing - float(geom_spacing)) > 1e-9:
+                    self.last_applied['engine_clamped'] = 1
+                    self.last_applied['clamp_reason'] = 'spacing_bounds'
+                self.initialise_grid(spacing_pct=new_spacing)
+            else:
+                log.error(
+                    "No grid state and no usable geometry on this decision "
+                    "(action=%s risk=%s spacing=%r) — nothing built; the "
+                    "first-boot scorer path owns the from-nothing build.",
+                    grid_action, risk_action, geom_spacing,
+                )
+                self.last_applied['applied_grid_action'] = 'MAINTAIN'
+                self.last_applied['clamp_reason'] = 'no_grid_state_no_geometry'
             return
 
         centre = current_state['centre_price']

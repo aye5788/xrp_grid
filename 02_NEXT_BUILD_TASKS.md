@@ -23,10 +23,24 @@
 >    on the v2 cost basis — the 72h-matured stance record vs both graders
 >    (hit-rate 0/7 vs cost-based net +$0.03 tells the asymmetry story).
 > 5. Carried unchanged: MAGI-02 first miner run (Ollama not on the desktop
->    yet); chaos-drill layer 4; dead-arbiter-module deletion (NOTE:
->    `get_agent_recall` + its per-seat graders join the dead-code list —
->    superseded by sync_ratio/entry_plug, kept for reference with a docstring
->    note pending deletion approval); engine hygiene items (below).**
+>    yet); chaos-drill layer 4. ~~dead-arbiter-module deletion~~ ✅ **DONE
+>    2026-07-05 (operator-approved):** `balthasar_claude.py` /
+>    `casper_gemini.py` / `melchior_deepseek.py` deleted; `GridVote`/`RiskVote`
+>    deleted from `magi/agents/schemas.py`; `RegimeVote` MOVED into
+>    `optimize/casper/agent.py` (its only remaining importer — the offline
+>    tuning scaffold, which now evals a seat shape that no longer runs live);
+>    `Geometry` KEPT (nested in the live `CandidateDecision`);
+>    `get_agent_recall` + its recall-only helpers (`_RECALL_COLS`/`_POS_COL`/
+>    `_GRADER`/`_HEADER`/`_EMPTY_SENTINEL`, `_render_grade_word`,
+>    `_render_recall_block`) deleted from `database.py`. NOT deleted, verified
+>    live: the per-row graders `_grade_*_row` (called by `get_agent_accuracy`
+>    → dashboard, and observer seat grading), `RECALL_MAX_ITEMS`/
+>    `RECALL_LOOKBACK_DAYS` + `_RECALL_EXCLUDE_*` (used by
+>    `get_council_ledger`). ~~engine hygiene items~~ ✅ **DONE 2026-07-05**
+>    (see the STILL OPEN block below, now closed). Verified: CI-equivalent
+>    ruff clean, 7/7 property tests pass, all live modules import, dashboard
+>    imports OK, `validate_schema` PASS; deployed via a verified QUIET restart
+>    (no startup council cycle).**
 
 > **PLAN 2026-07-02 — PROACTIVE BUG-CATCHING ARCHITECTURE (operator-approved;
 > build sequence locked; "no spend, stop on surprises" directive).**
@@ -277,12 +291,27 @@
 >    next daily floor (and W1/backstop); it stays sells-only until the council votes
 >    DEPLOY on a recovered regime.
 >
-> **STILL OPEN (hygiene / follow-ups):** delete dead arbiter modules
-> (`balthasar_claude.py`/`melchior_deepseek.py`/`casper_gemini.py` + `RegimeVote`/
-> `GridVote`/`RiskVote` — verified still on disk 2026-07-04); the `engine.py:1328`
-> "No grid state → initialise fresh" fallback also calls `initialise_grid()` with no
-> spacing (fails safe — logs + builds nothing — but should route through geometry);
-> ONE_GRID invariant (`engine.py:750`) detects-but-does-not-enforce.
+> ~~**STILL OPEN (hygiene / follow-ups):** delete dead arbiter modules ... the
+> `engine.py:1328` fallback ... ONE_GRID detects-but-does-not-enforce~~
+> ✅ **ALL THREE CLOSED 2026-07-05 (operator-approved; deployed via quiet
+> restart):** (1) dead arbiter modules + `GridVote`/`RiskVote` deleted,
+> `RegimeVote` moved into `optimize/casper/agent.py` (details in the
+> 2026-07-04 top-of-queue block, item 5). (2) The no-grid-state fallback in
+> `apply_magi_decision` now routes through DECISION GEOMETRY: with no stored
+> grid state it builds ONLY when the action is a rebuild type
+> (RECENTRE/TIGHTEN/WIDEN) carrying `melchior_geometry` with a valid spacing
+> (clamped to the 1.5–2.5% band, levels clamped 4–12) AND no side is paused
+> (a paused side means the council is protecting the book — a fresh two-sided
+> build would be a council bypass); anything else logs an error, records
+> `clamp_reason=no_grid_state_no_geometry`, and builds nothing (the first-boot
+> scorer path owns the from-nothing build). (3) ONE_GRID now ENFORCES: any
+> violation writes a critical `magi_alerts` row (`one_grid_violation` → ntfy
+> page) instead of a log line only, and the anchor-entry check re-cancels the
+> book once and ABORTS the build if still dirty (never stacks a second grid);
+> the post-rebuild check stays page-only by design — auto-repairing a
+> partially-placed grid is not safely automatable. All paths
+> smoke-verified (violation→alert+abort; geometry fallback builds/refuses/
+> clamps correctly incl. under PAUSE_LONGS).
 > ~~W2's off-schedule re-judge is DARK while the tape collector is stood down~~
 > **NO LONGER TRUE as of 2026-07-02:** `tape_verdict` was restored (GCS snapshot +
 > hourly Bitstamp-fed `tape-tail.timer`), so W2's verdict arm is live again — a real

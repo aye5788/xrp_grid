@@ -1838,7 +1838,7 @@ _BALTHASAR_SURVIVAL_HALT_TAGS = {
 
 # The Stage-3 integration-test cycle artifact (id 270 / cyc_1780949300): a real
 # convene written while wiring the orchestrator, NOT a live trading decision. It is
-# hard-excluded from get_agent_recall by BOTH keys (id is DB-local; cycle_id is the
+# hard-excluded from ledger/recall reads by BOTH keys (id is DB-local; cycle_id is the
 # stable identity). It is also off the current config_version, so the version filter
 # would drop it anyway — the explicit exclusion is belt-and-suspenders.
 _RECALL_EXCLUDE_ID = 270
@@ -1863,7 +1863,7 @@ def _decision_bar_index(ts_keys, cycle_ts):
 #
 # Grading for each seat lives in exactly ONE place: these three helpers. Both the
 # aggregate accuracy scorers (_score_casper/_melchior/_balthasar -> get_agent_accuracy)
-# AND the per-seat recall Journal (get_agent_recall) call them, so the two readers can
+# call them (the per-seat recall Journal that also shared them was deleted 2026-07-05), so readers can
 # never drift. Each helper takes ONE debate_records Row (already SELECTed with the
 # columns its seat needs, with the seat's r0 position aliased to 'position') plus the
 # loaded 1h bars / bisect keys / bar count, and returns:
@@ -2214,7 +2214,7 @@ def _score_casper(conn, bars, ts_keys, cutoff):
     ambiguous: correct iff the realized label is also UNCERTAIN (no abstention
     exclusion). A row whose 72h forward window is not yet fully covered by candles
     is NOT scored (excluded as not-matured), never counted wrong. Grading delegates
-    to _grade_casper_row (the single source of truth shared with get_agent_recall)."""
+    to _grade_casper_row (the single source of truth for this seat's grade)."""
     n = len(bars)
     rows = conn.execute(
         '''SELECT casper_r0_position AS position, timestamp
@@ -2253,8 +2253,8 @@ def _score_melchior(conn, bars, ts_keys, cutoff):
                                      config on expected daily PnL AND pnl_6h>=0.
     Rows whose position is not one of the three verdicts (e.g. Letta-era
     MAINTAIN/RECENTRE action vocabulary) are excluded as non-verdict. Grading
-    delegates to _grade_melchior_row (the single source of truth shared with
-    get_agent_recall)."""
+    delegates to _grade_melchior_row (the single source of truth for this
+    seat's grade)."""
     n = len(bars)
     rows = conn.execute(
         '''SELECT melchior_r0_position AS position, timestamp,
@@ -2307,7 +2307,7 @@ def _score_balthasar(conn, bars, ts_keys, cutoff):
 
     Applied-vs-overridden is recovered from balthasar_r0_position + final_risk_action
     + geometry_veto + the hard_rule_overrides tags. Grading delegates to
-    _grade_balthasar_row (the single source of truth shared with get_agent_recall)."""
+    _grade_balthasar_row (the single source of truth for this seat's grade)."""
     n = len(bars)
     rows = conn.execute(
         '''SELECT balthasar_r0_position AS position, timestamp,
@@ -2441,175 +2441,15 @@ def get_agent_accuracy(agent_id, days=7):
     return out
 
 
-# --- per-agent recall: the "Journal" (deterministic, prompt-injected) ---
-
-# SELECT column lists per seat — exactly the columns that seat's grade helper reads,
-# with its r0 position aliased to 'position'. id + cycle_id + config_version are
-# common (filtering / exclusion); timestamp drives ordering and the date header.
-_RECALL_COLS = {
-    'casper': "casper_r0_position AS position, timestamp",
-    'melchior': ("melchior_r0_position AS position, timestamp, "
-                 "fills_6h, pnl_6h, unrealized_pnl_6h, world_state"),
-    'balthasar': ("balthasar_r0_position AS position, timestamp, "
-                  "fills_6h, pnl_6h, unrealized_pnl_6h, geometry_veto, "
-                  "final_grid_action, final_risk_action, hard_rule_overrides"),
-}
-_RECALL_POS_COL = {
-    'casper': 'casper_r0_position',
-    'melchior': 'melchior_r0_position',
-    'balthasar': 'balthasar_r0_position',
-}
-_RECALL_GRADER = {
-    'casper': _grade_casper_row,
-    'melchior': _grade_melchior_row,
-    'balthasar': _grade_balthasar_row,
-}
-_RECALL_HEADER = "=== YOUR RECALL — your own past calls, scored by outcome (private) ==="
-_RECALL_EMPTY_SENTINEL = _RECALL_HEADER + "\n(no validated history yet)"
-
-
-def _render_grade_word(grade):
-    """Map a grade dict to the Journal's grade vocabulary. estimated grades (the
-    decision-time proxy / counterfactual ones) are rendered estimated_*; outcome-
-    realized grades are plain correct/incorrect."""
-    if grade['estimated']:
-        return 'estimated_correct' if grade['correct'] else 'estimated_incorrect'
-    return 'correct' if grade['correct'] else 'incorrect'
-
-
-def _render_recall_block(entries):
-    """Render the per-seat recall entries into the literal, deterministically-ordered
-    block injected into the seat's prompt. No now()-timestamps; chronological order.
-    Empty -> the explicit sentinel (never an error). The grading_basis is surfaced as
-    a parenthetical when it is not plain reality, so 'estimated' vs 'sim' vs
-    'counterfactual' is legible on the line itself."""
-    if not entries:
-        return _RECALL_EMPTY_SENTINEL
-    lines = [_RECALL_HEADER]
-    for e in entries:
-        basis_suffix = '' if e['grading_basis'] == 'reality' else f" ({e['grading_basis']})"
-        lines.append(
-            f"[{e['date']} {e['label']}] {e['raw_outcome']} | {e['grade']}{basis_suffix}"
-        )
-    return "\n".join(lines)
-
-
-def get_agent_recall(agent_id, config_version, as_of=None):
-    """SUPERSEDED / NO LIVE CALLER (2026-07-04). This arbiter-era per-seat
-    Journal was silently orphaned by the 2026-06-25/26 blind-review redesign
-    (the rebuilt council_v2 never calls it) and its role is now filled by the
-    sync-ratio ledger outcomes + track record (magi/sync_ratio.py) and the
-    ENTRY PLUG precedents (magi/entry_plug.py). Kept for reference pending
-    deletion approval — see 02_NEXT_BUILD_TASKS.md 2026-07-04 item 5. Original
-    docstring follows.
-
-    Per-agent recall — the deterministic "Journal". A pure SQLite read (NO model
-    call, NO vendor cost): the same inputs produce byte-identical output. Each seat
-    recalls ONLY its own past calls, scored by ITS OWN per-role metric — there is no
-    cross-agent history. The live consumer is council_v2.run_council, which injects
-    each seat's block as prompt context.
-
-    LAYERING: config_version is a PARAMETER supplied by the caller, not computed here.
-    The decision layer (council_v2) owns the fingerprint and passes the current
-    version down; this data-layer function is a pure "filter by the version I'm given"
-    read and does NOT import council_v2 or orchestrator. If the caller passes None
-    (could not establish the boundary), recall is EMPTY — a fail-safe miss, never a
-    cross-config injection.
-
-    Scoping filters, applied IN ORDER:
-      (a) config boundary — include only rows whose config_version EQUALS the
-          `config_version` argument. A row written under different personas/models/
-          rules/disclosure is a different regime and must not be recalled as if it
-          taught the current one. config_version is None -> recall is EMPTY.
-      (b) scored-only — a row is included ONLY if THAT seat's grade helper produces a
-          grade (delegated to _grade_*_row; ungraded rows are skipped, never
-          reimplemented here).
-      (c) bounds — the most-recent RECALL_MAX_ITEMS graded rows within
-          RECALL_LOOKBACK_DAYS of `as_of`.
-      (d) hard-exclude the Stage-3 integration-test artifact (id 270 /
-          cyc_1780949300) by both keys.
-
-    as_of (str ISO or datetime) anchors the lookback window and the recency cut;
-    None -> MAX(timestamp) in debate_records (DB-derived, so still deterministic —
-    never utcnow()).
-
-    Returns a dict:
-      {agent_id, as_of, config_version, entries, block}
-    where each entry carries THREE fields plus presentation:
-      raw_outcome   — ALWAYS present: the ground-truth one-liner (the spine).
-      grade         — correct | incorrect | estimated_correct | estimated_incorrect.
-      grading_basis — reality | sim | counterfactual (reality and counterfactual are
-                      kept SEPARATE, never blended).
-    `block` is the rendered, prompt-ready text (the empty sentinel when no entry
-    survives the filters)."""
-    if agent_id not in _VALID_AGENT_IDS:
-        raise ValueError(f"unknown agent_id: {agent_id!r}")
-
-    cfg_version = config_version     # (a) boundary supplied by caller; None -> empty
-
-    conn = get_conn()
-    try:
-        from grid.forward_sim import load_1h
-        bars = load_1h(conn)
-        ts_keys = [b[0][:19] for b in bars]
-        n = len(bars)
-
-        if as_of is None:
-            row = conn.execute(
-                "SELECT MAX(timestamp) AS ts FROM debate_records").fetchone()
-            as_of = row['ts'] if row and row['ts'] else None
-
-        entries = []
-        if cfg_version is not None and as_of is not None:
-            as_of_s = as_of if isinstance(as_of, str) else as_of.isoformat()
-            try:
-                lower = (datetime.fromisoformat(as_of_s)
-                         - timedelta(days=RECALL_LOOKBACK_DAYS)).isoformat()
-            except ValueError:
-                lower = None
-            if lower is not None:
-                pos_col = _RECALL_POS_COL[agent_id]
-                sql = (
-                    f"SELECT {_RECALL_COLS[agent_id]} "
-                    f"FROM debate_records "
-                    f"WHERE config_version = ? "
-                    f"  AND timestamp >= ? AND timestamp <= ? "
-                    f"  AND {pos_col} IS NOT NULL "
-                    f"  AND id != ? "
-                    f"  AND (cycle_id IS NULL OR cycle_id != ?) "
-                    f"ORDER BY timestamp DESC, id DESC"
-                )
-                rows = conn.execute(
-                    sql,
-                    (cfg_version, lower, as_of_s,
-                     _RECALL_EXCLUDE_ID, _RECALL_EXCLUDE_CYCLE_ID),
-                ).fetchall()
-                grader = _RECALL_GRADER[agent_id]
-                for r in rows:                  # most-recent first
-                    grade, _reason = grader(r, bars, ts_keys, n)
-                    if grade is None:           # (b) scored-only: skip ungraded
-                        continue
-                    entries.append({
-                        'date': (r['timestamp'] or '')[:10],
-                        'label': grade['label'],
-                        'raw_outcome': grade['raw_outcome'],
-                        'grade': _render_grade_word(grade),
-                        'grading_basis': grade['basis'],
-                    })
-                    if len(entries) >= RECALL_MAX_ITEMS:   # (c) bound count
-                        break
-                entries.reverse()               # inject oldest -> newest
-    finally:
-        conn.close()
-
-    return {
-        'agent_id': agent_id,
-        'as_of': (as_of if isinstance(as_of, str)
-                  else (as_of.isoformat() if as_of else None)),
-        'config_version': cfg_version,
-        'entries': entries,
-        'block': _render_recall_block(entries),
-    }
+# --- per-agent recall: the "Journal" — DELETED 2026-07-05 ---
+# The arbiter-era get_agent_recall (+ its _RECALL_* tables and render helpers)
+# was silently orphaned by the 2026-06-25/26 blind-review redesign; its role
+# is filled by the sync-ratio ledger outcomes (magi/sync_ratio.py), the
+# council track record, and the ENTRY PLUG precedents (magi/entry_plug.py).
+# The per-row grade helpers (_grade_*_row) LIVE ON — get_agent_accuracy and
+# observer's seat grading still call them. RECALL_MAX_ITEMS /
+# RECALL_LOOKBACK_DAYS and _RECALL_EXCLUDE_ID/_RECALL_EXCLUDE_CYCLE_ID also
+# live on — get_council_ledger uses the same bounds and exclusions.
 
 
 _LEDGER_HEADER = ("=== COUNCIL LEDGER — the council's own recent decisions and how "
@@ -2637,7 +2477,7 @@ def _render_ledger_block(entries):
 def get_council_ledger(config_version, as_of=None):
     """The COUNCIL'S OWN memory — a pure SQLite read (NO model call), replay-safe:
     the same inputs produce byte-identical output. Unlike the per-seat Journal
-    (get_agent_recall), this is ONE shared, authorship-free block injected IDENTICALLY
+    (get_agent_recall, deleted 2026-07-05), this is ONE shared, authorship-free block injected IDENTICALLY
     to all three seats in Phase 1 (the blind-review council is co-equal — no seat gets
     a privileged view of the past). It stores only what the council needs to recall
     its OWN past: the decision, the authorship-free vote multiset, the consensus class,
@@ -2647,7 +2487,7 @@ def get_council_ledger(config_version, as_of=None):
     joined with the existing matured-outcome columns (fills_24h / pnl_24h, set later
     by the backfill path). config_version is a PARAMETER supplied by the caller (the
     decision layer owns the fingerprint); None -> EMPTY ledger (fail-safe miss, never
-    cross-config recall). Same boundary/lookback/count discipline as get_agent_recall:
+    cross-config recall). Same boundary/lookback/count discipline the per-seat Journal used:
       (a) config boundary — only rows whose config_version EQUALS the argument.
       (b) council-only — only rows that carry a council_json (pre-redesign rows have
           NULL council_json and are skipped — no arbiter-relay history leaks in).
