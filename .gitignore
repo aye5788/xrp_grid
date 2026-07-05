@@ -23,3 +23,5 @@ archive/
 xrp_grid.cc.json
 xrp_grid.cc.json.gz
 CONFIRM_LIVE.disarmed.*
+optimize/ireul/ireul.db
+optimize/ireul/results_*.json

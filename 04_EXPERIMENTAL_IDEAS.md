@@ -368,3 +368,154 @@ receive. The promotion is therefore inert in production for now. Tracked as the 
 in `02_NEXT_BUILD_TASKS.md` item 0★ (which adopts drawdown as a Balthasar judgment
 input, NOT a deterministic `dd7d ≤ −X ⇒ PAUSE_LONGS` band — that band was ruled out
 2026-06-06 as overfitting). See `01_CURRENT_STATE.md` Session 2026-06-06.
+
+---
+
+## Session 2026-07-04 — IREUL: learned situation-indexed recall (RESEARCH DESIGN, sandbox approved; NOT adopted)
+
+**Origin:** the operator brought a Lucidchart research design ("RL Data Ingestion &
+Feedback Architecture", `/root/RD.pdf`): historical + real-time data → feature
+extraction → a training loop over an experience/pattern store → a real-time pattern
+matcher scoring live observations → a threshold gate forwarding events to MAGI →
+MAGI's outcomes feeding back as labels. Named **IREUL** after the Eleventh Angel —
+the adaptive intelligence that invaded the MAGI's own computers — with the deliberate
+inversion that this one is domesticated and works FOR the council.
+
+**The reframe that makes it concrete (operator's insight):** this is really about the
+JOURNAL. The Journal (`database.get_agent_recall`) is the system's single stateful
+element, and it is static in a precise sense — it indexes memory by *recency*, not by
+*situation*: each seat recalls its own most-recent N graded calls within a lookback
+window, filtered to the current `config_version`. Two live consequences: (1) it is
+situation-blind — after a week of STAND_ASIDE every seat's Journal is ~15 copies of
+the same lesson, while the one precedent relevant to TODAY's decision (e.g. the last
+rally-exit) ages out regardless of relevance; (2) the config_version filter zeroes
+recall on every persona/config change — memory that resets on deploy. IREUL is the
+template for flipping the index: retrieval by similarity to NOW instead of by
+recency. Mapped onto the diagram: Experience Memory = an episode library (world_state
+features + decision + graded outcome, immutable rows); Pattern Matcher + Scoring =
+"which past episodes resemble the current window, and how strongly"; the threshold
+gate = inject-or-stay-silent (a weak analogy is worse than the Journal's honest empty
+sentinel); Outcome Feedback = the already-live graders (72h band-break predicate,
+`alpha_vs_hold`) stamping every episode.
+
+**Why this stays on the right side of the statelessness doctrine:** the property is
+*learned RETRIEVAL over deterministic CONTENT*. What killed Letta-era memory was
+state that rewrites itself (self_model corruption, thread anchoring; VertexAI Memory
+Bank was rejected for the same reason — LLM-driven consolidation is hidden state).
+Here episodes are immutable SQLite rows with ground-truth grades; a learner only
+RANKS them; every cycle can log exactly which episode IDs were injected at what
+scores — auditable, falsifiable, MAGI-02-predicate-able. Seats stay stateless.
+
+**Two corpora — only one has data (this decides the phasing):**
+- *Decision episodes* (blind-review era `debate_records`): ~30 cycles, nearly all
+  STAND_ASIDE in one downtrend regime. Nothing to learn retrieval from yet. Grows
+  with the paper run. (Letta-era rows stay excluded — contaminated, standing rule.)
+- *Market analogues* (`tape/history.db`): 83,689 gap-free hourly bars 2016-12 →
+  now, labelable by the existing reality-anchored forward simulator
+  (`grid/forward_sim.py:simulate` — what a recycling grid at real fill/replacement
+  rules and real fees would have DONE over the next 72h). Tens of thousands of
+  examples, available today, config-independent (market history does not reset when
+  personas change — dodges the Journal wipe). The operator's framing, adopted:
+  corpus 2 is the objective truth and corpus 1 is largely shaped by it anyway.
+  **Phase one therefore learns from market analogues only**; the decision-episode
+  index is a later phase once the live corpus is big enough to say anything.
+
+**What would eventually be injected (design intent, NOT built):** aggregate outcome
+statistics over the matched set — "of the k most-similar historical windows, X
+bled under a grid within 72h, Y harvested" — as a world_state block. Aggregates,
+never single vivid episodes: injected analogies steer LLM judgment hard
+(past-text-dominating-current-data was the original anchoring failure), and counts
+anchor less than narratives. Current-cycle data blocks stay primary in the prompt.
+
+### The phased sandbox (each phase has a pre-committed kill gate; the council path
+### is untouched until the last gate)
+
+- **Phase 1 — labels (deterministic, no ML).** Every hourly bar labeled by
+  `forward_sim.simulate` at the live config (2.5% spacing, 5 levels, 72h window,
+  maker fees both sides): forward `alpha_pct` (grid vs hold, normalized by deployed
+  notional). Binary outcomes at the EXOGENOUS fee floor (2×maker = 0.50%):
+  **hostile** ≡ alpha < −0.50 (grid bleeds vs hold), **favourable** ≡ alpha > +0.50.
+- **Phase 2 — deterministic matcher. The make-or-break test.** Fixed feature vector
+  (trial #1, NO feature search — 9 features, all price-derived, all computable live:
+  roc_6h/roc_24h/roc_72h; vol_sigma_pct, regime_er, drawdown_pct from the existing
+  `signals_1h` warehouse table; drawdown_from_high_7d (168h running peak);
+  %-distance from the 50-day and 200-day EMAs). z-scored Euclidean k-NN, k=25.
+  Leakage guards: purge (no neighbor within 7 days before the query); neighbor
+  mutual separation ≥72h (episode dedup — else "12 of 14 similar windows bled" is
+  one 2018 crash counted 12 times); candidates strictly earlier than the query;
+  z-scoring params from the candidate set only. Queries: non-overlapping 72h steps
+  (label overlap makes adjacent hourly queries non-independent).
+  **Dev/holdout split: the final 365 days (from 2025-07-04) are FROZEN — opened
+  once, ever, by operator decision. All development on 2017-07 → 2025-07.**
+- **Phase 3 — learned matcher (desktop 3060), ONLY if Phase 2 passes.** Must beat
+  the deterministic matcher out-of-sample or the deterministic one ships instead.
+  This is where the diagram's RL/training loop earns its existence or doesn't (and
+  phase-one "RL" is deliberately supervised/metric-learning — this layer detects,
+  it doesn't act sequentially; RL is reserved for a genuinely sequential policy,
+  e.g. learning WHEN to forward given forwarding costs a council cycle).
+- **Phase 4 — shadow mode on the live box (zero council impact; needs operator go
+  + restart).** The matcher logs what it WOULD have injected per cycle (matched-set
+  stats, episode IDs, scores) to its own table; nothing enters world_state. Weeks
+  of shadow records graded by the same 72h machinery. This is the only true
+  out-of-time test — non-stationarity is the one risk no offline statistic fixes.
+- **Phase 5 — operator decision on shadow evidence.** Injection = new world_state
+  block + `FIELDS` entry + persona sync (standard three-surface change; the config
+  fingerprint bump resets every seat's Journal — disclosed cost). Exit path is
+  symmetric: drop the field, sync personas, done.
+
+### Pre-committed Phase-2 PASS criteria (set before the first run; never re-fit)
+
+All four must hold on the dev period:
+1. **Skill:** matcher AUC (predicting *hostile*) minus the naive-baseline AUC > 0
+   with a 95% block-bootstrap CI excluding zero (blocks of 10 consecutive queries
+   ≈ 30 days). Baseline = expanding conditional hostile rate given sign(roc_72h) —
+   i.e. the matcher must beat "downtrend → bleed", which the council already sees
+   in ADX/roc; matching that is redundant evidence, not signal.
+2. **Economics (anchored to the fee floor, not a p-value):** mean realized forward
+   alpha in the top-quartile-predicted-hostile queries must be ≥ 0.50 pp (the maker
+   round-trip floor) WORSE than the dev-period mean — the evidence must be strong
+   enough to change a grid decision's expected value after fees.
+3. **Permutation null (pipeline-level guard):** observed AUC lift > the 95th
+   percentile of ≥200 circular-label-shift nulls (minimum shift 30 days — destroys
+   the feature→label link, preserves autocorrelation; catches leakage bugs too).
+4. **Regime robustness:** top-quartile hostile-rate lift positive in ≥75% of dev
+   years (8 dev years → at least 6).
+
+**Trials ledger (multiple-testing discipline):** every sandbox run appends its full
+config + results to `optimize/ireul/trials.jsonl` — no exceptions, so the final
+claim can be honestly deflated by the number of shots taken. Hyperparameters (k,
+metric) may only be tuned inside training folds (nested), never against the
+evaluation metric, and every variant tried is a ledger row.
+
+**Statistical toolkit adopted** (proportionate; full CPCV/deflated-Sharpe machinery
+deliberately skipped as over-machinery for a single retrieval hypothesis): block
+bootstrap CIs (autocorrelation-honest), purge+embargo, circular-shift permutation
+null, trials ledger, nested selection, single-shot holdout. The irreducible
+residual risk is non-stationarity (2017 XRP ≠ 2026 XRP) — routed to Phase 4 shadow
+mode by design.
+
+**Sandbox home:** `optimize/ireul/` (the designated offline experiment tree);
+reads `tape/history.db` read-only; no live-path imports beyond the pure
+`grid/forward_sim.py`; no vendor spend; heavy compute (Phase 3) on the operator's
+desktop, never the droplet. Sub-threshold scores are logged too — silence must be
+distinguishable from blindness (tape-DQ lesson).
+
+**Status 2026-07-04:** design approved for sandbox by operator; Phases 1–2 built
+AND RUN this session (see `optimize/ireul/`, trial #1 in `trials.jsonl`).
+**RESULT: Phase 2 FAILED the pre-committed gate, 0/4 criteria.** On 902
+non-overlapping dev queries (2017-07 → 2025-07, base hostile rate 20.3%):
+matcher AUC 0.5505 vs baseline 0.5466 (diff +0.004, bootstrap 95% CI
+[−0.051, +0.060] — straddles zero); top-quartile economic shift −0.12 pp vs the
+−0.50 pp floor required; observed lift deep inside the permutation null (95th
+pct +0.065); per-year lift positive in only 3/8 years. Two honest readings:
+(1) z-scored k-NN over these 9 price-derived features carries no 72h grid-alpha
+signal beyond weak trend conditioning — and even the naive "downtrend → bleed"
+baseline is barely above chance (AUC 0.547) at this horizon; (2) the
+permutation null's width (±0.065 at the 95th pct) shows how easily this
+pipeline manufactures apparent lift from autocorrelation alone — a version of
+this experiment run without the null would likely have "found" signal. Per the
+kill-gate rule the project STOPS here pending operator decision; any follow-up
+variant is a new pre-registered ledger trial, and the criteria do not move. The
+Journal situation-blindness observation (above) remains true and unaddressed —
+this result kills one candidate evidence source, not the problem statement.
+NOT adopted; nothing touched the live path; the holdout was never opened.
