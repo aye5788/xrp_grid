@@ -78,6 +78,14 @@ _BALTHASAR_MODEL = MODELS["balthasar"]
 # pre-redesign cycle as if it were a blind-review one.
 _VETO_MODE = "none_blind_review"
 
+# Config-fingerprint marker for the memory the seats read (same pattern as
+# _VETO_MODE): sync_ratio_v1 = ledger outcomes carry the factual 72h
+# cost-vs-alternative line (magi/sync_ratio.py) + the condition-bucketed
+# COUNCIL TRACK RECORD block. Changing what the council sees joins the hash
+# (the constraint_disclosure precedent), so shipping this bumps config_version
+# ONCE — the disclosed one-time memory boundary.
+_MEMORY_SCHEMA = "sync_ratio_v1"
+
 
 def _fp_hash(text: str) -> str:
     """Short, stable content hash of a persona text for the config fingerprint."""
@@ -105,6 +113,7 @@ def current_config_council_half() -> dict:
                    "balthasar": _BALTHASAR_MODEL},
         "casper_model_version_observed": None,  # soft metadata; never in the hash
         "veto_mode": _VETO_MODE,
+        "memory_schema": _MEMORY_SCHEMA,
     }
 
 
@@ -459,10 +468,72 @@ def run_council(world_state: dict, cycle_id: str,
         # config_version-filtered + replay-safe. Best-effort: a failure degrades to no
         # ledger block, never a stand-down.
         try:
-            ledger_block = (get_council_ledger(cfg_version) or {}).get("block")
+            _ledger = get_council_ledger(cfg_version) or {}
+            ledger_block = _ledger.get("block")
+            _ledger_entries = _ledger.get("entries") or []
         except Exception as e:  # noqa: BLE001 - ledger is best-effort context
             log.warning("[council_v2] council ledger read failed: %r", e)
-            ledger_block = None
+            ledger_block, _ledger_entries = None, []
+        # COUNCIL TRACK RECORD — condition-bucketed cumulative economics of the
+        # council's own matured choices (magi/sync_ratio.py), appended to the
+        # same shared memory channel. Best-effort like the ledger: a failure
+        # degrades to no block, never a stand-down.
+        _track = {"block": None, "buckets": [], "n_matured": 0}
+        try:
+            from database import get_conn
+            from magi.sync_ratio import track_record
+            _conn = get_conn()
+            try:
+                _track = track_record(_conn, cfg_version)
+            finally:
+                _conn.close()
+        except Exception as e:  # noqa: BLE001 - track record is best-effort context
+            log.warning("[council_v2] track record read failed: %r", e)
+        if _track.get("block"):
+            ledger_block = (f"{ledger_block}\n\n{_track['block']}" if ledger_block
+                            else _track["block"])
+        # NOTEWORTHY PRECEDENTS (magi/entry_plug.py) — reliability-weighted
+        # episodes from OUTSIDE the recency window. Additive third section on
+        # the same channel; renders nothing until history has unambiguous,
+        # repeatedly-confirmed lessons. Best-effort like the others.
+        _prec = {"block": None, "items": []}
+        try:
+            from database import get_conn as _gc2
+            from magi.entry_plug import noteworthy_precedents
+            _conn2 = _gc2()
+            try:
+                _prec = noteworthy_precedents(
+                    _conn2, cfg_version,
+                    exclude_dates=[e.get("date") for e in _ledger_entries])
+            finally:
+                _conn2.close()
+        except Exception as e:  # noqa: BLE001 - precedents are best-effort context
+            log.warning("[council_v2] precedents read failed: %r", e)
+        if _prec.get("block"):
+            ledger_block = (f"{ledger_block}\n\n{_prec['block']}" if ledger_block
+                            else _prec["block"])
+        # Flight-recorder: persist WHAT the shared memory block contained this
+        # cycle (memory_injections). This is how "the learning loop is alive"
+        # stays FALSIFIABLE from a DB snapshot (MAGI-02) instead of trusted —
+        # the 2026-07-04 lesson. Best-effort: never blocks the convene.
+        try:
+            from database import record_memory_injection
+            record_memory_injection(
+                cycle_id, cfg_version,
+                ledger_entries=len(_ledger_entries),
+                graded_entries=sum(1 for e in _ledger_entries if e.get("graded")),
+                track_buckets=len(_track.get("buckets") or []),
+                block_text=ledger_block or "",
+                items_json=json.dumps({
+                    "ledger": [{"date": e.get("date"),
+                                "decision": e.get("decision"),
+                                "graded": bool(e.get("graded"))}
+                               for e in _ledger_entries],
+                    "track_buckets": _track.get("buckets") or [],
+                    "precedents": _prec.get("items") or [],
+                }))
+        except Exception as e:  # noqa: BLE001 - flight recorder is best-effort
+            log.warning("[council_v2] memory-injection record failed: %r", e)
 
         try:
             return _convene(world_state, cycle_id, ledger_block, trace_id, council_half)

@@ -582,6 +582,27 @@ def init_db():
     c.execute('''CREATE INDEX IF NOT EXISTS idx_ws_health_timestamp
         ON ws_health(timestamp)''')
 
+    # memory_injections: one row per council cycle recording WHAT the shared
+    # memory block (council ledger + track record, magi/sync_ratio.py)
+    # contained when the seats were convened. Written best-effort by
+    # council_v2.run_council. Exists so (a) MAGI-02 can falsify "the learning
+    # loop is alive" from the nightly snapshot by SQL alone (2026-07-04
+    # lesson: the per-seat Journal died silently at the council redesign
+    # because nothing recorded what the seats were actually shown), and
+    # (b) the weighted-injector layer has per-cycle item identifiers for
+    # credit assignment.
+    c.execute('''CREATE TABLE IF NOT EXISTS memory_injections (
+        cycle_id TEXT PRIMARY KEY,
+        timestamp TEXT NOT NULL,
+        config_version TEXT,
+        ledger_entries INTEGER,
+        graded_entries INTEGER,
+        track_buckets INTEGER,
+        block_chars INTEGER,
+        block_sha TEXT,
+        items_json TEXT
+    )''')
+
     conn.commit()
     conn.close()
     print("Database initialised.")
@@ -2474,7 +2495,15 @@ def _render_recall_block(entries):
 
 
 def get_agent_recall(agent_id, config_version, as_of=None):
-    """Per-agent recall — the deterministic "Journal". A pure SQLite read (NO model
+    """SUPERSEDED / NO LIVE CALLER (2026-07-04). This arbiter-era per-seat
+    Journal was silently orphaned by the 2026-06-25/26 blind-review redesign
+    (the rebuilt council_v2 never calls it) and its role is now filled by the
+    sync-ratio ledger outcomes + track record (magi/sync_ratio.py) and the
+    ENTRY PLUG precedents (magi/entry_plug.py). Kept for reference pending
+    deletion approval — see 02_NEXT_BUILD_TASKS.md 2026-07-04 item 5. Original
+    docstring follows.
+
+    Per-agent recall — the deterministic "Journal". A pure SQLite read (NO model
     call, NO vendor cost): the same inputs produce byte-identical output. Each seat
     recalls ONLY its own past calls, scored by ITS OWN per-role metric — there is no
     cross-agent history. The live consumer is council_v2.run_council, which injects
@@ -2644,8 +2673,9 @@ def get_council_ledger(config_version, as_of=None):
                 lower = None
             if lower is not None:
                 rows = conn.execute(
-                    "SELECT timestamp, council_json, fills_24h, pnl_24h, "
-                    "       outcome_24h_backfilled "
+                    "SELECT timestamp, council_json, fills_24h, "
+                    "       outcome_24h_backfilled, stance, final_grid_action, "
+                    "       world_state "
                     "FROM debate_records "
                     "WHERE config_version = ? "
                     "  AND timestamp >= ? AND timestamp <= ? "
@@ -2656,6 +2686,13 @@ def get_council_ledger(config_version, as_of=None):
                     (cfg_version, lower, as_of_s,
                      _RECALL_EXCLUDE_ID, _RECALL_EXCLUDE_CYCLE_ID),
                 ).fetchall()
+                # Sync-ratio outcome facts (magi/sync_ratio.py): the factual
+                # 72h cost-vs-alternative line replaces the equity-scoped
+                # pnl_24h figure (banned as a verdict — inventory-beta-
+                # dominated; operator directive 2026-07-02/04). Bars loaded
+                # once, lazily; ANY grading failure degrades to "outcome
+                # pending" — never a crashed convene.
+                _sr_bars = _sr_keys = None
                 for r in rows:                      # most-recent first
                     try:
                         cj = json.loads(r['council_json']) if r['council_json'] else None
@@ -2663,18 +2700,30 @@ def get_council_ledger(config_version, as_of=None):
                         cj = None
                     if not isinstance(cj, dict):     # (b) council-only: skip unparseable
                         continue
-                    outcome = None
-                    if r['outcome_24h_backfilled']:
-                        fills = r['fills_24h']
-                        pnl = r['pnl_24h']
-                        pnl_s = f"${pnl:+.2f}" if isinstance(pnl, (int, float)) else "n/a"
-                        outcome = f"24h: {fills if fills is not None else 'n/a'} fills, {pnl_s}"
+                    line = None
+                    try:
+                        from magi.sync_ratio import outcome_line, load_1h
+                        if _sr_bars is None:
+                            _sr_bars = load_1h(conn)
+                            _sr_keys = [b[0] for b in _sr_bars]
+                        line = outcome_line(
+                            {'timestamp': r['timestamp'], 'stance': r['stance'],
+                             'final_grid_action': r['final_grid_action'],
+                             'world_state': r['world_state']},
+                            _sr_bars, _sr_keys)
+                    except Exception:
+                        line = None                  # degrade, never raise
+                    fills = r['fills_24h'] if r['outcome_24h_backfilled'] else None
+                    parts = ([f"24h fills: {fills}"] if fills is not None else [])
+                    parts.append(line or "72h outcome pending")
+                    outcome = "; ".join(parts)
                     entries.append({
                         'date': (r['timestamp'] or '')[:10],
                         'decision': cj.get('decision'),
                         'vote_multiset': cj.get('vote_multiset', ''),
                         'consensus': cj.get('consensus'),
                         'outcome': outcome,
+                        'graded': bool(line),   # matured sync-ratio line present
                     })
                     if len(entries) >= RECALL_MAX_ITEMS:    # (c) bound count
                         break
@@ -2689,6 +2738,33 @@ def get_council_ledger(config_version, as_of=None):
         'entries': entries,
         'block': _render_ledger_block(entries),
     }
+
+
+def record_memory_injection(cycle_id, config_version, ledger_entries,
+                            graded_entries, track_buckets, block_text,
+                            items_json):
+    """Flight-recorder row for the seats' shared memory block (one per council
+    cycle). Best-effort by contract: callers wrap it — a logging failure must
+    never block a convene. INSERT OR REPLACE keyed on cycle_id so a retried
+    cycle overwrites rather than duplicates. block_sha is a short content hash
+    so byte-level liveness ("the block really changed / really rendered") is
+    checkable from a snapshot without storing the full text."""
+    import hashlib
+    conn = get_conn()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO memory_injections "
+            "(cycle_id, timestamp, config_version, ledger_entries, "
+            " graded_entries, track_buckets, block_chars, block_sha, items_json) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (cycle_id, datetime.utcnow().isoformat(), config_version,
+             int(ledger_entries), int(graded_entries), int(track_buckets),
+             len(block_text or ""),
+             hashlib.sha256((block_text or "").encode("utf-8")).hexdigest()[:16],
+             items_json))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def get_capitulation_rate(agent_id, days=7):

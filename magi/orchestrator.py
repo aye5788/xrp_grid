@@ -2005,6 +2005,11 @@ def _compose_config_fingerprint(cons: dict) -> tuple[str, dict]:
         "served_models": half.get("served_models") or {},
         "casper_model_version_observed": half.get("casper_model_version_observed"),
         "veto_mode": half.get("veto_mode"),
+        # What memory the seats read (sync-ratio outcomes + track record) —
+        # changes what the council sees, so it joins the hash (same pattern as
+        # veto_mode / constraint_disclosure). Absent on pre-schema halves ->
+        # hashes as null, exactly the old version. See council_v2._MEMORY_SCHEMA.
+        "memory_schema": half.get("memory_schema"),
         # Floor half — folded in here (in scope; council_v2 can't see it).
         "hard_rules": dict(HARD_RULES),
         "spacing_fee": {
