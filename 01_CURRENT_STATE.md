@@ -1,6 +1,92 @@
 # MAGI — Current State
 
-> **2026-07-04 (LATEST — verification pass, no code changes). The 2026-07-02
+> **2026-07-04 EVENING (LATEST — supersedes the morning block below): THE
+> LEARNING LOOP WAS FOUND DEAD AND WAS REBUILT + DEPLOYED THE SAME DAY.**
+> **The discovery (operator-forced audit):** the per-seat Journal
+> (`database.get_agent_recall` — "each seat reads its own graded track record
+> every cycle," the system's designed learning mechanism, built 06-09) was
+> silently ORPHANED by the 06-25/26 blind-review council redesign: the rebuilt
+> `run_council` never calls it — no live caller since. The redesign's
+> replacement memory (`get_council_ledger`, a shared 6-item/21-day recency
+> list) fed the seats raw equity `pnl_24h` as its outcome line — the exact
+> inventory-beta-dominated figure the operator banned as a verdict on 07-02 —
+> and NONE of the honest graded outcomes (72h band-break grades, alpha
+> decomposition) reached anything the council reads. Net: the blind-review
+> council ran its entire paper run as a memoryless committee; every graded
+> cycle taught nothing to anyone. **Why four audits missed it:** each was
+> scoped to the money path (a dead learning loop throws no error, places no
+> wrong order); each inherited the CLAUDE.md claim "Journal is BUILT and wired"
+> — true when written, false since the redesign — and none re-verified the
+> claim's liveness (one grep, ~30 seconds). The 07-02 grader-unification
+> session fixed the graders without asking who CONSUMES the grades. This
+> session repeated the mistake in the morning (described the Journal from its
+> code without checking callers) until the operator demanded a real audit.
+> **The repair (all deployed this evening, one restart):**
+> - **SYNC RATIO** (`magi/sync_ratio.py`, new) — v2 COST-BASED grading, the
+>   operator's mandate: each decision graded by its dollar edge vs the rejected
+>   alternative (run-the-grid vs don't), computed from the same reality-anchored
+>   forward simulator every existing grader uses; asymmetry emerges from real
+>   price paths, no hand weights, no fitted thresholds. Acceptance table over
+>   the paper run (operator-reviewed): 7 matured STAND_ASIDEs cost 3–7¢ each in
+>   the June chop, and the 07-01 decision SAVED $0.28 (a deployed grid would
+>   have underperformed holding by 1.65% in the +10% rally) — net +$0.03: the
+>   council's caution was free insurance. Hit-rate grading scored the same rows
+>   0/7 "wrong." Binary band-break grades remain as OPERATOR-facing
+>   observability; cost-based facts are the LEARNING signal.
+> - **Ledger outcome line fixed** (`database.get_council_ledger`): raw pnl_24h
+>   REMOVED; each entry now carries the factual 72h line ("price +10.1%;
+>   standing aside saved $0.28 vs deploying") or "72h outcome pending". FACTS,
+>   never pass/fail verdicts — the seats weigh the asymmetry themselves (a
+>   machine verdict of "wrong" would inject the first-draft grading's frame).
+> - **COUNCIL TRACK RECORD** (in `sync_ratio.track_record`) — cumulative
+>   condition-bucketed economics of the council's own matured choices (tape
+>   verdict color × exposure-cap state × choice), appended to the same shared
+>   authorship-free memory channel. Long memory by situation, not recency.
+> - **ENTRY PLUG** (`magi/entry_plug.py`, new) — the weighted injector:
+>   every matured episode gets a reliability weight (time-decayed rate its
+>   lesson kept matching later windows' best actions; fee-floor dead zone
+>   excluded; 30d half-life) and the top 3 reliable episodes from OUTSIDE the
+>   recency window surface as NOTEWORTHY PRECEDENTS. Weights are RECOMPUTED
+>   deterministically from history each call — pure function, no mutable
+>   state, nothing to corrupt. 5/5 synthetic mechanics checks pass; live
+>   corpus correctly surfaces 0 (most June windows sit inside the fee-floor
+>   dead zone — no unambiguous lesson yet). Pre-committed constants + a FROZEN
+>   superiority test (at ≥30 matured episodes: weighted selection must beat
+>   recency paired on the same cycles, else precedents stand down) recorded in
+>   `optimize/ireul/trials.jsonl`.
+> - **`memory_injections` flight recorder** (new table, `init_db`) — one row
+>   per council cycle: what the seats' memory block contained (counts, size,
+>   content hash, per-item JSON). Written best-effort by `council_v2`; the
+>   difference between trusting the loop is alive and PROVING it from a
+>   snapshot.
+> - **MAGI-02:** new predicate **P7_learning_loop_alive** (every real cycle
+>   must have a non-empty memory_injections row; status=proposed → REPORT-ONLY
+>   until the operator promotes it; set effective_from to the deploy time).
+>   **P1 refined:** its 07-03 FAIL was a formalization false-positive — the
+>   scheduled 00:00 and W2 11:00 cycles SWEPT standing-breach W1 events as
+>   consumed, which the old SQL counted as "wakes"; now a pair only counts when
+>   both consuming cycles carry trigger='gate_wake:W1'. 7/7 predicates pass.
+> - **Config fingerprint** gained `memory_schema=sync_ratio_v1` (council half +
+>   orchestrator hash — the "changes what the council sees → joins the hash"
+>   invariant), so deploy bumps config_version ONCE; council memory restarts at
+>   the new boundary and fills as cycles mature (~72h). Disclosed and accepted.
+> **Principles audit (operator-ordered, pre-build):** no static rule creep (the
+> grader measures, never gates an action; selection is evidence curation, a
+> power recency already exercised); no council bypass (tally untouched, grades
+> never weight votes); statelessness preserved (all state = SQLite rows +
+> deterministic recomputation); anonymity preserved (shared blocks
+> authorship-free). Three of the session's OWN earlier proposals were killed by
+> this audit (situation-match stratum — rests on the similarity signal IREUL
+> measured as absent; recall-epoch loosening — violates the anchoring lesson;
+> crux injection — reopens self-text anchoring) — see `04` IREUL entry for the
+> killed research design and its 0/4 pre-committed gate result.
+> **Deploy record:** restart ordered by operator 2026-07-04; startup council
+> wake expected (config fingerprint changed) and disclosed. Watch items: first
+> post-deploy memory_injections rows; first matured sync-ratio lines ~72h
+> after deploy; promote P7 after verification; the stance-EXIT question and
+> rally-window accuracy review (now runnable on the v2 cost basis) carry over.**
+
+> **2026-07-04 MORNING (verification pass, no code changes). The 2026-07-02
 > shipments are all COMMITTED + PUSHED on `council-redesign` (`dab17a1` PnL
 > decomposition + work-off ladder; `429b6aa` ntfy fix + tape restore + grader
 > unification + Ranking guard; `4da7b53` episode-aware startup gate; CI /

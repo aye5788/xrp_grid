@@ -61,7 +61,33 @@ disagree, the handoff docs win for state; this file wins for how to work.
 > +$3.26 is inventory beta; harvest $0, zero round trips); the 07-04 daily cycle
 > split 3 ways (Casper MAINTAIN / Melchior HALT / Balthasar STAND_ASIDE) — the
 > stance-EXIT question and the rally-window accuracy review are the live watch
-> items. Open: MAGI-02 first miner run (Ollama not on the desktop yet), chaos-drill
+> items. LATER SAME DAY (2026-07-04 evening — DEPLOYED): the operator-driven audit
+> of a Journal-redesign proposal exposed that **the LEARNING LOOP had been DEAD
+> since the council redesign** — the per-seat Journal (`get_agent_recall`) lost its
+> only caller at the 06-25/26 rebuild and the replacement shared ledger fed the
+> seats raw equity `pnl_24h` (the banned metric) with none of the graded outcomes;
+> four audits missed it (money-path scoped; doc claim trusted, never re-verified).
+> REBUILT + DEPLOYED same day: (a) **SYNC RATIO** (`magi/sync_ratio.py`) — v2
+> cost-based grading, each decision's dollar edge vs the rejected alternative via
+> the shared forward sim (acceptance table over the paper run: 7 matured
+> stand-asides netted +$0.03 vs deploying; the 07-01 rally decision alone SAVED
+> $0.28 — the caution was free insurance, where hit-rate grading scored the same
+> rows 0/7); (b) the ledger outcome line now carries those FACTS (no pass/fail
+> verdicts — seats weigh the asymmetry; binary grades remain operator-facing
+> observability only); (c) the cumulative condition-bucketed **COUNCIL TRACK
+> RECORD** block; (d) **ENTRY PLUG** (`magi/entry_plug.py`) — reliability-weighted
+> NOTEWORTHY PRECEDENTS from outside the recency window, weights recomputed
+> deterministically from history (no mutable state; 5/5 synthetic mechanics
+> checks; frozen superiority test pre-registered for ≥30 matured episodes);
+> (e) `memory_injections` flight-recorder table — every cycle records what the
+> seats were shown; (f) MAGI-02 **P7_learning_loop_alive** (proposed — operator
+> promotion pending) + **P1 refined** (its 07-03 FAIL was a formalization
+> false-positive: sweep-consumption by scheduled/W2 cycles counted as "wakes";
+> now only genuine `gate_wake:W1` cycles count). Config fingerprint gained
+> `memory_schema=sync_ratio_v1` → one-time version bump at deploy; council
+> memory restarts at the new boundary and fills as cycles mature (~72h). Open:
+> promote P7 + set its effective_from (operator), watch the first post-deploy
+> cycles, MAGI-02 first miner run (Ollama not on the desktop yet), chaos-drill
 > layer 4, dead-arbiter-module deletion + engine hygiene items (see `02`).**
 > **As of 2026-06-28 (supersedes the 2026-06-26 block below): `magi.service`
 > is RUNNING on paper. A real audit (4 parallel finders + own verification) found &
@@ -171,9 +197,23 @@ disagree, the handoff docs win for state; this file wins for how to work.
 > (1) Agents are **stateless**, NOT vendor-stateful — the "vendor owns memory/
 > self_model/thread history" line is REVERSED. Letta's stateful agent layer caused
 > thread-anchoring, the freshness-retry tax, and self_model corruption; statelessness
-> is the deliberate fix. The controlled, SQLite-sourced, prompt-injected **Journal
-> recall layer** is BUILT and wired into `council_v2` (committed `cebccb5`,
-> 2026-06-09 — deterministic, config-version-filtered, NOT vendor memory).
+> is the deliberate fix. ~~The controlled, SQLite-sourced, prompt-injected Journal
+> recall layer is BUILT and wired into council_v2 (committed cebccb5, 2026-06-09)~~
+> **FALSE AS OF THE REDESIGN — CORRECTED 2026-07-04:** that per-seat Journal was
+> silently ORPHANED when the blind-review redesign (06-25/26) rebuilt `run_council`
+> — `get_agent_recall` has had NO live caller since; the redesign's replacement
+> memory (a shared 6-item recency ledger) carried raw equity `pnl_24h` (the
+> banned-as-verdict metric) and NONE of the graded outcomes. The learning loop was
+> effectively DEAD for the whole blind-review paper run and four audits missed it
+> (each scoped to the money path; each trusted this very doc line). REPAIRED and
+> EXTENDED 2026-07-04 (deployed): the live memory is the council ledger with
+> factual 72h cost-vs-alternative outcomes (`magi/sync_ratio.py` — the v2
+> cost-based grading), the condition-bucketed COUNCIL TRACK RECORD, and the
+> reliability-weighted NOTEWORTHY PRECEDENTS (`magi/entry_plug.py`); every cycle's
+> injected memory is flight-recorded in `memory_injections` and watched by MAGI-02
+> predicate P7 so this class of silent death is falsifiable off-box, nightly.
+> Deterministic, config-version-filtered, recomputed-from-history (no mutable
+> state), NOT vendor memory — the original principles, now actually running.
 > (2) Cadence is **gate-driven**, not a 4h clock — IMPLEMENTED 2026-06-09 (BU-2),
 > REDESIGNED 2026-06-11 (Fix 4, after the wake-yield audit found 0/16
 > gate-woken cycles produced a council-originated change):

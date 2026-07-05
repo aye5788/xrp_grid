@@ -1,5 +1,33 @@
 # Next Build Tasks
 
+> **TOP OF QUEUE 2026-07-04 (EVENING) — LEARNING LOOP REBUILT + DEPLOYED; these
+> are the open follow-ups (full account: `01_CURRENT_STATE.md` 2026-07-04
+> EVENING block; the discovery was that the per-seat Journal had been dead
+> since the 06-25/26 redesign and the ledger fed the seats the banned equity
+> metric):**
+> 1. **Promote MAGI-02 P7_learning_loop_alive** (operator action): after the
+>    first post-deploy cycles verify clean, flip its status proposed→approved in
+>    `magi02/predicates.json` and set `effective_from` to the actual deploy
+>    timestamp. Until then it runs report-only by design.
+> 2. **Watch the first post-deploy cycles:** every council cycle must write a
+>    `memory_injections` row (non-empty block); the ledger shows honest empty
+>    sentinels at the new config boundary, then "72h outcome pending" lines,
+>    then the first matured sync-ratio facts ~72h after deploy. Any cycle
+>    without a flight-recorder row = the exact failure P7 exists to catch.
+> 3. **Frozen ENTRY PLUG superiority test** (pre-registered in
+>    `optimize/ireul/trials.jsonl`, criteria immutable): at ≥30 matured
+>    episodes under one config_version, weighted precedent selection must beat
+>    recency selection paired on the same cycles, else precedents stand down to
+>    the deterministic floor. Do NOT run early, do NOT tune constants.
+> 4. **Rally-window accuracy review** (carried from the morning): now runnable
+>    on the v2 cost basis — the 72h-matured stance record vs both graders
+>    (hit-rate 0/7 vs cost-based net +$0.03 tells the asymmetry story).
+> 5. Carried unchanged: MAGI-02 first miner run (Ollama not on the desktop
+>    yet); chaos-drill layer 4; dead-arbiter-module deletion (NOTE:
+>    `get_agent_recall` + its per-seat graders join the dead-code list —
+>    superseded by sync_ratio/entry_plug, kept for reference with a docstring
+>    note pending deletion approval); engine hygiene items (below).**
+
 > **PLAN 2026-07-02 — PROACTIVE BUG-CATCHING ARCHITECTURE (operator-approved;
 > build sequence locked; "no spend, stop on surprises" directive).**
 > WHY: every recent bug (replenishment council-bypass, ntfy never-delivering,
