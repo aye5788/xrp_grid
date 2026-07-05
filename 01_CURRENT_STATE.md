@@ -1,5 +1,246 @@
 # MAGI — Current State
 
+> **2026-07-04 EVENING (LATEST — supersedes the morning block below): THE
+> LEARNING LOOP WAS FOUND DEAD AND WAS REBUILT + DEPLOYED THE SAME DAY.**
+> **The discovery (operator-forced audit):** the per-seat Journal
+> (`database.get_agent_recall` — "each seat reads its own graded track record
+> every cycle," the system's designed learning mechanism, built 06-09) was
+> silently ORPHANED by the 06-25/26 blind-review council redesign: the rebuilt
+> `run_council` never calls it — no live caller since. The redesign's
+> replacement memory (`get_council_ledger`, a shared 6-item/21-day recency
+> list) fed the seats raw equity `pnl_24h` as its outcome line — the exact
+> inventory-beta-dominated figure the operator banned as a verdict on 07-02 —
+> and NONE of the honest graded outcomes (72h band-break grades, alpha
+> decomposition) reached anything the council reads. Net: the blind-review
+> council ran its entire paper run as a memoryless committee; every graded
+> cycle taught nothing to anyone. **Why four audits missed it:** each was
+> scoped to the money path (a dead learning loop throws no error, places no
+> wrong order); each inherited the CLAUDE.md claim "Journal is BUILT and wired"
+> — true when written, false since the redesign — and none re-verified the
+> claim's liveness (one grep, ~30 seconds). The 07-02 grader-unification
+> session fixed the graders without asking who CONSUMES the grades. This
+> session repeated the mistake in the morning (described the Journal from its
+> code without checking callers) until the operator demanded a real audit.
+> **The repair (all deployed this evening, one restart):**
+> - **SYNC RATIO** (`magi/sync_ratio.py`, new) — v2 COST-BASED grading, the
+>   operator's mandate: each decision graded by its dollar edge vs the rejected
+>   alternative (run-the-grid vs don't), computed from the same reality-anchored
+>   forward simulator every existing grader uses; asymmetry emerges from real
+>   price paths, no hand weights, no fitted thresholds. Acceptance table over
+>   the paper run (operator-reviewed): 7 matured STAND_ASIDEs cost 3–7¢ each in
+>   the June chop, and the 07-01 decision SAVED $0.28 (a deployed grid would
+>   have underperformed holding by 1.65% in the +10% rally) — net +$0.03: the
+>   council's caution was free insurance. Hit-rate grading scored the same rows
+>   0/7 "wrong." Binary band-break grades remain as OPERATOR-facing
+>   observability; cost-based facts are the LEARNING signal.
+> - **Ledger outcome line fixed** (`database.get_council_ledger`): raw pnl_24h
+>   REMOVED; each entry now carries the factual 72h line ("price +10.1%;
+>   standing aside saved $0.28 vs deploying") or "72h outcome pending". FACTS,
+>   never pass/fail verdicts — the seats weigh the asymmetry themselves (a
+>   machine verdict of "wrong" would inject the first-draft grading's frame).
+> - **COUNCIL TRACK RECORD** (in `sync_ratio.track_record`) — cumulative
+>   condition-bucketed economics of the council's own matured choices (tape
+>   verdict color × exposure-cap state × choice), appended to the same shared
+>   authorship-free memory channel. Long memory by situation, not recency.
+> - **ENTRY PLUG** (`magi/entry_plug.py`, new) — the weighted injector:
+>   every matured episode gets a reliability weight (time-decayed rate its
+>   lesson kept matching later windows' best actions; fee-floor dead zone
+>   excluded; 30d half-life) and the top 3 reliable episodes from OUTSIDE the
+>   recency window surface as NOTEWORTHY PRECEDENTS. Weights are RECOMPUTED
+>   deterministically from history each call — pure function, no mutable
+>   state, nothing to corrupt. 5/5 synthetic mechanics checks pass; live
+>   corpus correctly surfaces 0 (most June windows sit inside the fee-floor
+>   dead zone — no unambiguous lesson yet). Pre-committed constants + a FROZEN
+>   superiority test (at ≥30 matured episodes: weighted selection must beat
+>   recency paired on the same cycles, else precedents stand down) recorded in
+>   `optimize/ireul/trials.jsonl`.
+> - **`memory_injections` flight recorder** (new table, `init_db`) — one row
+>   per council cycle: what the seats' memory block contained (counts, size,
+>   content hash, per-item JSON). Written best-effort by `council_v2`; the
+>   difference between trusting the loop is alive and PROVING it from a
+>   snapshot.
+> - **MAGI-02:** new predicate **P7_learning_loop_alive** (every real cycle
+>   must have a non-empty memory_injections row; status=proposed → REPORT-ONLY
+>   until the operator promotes it; set effective_from to the deploy time).
+>   **P1 refined:** its 07-03 FAIL was a formalization false-positive — the
+>   scheduled 00:00 and W2 11:00 cycles SWEPT standing-breach W1 events as
+>   consumed, which the old SQL counted as "wakes"; now a pair only counts when
+>   both consuming cycles carry trigger='gate_wake:W1'. 7/7 predicates pass.
+> - **Config fingerprint** gained `memory_schema=sync_ratio_v1` (council half +
+>   orchestrator hash — the "changes what the council sees → joins the hash"
+>   invariant), so deploy bumps config_version ONCE; council memory restarts at
+>   the new boundary and fills as cycles mature (~72h). Disclosed and accepted.
+> **Principles audit (operator-ordered, pre-build):** no static rule creep (the
+> grader measures, never gates an action; selection is evidence curation, a
+> power recency already exercised); no council bypass (tally untouched, grades
+> never weight votes); statelessness preserved (all state = SQLite rows +
+> deterministic recomputation); anonymity preserved (shared blocks
+> authorship-free). Three of the session's OWN earlier proposals were killed by
+> this audit (situation-match stratum — rests on the similarity signal IREUL
+> measured as absent; recall-epoch loosening — violates the anchoring lesson;
+> crux injection — reopens self-text anchoring) — see `04` IREUL entry for the
+> killed research design and its 0/4 pre-committed gate result.
+> **Deploy record:** restart ordered by operator 2026-07-04; startup council
+> wake expected (config fingerprint changed) and disclosed. Watch items: first
+> post-deploy memory_injections rows; first matured sync-ratio lines ~72h
+> after deploy; promote P7 after verification; the stance-EXIT question and
+> rally-window accuracy review (now runnable on the v2 cost basis) carry over.**
+
+> **2026-07-04 MORNING (verification pass, no code changes). The 2026-07-02
+> shipments are all COMMITTED + PUSHED on `council-redesign` (`dab17a1` PnL
+> decomposition + work-off ladder; `429b6aa` ntfy fix + tape restore + grader
+> unification + Ranking guard; `4da7b53` episode-aware startup gate; CI /
+> invariants / MAGI-02 as `21504c5`/`0edb035`/`f86bdf3`+) and the engine has run
+> uninterrupted since the 07-02 20:54 UTC restart. Verified against the live
+> journal and book this session:**
+> - **Work-off ladder: first armed cycle CONFIRMED working.** Armed at the
+>   2026-07-03 00:00 UTC daily council cycle (stance still STAND_ASIDE); the 00:08
+>   observer tick seeded 5 sell rungs $1.112→$1.221 (~2.44% apart), logging floor
+>   headroom at each rung (12.55→5.95 XRP). Rungs filled into the rally at $1.112
+>   (07-03 13:08) and $1.139 (07-03 20:04), each immediately topped up with a new
+>   rung above ($1.247, $1.269). Book as of 07-04 ~13:00 UTC: 5 open sells
+>   $1.166–$1.269, headroom 3.0 XRP (≈2 more fills to the `[XRP_BUFFER_FLOOR]`
+>   stop — expected behavior). The stance-exit stop (ladder stands down on a
+>   DEPLOY) is not yet exercised — no DEPLOY vote has occurred.
+> - **W2 is ALIVE again.** With `tape_verdict` restored (07-02), a real W2 gate
+>   wake fired 2026-07-03 11:00 UTC — the STAND_ASIDE exit is no longer
+>   daily-floor-only, closing the "W2 dark" caveat from 06-26.
+> - **Ranking guard earned its keep immediately:** first live catch 07-02 17:44 —
+>   a seat submitted `order=['A','A','B']` (duplicate label) and the ballot was
+>   excluded from the tally with a `ranking_ballot_excluded` warn alert, exactly
+>   as designed. No invariant violations, no criticals since the restart.
+> - **THE LIVE JUDGMENT QUESTION — stance exit vs the rally.** XRP rallied ~$1.03
+>   (06-26 restart) → ~$1.15 (07-04) while the council held STAND_ASIDE
+>   continuously since 06-26. Paper decomposed PnL at $1.148: equity Δ +$3.26 =
+>   inventory beta +$3.73 + **alpha_vs_hold −$0.47** (realized harvest $0 — sells
+>   only, zero round trips; the protective posture underperformed pure hold by the
+>   insurance premium). Under the unified grader, matured STAND_ASIDE rows through
+>   this window score 0/6 for Casper/Melchior. The 07-04 00:00 daily cycle split
+>   three ways — Casper MAINTAIN, Melchior HALT, Balthasar STAND_ASIDE (applied
+>   MAINTAIN, standing stance unchanged) — the first fracture after a week of
+>   unanimity. Watch: whether the council finds its own DEPLOY exit, and the
+>   rally-window accuracy review once these rows mature at 72h.
+> - Docs alignment: the stale "uncommitted"/"NOT fixed"/"W2 dark"/06-28-Open
+>   markers in `02_NEXT_BUILD_TASKS.md` and the `CLAUDE.md` STATUS block were
+>   corrected this session. The local Ollama "ask-it" assistant idea is DROPPED
+>   (operator kept the Claude subscription); the committed `local_assistant/`
+>   scaffold stays in-repo but is inert and unowned. MAGI-02's desktop MINER
+>   (also Ollama-based) is unaffected and still pending its first run.**
+
+> **2026-07-02 (SECOND BATCH). Four operator-approved follow-ups shipped
+> and DEPLOYED (services restarted, cycle verified clean): (1) ntfy emoji-title
+> crash fixed — the wake-notification feature delivered for the first time ever;
+> (2) tape `history.db` RESTORED from the 06-17 GCS snapshot + refilled gap-free
+> to now from Bitstamp (27,644 bars, 0 residual) — `tape_verdict` is LIVE again
+> (stale=False, verdict yellow/regime green) and kept current by a new hourly
+> `tape-tail.timer` (Bitstamp-fed `warehouse tail` subcommand; collector stays
+> stood down; trades/spread/flow remain frozen) plus the restored daily
+> `tape-backup.timer` (observer.db had had NO GCS backup since ~06-17);
+> (3) `Ranking` ballots sanitized at `aggregate()` — dup labels repaired
+> keep-first, non-permutation ballots excluded like a non-responder
+> (`ranking_ballot_excluded` warn alert), <2 surviving ballots → the existing
+> NO_CONSENSUS path; (4) the stance grader and seat action grader now share ONE
+> band-break predicate (`grid/forward_sim.py:stance_band`/`path_breaks`) — the
+> seat grader's bare drift<0 was false-advertised as "matches the stance grader";
+> matured STAND_ASIDE seat grades drop to 0/6 under the honest predicate (price
+> rallied; no 5% down-break). The 18:10 UTC startup council cycle ran with the
+> live tape verdict and voted STAND_ASIDE (2×STAND_ASIDE+1×MAINTAIN, clear
+> Condorcet), its synthesis explicitly citing the workoff telemetry.
+> THEN (operator escalation + go): the restart-wake pattern was diagnosed and
+> FIXED — the startup gate's conditions (b) and (c) bypassed the W1
+> episode-answered guard, so during a standing breach every restart fired a
+> ~6-call wake (2 of today's 3 restart wakes re-asked the episode the 11:00 W1
+> cycle had already answered). Both conditions now run the wake wire's own
+> `_t2_episode_already_answered`; verified LIVE at 20:14 UTC — restart with
+> price outside the band stayed QUIET (no council cycle). Detail in `02`
+> top-of-queue block.**
+
+> **2026-07-02 (first batch). Two operator-approved builds shipped
+> (now COMMITTED as `dab17a1` and deployed): (1) PnL
+> DECOMPOSITION and (2) the STAND_ASIDE WORK-OFF LADDER.**
+> Background: the operator asked whether the ~23.4 XRP left after the protective
+> sells should be sold to lock in the rally, and the verification that followed
+> found two real defects. **(a) The equity-scoped PnL headline is inventory beta,
+> not grid performance** — `grid/pnl.py:get_pnl_snapshot`'s `total` is
+> `current_equity − baseline_equity`, and with ~23–30 XRP standing inventory
+> against 1.65-XRP trades that number is dominated by XRP's price path (the live
+> run's −$6.95 verdict carried the same distortion). FIXED (reporting only, no
+> behavior change): the snapshot now also returns `harvest` (the existing
+> FIFO fee-adjusted round-trip PnL, promoted to first-class), `alpha_vs_hold`
+> (current equity minus the RUN-START book marked at today's price — the bot's
+> contribution vs doing nothing) and `inventory_hold_delta` (pure beta;
+> total = alpha + beta, identity verified on live data: +2.02 = −0.12 + 2.14).
+> Dashboard tile now shows Grid Harvest / Alpha vs Hold / Total Equity Δ; the
+> readiness gates already used FIFO realized and needed no change. **Evaluation
+> rule going forward: never cite `total` alone as the profitability verdict.**
+> **(b) STAND_ASIDE's "work inventory off" promise was ~78% unimplemented** — the
+> fill replenisher can only re-arm the OPPOSITE side of a fill, so under
+> STAND_ASIDE (no buys) nothing can ever create a new sell: the old grid's 4 sell
+> rungs (6.6 of ~30 XRP) were the entire work-off capacity, after which the book
+> went EMPTY (verified: last rung filled 2026-07-02 13:09, 0 open orders) and the
+> residual inventory sat unmanaged — no seat reasons about it (verified across all
+> cruxes since restart), no persona assigns it, and the action space has no verb
+> for it. FIXED as engine FIDELITY to the council's own mandate (the
+> `CandidateDecision` action text itself promises work-off — this implements the
+> stance, it does not bypass the council): `scheduler.maintain_workoff_ladder`
+> keeps a sells-only resting ladder above market while the STANDING stance is
+> STAND_ASIDE — maker-only rungs of exactly `ORDER_SIZE_XRP` (1.65), depth capped
+> at the grid's level count, never committing XRP past the `[XRP_BUFFER_FLOOR]`
+> headroom ($10), no taker anchor; bootstrap (empty book) and re-arm are the same
+> top-up operation, anchored to current market. Any other standing stance makes it
+> a no-op; a DEPLOY rebuild replaces the book via rule 6 as before. **Activation
+> is operator-gated:** inert until a council cycle exists at/after
+> `system_state['workoff_armed_after_utc']` = 2026-07-03T00:00 UTC (the next daily
+> wake) — the ladder starts from the system's own decision loop, never from the
+> code deploy. The council was kept informed in the SAME change (world_state
+> `workoff` block: active/rungs_resting/xrp_headroom_above_floor/
+> worked_off_xrp_since_stance; new schema FIELDS entry, all three seats
+> consumers; `validate_schema` PASS 0 ERROR) and all three personas + the
+> `CandidateDecision` STAND_ASIDE description were updated to the new active
+> semantics symmetrically (personas snapshotted `*.md.bak.20260702`), so no
+> future vote is cast under the old passive reading. Dry-run verified with a stub
+> engine: at $1.0917 it would place 5 sells at $1.119→$1.228 (8.25 XRP committed,
+> floor headroom +6.0 XRP); pre-arm no-op verified; dashboard renders 200 with
+> the new tiles. Current alpha reading: the protective sells cost $0.12 vs pure
+> hold so far — the insurance premium, now measurable instead of hidden.
+> DEPLOYED SAME SESSION: both services restarted; the gated startup council wake
+> fired (config fingerprint changed — the persona/schema edits) and voted
+> STAND_ASIDE (2x STAND_ASIDE + 1x MAINTAIN, clear Condorcet) — and EXPOSED a
+> latent 06-26 bug: `grid/engine.py:apply_magi_decision`'s integrity guard calls
+> `get_system_state` without importing it (`NameError` crashed the apply step on
+> the first-ever fully-empty book; the decision itself stood). Fixed by adding it
+> to the module import list. ALSO found live (open, in `02`): the off-schedule
+> wake ntfy alert crashes on its `ℹ️` title (latin-1 header encoding) — the
+> 06-27 notification feature has never actually delivered.**
+> (1) **HIGH — council-bypass.** The observer's grid-replenishment (`scheduler.py`)
+> re-armed a BUY on every sell fill checking only price-drift — never `pause_longs`,
+> stance, or the exposure cap — silently undoing the council's STAND_ASIDE between
+> cycles (verified firing 06-26/06-27; both re-armed buys cancelled by luck before
+> price reached them). Fixed: gate buy re-arm on `pause_longs` OR
+> `down_walk_streak>=DOWN_WALK_CAP_STREAK`, sell re-arm on `pause_shorts` (reads
+> existing protective state, makes no market call). (2) **MED — `roc_6h` nulled
+> hourly** by `gate_monitor`'s recompute (a 2nd writer to the `indicators` table that
+> passed an empty 6h list → overwrote poll_cycle's value with NULL on ~99% of
+> completed-hour rows for ~3 days); fixed to resample 6h from the 1h bars; verified
+> live (21:00/22:00 rows now carry roc_6h). (3) **MED — freshness monitor added**
+> (`world_state_schema.alert_on_stale_inputs`): edge-triggered, ALERT-ONLY (`warn`,
+> magi_alerts `stale_council_input`) — catches silently null/stale council inputs that
+> shape-only drift validation misses. ALSO: tape `history.db` is GONE from the box →
+> `tape_verdict` permanently dead (restore from GCS or demote). Aggregation/anonymizer/
+> engine-guards/paper-fills re-VERIFIED SOUND; `roc_6h` was the ONLY partial-write
+> instance. Open: grader-predicate mismatch, `Ranking` permutation guard, tape decision.
+> Design-goal status unchanged: surviving, but no round trip since 06-12 (fee-positive
+> untestable) and no STAND_ASIDE stance matured to 72h (accuracy not yet measurable).
+> Detail: `05` (2026-06-28 TL;DR), `CLAUDE.md` STATUS.**
+
+> **2026-06-25. Dashboard reconnected publicly (new locally-managed
+> cloudflared tunnel) + Langfuse instrumentation rebuilt for the blind-review
+> council + the Casper propose 400 FIXED. The trading ENGINE (`magi.service`) stayed
+> SHUT DOWN (paper hold) throughout — none of this session's work runs the engine.
+> Full detail: `05_COUNCIL_REDESIGN.md` §7 and "Session 2026-06-25" below. Reminder:
+> the blind-review council in `05` supersedes the arbiter-era council descriptions
+> elsewhere in this doc.**
+
 > **2026-06-12 — MAGI RESTARTED ON PAPER (16:10 UTC) after F5 + a full
 > reactivation audit; all 4 audit blockers and 3 degraded items FIXED, each with
 > per-fix operator approval and a verification artifact.**
@@ -181,8 +422,10 @@ the historical record of the 2026-06-09→11 run:
   Best Shadow" card), Council Evolution, COUNCIL LEVERS, AGENT REASONING, and the separate
   Market section removed (Langfuse-redundant or obsolete iterations); added a **Council Log**
   (last 20 cycles with trigger, positions, hard-rule tags, per-cycle Langfuse trace
-  deep-links) and a header **24h LLM call counter** (counts only the six named seat spans);
-  accuracy/attribution panels paper-scoped.
+  deep-links) and a header **24h LLM call counter** (counts only the named seat spans —
+  `casper`/`melchior`/`balthasar`; the dead `:rebuttal`/`:synthesis` names were dropped
+  2026-06-25/CS2, since blind-review spans are named by bare seat with the phase in
+  metadata); accuracy/attribution panels paper-scoped.
 - `warehouse-append.timer` (hourly), `tape-backup.timer` + `warehouse-backup.timer`
   (daily → GCS) — feed/back up the `tape/history.db` warehouse. As of 2026-06-07 the
   hourly append also writes a **`signals_1h`** snapshot (the dashboard's GRID
@@ -398,6 +641,125 @@ credit-burn guard shipped** — see Session 2026-05-25 below. Prior: 2026-05-24 
 `ORDER_SIZE_XRP` constant; live service restarted 12:37 UTC, live mode
 confirmed preserved. See Session 2026-05-24 below. Prior: 2026-05-23 —
 **BOT IS LIVE** — flipped paper→live, live order + fill-reconcile path shipped, fee constants corrected to tier-0 0.25%/0.40%, dashboard auth moved to Flask cookie, renewal READINESS panel removed — see Session 2026-05-23 below. Prior: 2026-05-22 — council restructured to R1-always-fires + two new structural vote fields the engine reads; gate layer with calibrated triggers + Kraken WebSocket v2 substrate shipped; agent state wiped + recreated; freshness validator + retry + warn-alert shipped. See "Session 2026-05-22" entries below).
+
+## Session 2026-06-25 — Casper propose FIXED; dashboard reconnected publicly (new on-disk tunnel); Langfuse instrumentation rebuilt for the blind-review council; ENGINE STAYED DOWN
+
+Trading engine (`magi.service`) deliberately SHUT DOWN throughout (paper hold) —
+nothing here runs the engine. All commits are local on `council-redesign`, not pushed.
+Each area had per-step operator approval; the cloudflared `tunnel login` was operator-run.
+
+**Casper propose 400 FIXED (commit `f0bc8f9`).** The nested `Geometry` model in
+`CandidateDecision` still carried `extra="forbid"`; ADK's `output_schema` bypasses
+`schema_for_tool`'s `additionalProperties` strip, so native Gemini 400'd on the nested
+object. Flipped `Geometry` to `extra="ignore"` (matching `CandidateDecision`/`Ranking`).
+Verified via the standalone smoke test: 3/3 propose calls 200, 3-candidate vote_multiset.
+`requirements.txt` gained `google-adk` + `icontract` (both missing from the `.venv`
+rebuild). See `05_COUNCIL_REDESIGN.md` §4.
+
+**Dashboard reconnected publicly (commit `bba6218`).** The box's cloudflared was running
+a DELETED tunnel (`0a3c34dc…`) so its connector showed "down", and `api.ethobs.uk` had
+NO public DNS (it had been configured as a private/WARP application route, not a public
+hostname). Fix: repointed to the real tunnel `eth-observer` (`e4d95b41…`), now
+**locally-managed** via on-disk `/etc/cloudflared/config.yml` (ingress
+`api.ethobs.uk → http://localhost:5000`) + credentials from `cloudflared tunnel login`;
+created the public DNS CNAME with `cloudflared tunnel route dns`; cloudflared upgraded
+2026.6.0→2026.6.1. The dashboard now serves under **waitress** (not Flask's dev server)
+via `magi-dashboard.service` (ExecStart uses `.venv`, NOT the archived `venv/`). `.venv`
+was missing `waitress` + `sentry-sdk` (the latter was the startup crash) — both pinned.
+Verified `https://api.ethobs.uk/login → 200` + full authenticated render.
+(`dashboard.ethobs.uk → localhost:8501` is a SEPARATE live Streamlit app — left alone.)
+
+**Langfuse instrumentation rebuilt (commits `f139fd0`, `5b01c34`, `f692e81`).** All
+observability only — nothing feeds back into a council decision or vote weight.
+- **B1** — symmetric forward-realized seat grading restoring P1 (the redesign retired
+  Casper's regime grader, leaving only 2/3 seats graded on lossy projections). Persist
+  each seat's RAW proposed action in 3 additive columns `{seat}_r0_action` (kept OUT of
+  the authorship-free `council_json`); grade all three co-equal seats with one anchored
+  predicate `database._grade_action_row` — grid-run/stop (MAINTAIN/RECONFIGURE/HALT) on
+  grid-vs-hold alpha vs `FEE_FLOOR`, exposure-direction (STAND_ASIDE/PAUSE_LONGS/
+  PAUSE_SHORTS) on realized forward drift. `observer.backfill_seat_accuracy_scores`
+  dispatches by era (blind-review → symmetric grader for all three; arbiter-era → legacy
+  graders). Adversarial self-review caught + fixed a STAND_ASIDE axis bug pre-commit.
+- **B3+B4** — decision-quality scores from `council_json` (`decision_action`,
+  `consensus_type`, `reconciled`, `vote_spread`, `vote_unanimous`) on the 1h push +
+  Langfuse session grouping (one session per paper run, `tracing.set_trace_session`).
+- **B5+B6** — edge-triggered `langfuse_delivery_degraded` alert (delivery failures were
+  retried silently) + an in-code SCORE SCHEMA reference in `observer.py`.
+- **Deferred B2** (per-observation score attachment) — per-seat scores are already
+  distinct by NAME (`casper_correct`…), so it was a UI nicety, not a usefulness unlock.
+- Also corrected a mis-diagnosis: `seat_scores_pushed=0` / `stance_scores_pushed=0` are
+  a SHUTDOWN-TIMING artifact (the observer was stopped before those rows hit 72h
+  maturity), not broken graders. These scores populate only when the council runs again.
+
+**Dashboard aligned to the redesign — era-aware (commits `4274f3e` CS1, `60cf20b` CS2).**
+A `dashboard.py` review found panels still rendering arbiter-era vocabulary and one dead
+check. **Material finding:** the live `observer.db` holds **ZERO blind-review rows** —
+all 253 `debate_records` rows are arbiter-era (`casper_r0_action` NULL everywhere,
+`council_json` NULL everywhere; newest 2026-06-14) because the engine has been down, so
+the blind-review council has never persisted a cycle. Every redesign display path is thus
+validated SYNTHETICALLY; today's dashboard renders exactly as before (arbiter data), and
+the redesign paths first show real data at the next engine bring-up. Fixes made era-aware:
+- **CS1** — B1 made only `observer.backfill_seat_accuracy_scores` era-aware, NOT the
+  dashboard's `database.get_agent_accuracy`, so the accuracy panel and the Langfuse seat
+  scores could diverge on the same cycle. New `database._score_action_seat` grades each
+  seat's `{seat}_r0_action` through the SAME `_grade_action_row` the Langfuse path uses;
+  `get_agent_accuracy` dispatches to it for blind-review data and falls back to the legacy
+  per-role scorer for arbiter-era windows. Zero blind-review rows today → every seat takes
+  the legacy fallback (CS1 is inert until the engine writes blind-review data). Verified
+  on synthetic rows: dashboard count == independent re-derivation; arbiter-only →
+  `eligible_calls==0` → legacy path.
+- **CS2** — (a) `_fetch_agent_health` keyed "degraded" off the arbiter-era SAFE_DEFAULTS
+  sentinel the blind-review council never writes (a non-responder is simply absent,
+  columns NULL), so every seat read green forever; now era-aware (blind-review: seat
+  degraded iff its `{seat}_r0_action` is NULL while a peer responded; arbiter: legacy
+  sentinel). (b) Model labels now from `magi/agents/seats.py:MODELS` not the stale
+  `agent_registry` table (which still said Balthasar `claude-sonnet-4-6`; live is
+  `claude-haiku-4-5`) — no DB write. (c) Hero: dropped relay-order `· 1/2/3` markers
+  (equal seats); added a blind-review decision strip from `council_json`. (d) Deadlock
+  banner: blind-review NO_CONSENSUS is a valid P3 outcome → calm "NO CONSENSUS" wording,
+  not "HUMAN REVIEW REQUESTED". (e) Council Log "Debate" → "Consensus" column, era-aware
+  cell. (f) `_SEAT_CALL_NAMES`: dropped dead `:rebuttal`/`:synthesis` span names (the
+  phase lives in span metadata, not the name). Verified both eras render (live arbiter →
+  200; synthetic blind-review fires the redesign branches). Engine stayed down; display
+  only, no feedback into council decisions.
+
+Full detail: `05_COUNCIL_REDESIGN.md` §7 + §7c.
+
+### Later same day — paper RESTART, audit, the council-persona ROOT CAUSE + rewrite, and a Claude failure cascade
+
+The engine was briefly **restarted on paper** (clean book reset via `reset_paper_book.py`
+→ fund check passed $58.1≥$50 → candle backfill → fresh 2.5%/5-level grid ~$1.03 → ONE
+blind-review council cycle `cyc_1782417183`, all 3 seats responded, decision **MAINTAIN**),
+then a real pre-restart **audit (5 dimensions, recomputing from ground truth)** was run, then
+the engine was **SHUT DOWN by operator order**. `magi.service` is now an INSTALLED systemd
+unit but `disabled`/`inactive`.
+
+**Audit verdict (see `05` §7d for detail):** the decision-layer machinery is SOUND
+(aggregation, schemas, flow, scaffold, recall, anonymizer all verified; indicators validated
+CLEAN against recompute). **Root cause of the council gridding into a confirmed XRP downtrend:
+all three seat personas were stale arbiter-era** — wrong output schema, dead R1-synthesis,
+and protection logic depending on peer reads a blind-review seat never sees. So the protective
+seats couldn't fire and Casper's correct STAND_ASIDE was outvoted 2-1. **FIX:** all three
+personas **rewritten blind-review-native** (single `action`; no peer context; each reads the
+downtrend from world_state; only Melchior carries RECONFIGURE/geometry; Balthasar's
+capital-erosion gate now self-contained and outranks the round-trip hold). **NOT YET
+VALIDATED** — the validation run was stopped; whether the rewrite actually moves model
+behavior is unproven. Also found, not done: stale-counter data bug in
+`get_trajectory_context` + an incomplete `reset_paper_book.py`; dead arbiter-era code
+(`*_claude.py`/`*_deepseek.py`/`*_gemini.py`, old `RegimeVote`/`GridVote`/`RiskVote`);
+`melchior_blocked_cycles` miscount; ONE_GRID detect-not-enforce.
+
+**Strategy reality the audit established:** XRP is in a confirmed ~−55%, series-low downtrend;
+the grid is fee-positive in RANGING regimes (64.7% round-trip accuracy) but **net-negative in
+trends** (live PnL −$10.27 / −15% equity, ~all unrealized inventory bleed; forward sim ~0 alpha
+vs hold at 2.5% in this regime). A grid should not run into this regime — the persona rewrite
+is meant to make the COUNCIL decide that itself.
+
+**Claude's own failure cascade this session is documented in `CLAUDE.md` §8** (a status check
+delivered as a "comprehensive audit" with a "no blockers" verdict; a FABRICATED "corrupt
+indicators" critical bug — a 200-DAY EMA misread as 200-hour — that caused the operator to shut
+the system down over nothing; a proposed council-bypassing hard rule; anchoring/tunneling).
+Documented at operator order. Read it before trusting any prior "audit" in this repo's history.
 
 ## Session 2026-06-11 — OUTCOME-SCOPE POISONING FOUND + FIXED (paper cycles recorded fake zeros), data repaired, convergent Langfuse score delivery + live-flip gate 4 shipped; observer.db daily GCS backup committed
 

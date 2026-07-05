@@ -285,7 +285,9 @@ def init_db():
 
         config_version TEXT,
         config_snapshot TEXT,
-        override_justification TEXT
+        override_justification TEXT,
+
+        council_json TEXT
     )''')
     c.execute('''CREATE INDEX IF NOT EXISTS idx_debate_records_cycle_id
         ON debate_records (cycle_id)''')
@@ -362,6 +364,23 @@ def init_db():
         # unconfirmed rows every pass. NULL-trace rows are stamped 1 with
         # nothing to deliver.
         "ALTER TABLE debate_records ADD COLUMN stance_scores_pushed INTEGER DEFAULT 0",
+        # council_json: the blind-review council's OWN memory (redesign 2026-06-24).
+        # One JSON object per cycle: {decision, vote_multiset (authorship-free, e.g.
+        # "2x MAINTAIN, 1x RECONFIGURE"), consensus ("clear"|"reconciled"|"none"),
+        # reconciled (bool)}. The matured outcome (fills/pnl) is filled later by the
+        # existing backfill columns; get_council_ledger joins the two for recall.
+        # NULL on pre-redesign rows (the arbiter relay wrote no council_json) — those
+        # rows are not migrated. Written by orchestrator._build_debate_record.
+        "ALTER TABLE debate_records ADD COLUMN council_json TEXT",
+        # Per-seat RAW proposed action (blind-review redesign) — the lossless record
+        # the symmetric forward-realized seat grader reads (the *_r0_position columns
+        # hold lossy verdict/risk projections). NOT injected into the council (kept
+        # out of council_json, which is the authorship-free ledger), so grading
+        # authorship can't leak back into the blind review. NULL on a non-responding
+        # seat and on every arbiter-era row. Written by _build_debate_record.
+        "ALTER TABLE debate_records ADD COLUMN casper_r0_action TEXT",
+        "ALTER TABLE debate_records ADD COLUMN melchior_r0_action TEXT",
+        "ALTER TABLE debate_records ADD COLUMN balthasar_r0_action TEXT",
     ):
         try:
             c.execute(_alter)
@@ -562,6 +581,27 @@ def init_db():
     )''')
     c.execute('''CREATE INDEX IF NOT EXISTS idx_ws_health_timestamp
         ON ws_health(timestamp)''')
+
+    # memory_injections: one row per council cycle recording WHAT the shared
+    # memory block (council ledger + track record, magi/sync_ratio.py)
+    # contained when the seats were convened. Written best-effort by
+    # council_v2.run_council. Exists so (a) MAGI-02 can falsify "the learning
+    # loop is alive" from the nightly snapshot by SQL alone (2026-07-04
+    # lesson: the per-seat Journal died silently at the council redesign
+    # because nothing recorded what the seats were actually shown), and
+    # (b) the weighted-injector layer has per-cycle item identifiers for
+    # credit assignment.
+    c.execute('''CREATE TABLE IF NOT EXISTS memory_injections (
+        cycle_id TEXT PRIMARY KEY,
+        timestamp TEXT NOT NULL,
+        config_version TEXT,
+        ledger_entries INTEGER,
+        graded_entries INTEGER,
+        track_buckets INTEGER,
+        block_chars INTEGER,
+        block_sha TEXT,
+        items_json TEXT
+    )''')
 
     conn.commit()
     conn.close()
@@ -841,12 +881,23 @@ def get_trajectory_context():
     from datetime import timedelta
     conn = get_conn()
 
-    # Last 5 MAGI decisions for trajectory
-    decisions = conn.execute(
-        "SELECT timestamp, melchior_action, balthasar_action, "
-        "casper_action, consensus_risk_action, consensus_grid_action "
-        "FROM magi_decisions ORDER BY timestamp DESC LIMIT 5"
-    ).fetchall()
+    # Last 5 MAGI decisions for trajectory — scoped to the CURRENT paper run so a
+    # restart cannot feed pre-reset (different-book) cycles into trajectory context.
+    # paper_run_started_utc is blank in live mode -> no filter (full history), correct
+    # there. Mirrors the pnl scope-cutoff discipline.
+    _run_cutoff = get_system_state('paper_run_started_utc', default=None)
+    _dec_sql = ("SELECT timestamp, melchior_action, balthasar_action, "
+                "casper_action, consensus_risk_action, consensus_grid_action "
+                "FROM magi_decisions ")
+    if _run_cutoff:
+        decisions = conn.execute(
+            _dec_sql + "WHERE timestamp >= ? ORDER BY timestamp DESC LIMIT 5",
+            (_run_cutoff,)
+        ).fetchall()
+    else:
+        decisions = conn.execute(
+            _dec_sql + "ORDER BY timestamp DESC LIMIT 5"
+        ).fetchall()
 
     # Last 5 inventory snapshots for skew trajectory
     inv_rows = conn.execute(
@@ -928,11 +979,12 @@ def get_trajectory_context():
         result['regime_consecutive'] = count
 
         # How many consecutive cycles has Melchior's recommendation been blocked
-        # (grid action was MAINTAIN but Melchior didn't say MAINTAIN)
+        # (grid action was MAINTAIN but Melchior's verdict was not a maintain —
+        # 'THESIS_HOLDS' in the blind-review era, 'MAINTAIN' in the arbiter era)
         blocked = 0
         for d in decisions:
             if (d['consensus_grid_action'] == 'MAINTAIN' and
-                    d['melchior_action'] != 'MAINTAIN'):
+                    d['melchior_action'] not in ('MAINTAIN', 'THESIS_HOLDS')):
                 blocked += 1
             else:
                 break
@@ -1786,7 +1838,7 @@ _BALTHASAR_SURVIVAL_HALT_TAGS = {
 
 # The Stage-3 integration-test cycle artifact (id 270 / cyc_1780949300): a real
 # convene written while wiring the orchestrator, NOT a live trading decision. It is
-# hard-excluded from get_agent_recall by BOTH keys (id is DB-local; cycle_id is the
+# hard-excluded from ledger/recall reads by BOTH keys (id is DB-local; cycle_id is the
 # stable identity). It is also off the current config_version, so the version filter
 # would drop it anyway — the explicit exclusion is belt-and-suspenders.
 _RECALL_EXCLUDE_ID = 270
@@ -1811,7 +1863,7 @@ def _decision_bar_index(ts_keys, cycle_ts):
 #
 # Grading for each seat lives in exactly ONE place: these three helpers. Both the
 # aggregate accuracy scorers (_score_casper/_melchior/_balthasar -> get_agent_accuracy)
-# AND the per-seat recall Journal (get_agent_recall) call them, so the two readers can
+# call them (the per-seat recall Journal that also shared them was deleted 2026-07-05), so readers can
 # never drift. Each helper takes ONE debate_records Row (already SELECTed with the
 # columns its seat needs, with the seat's r0 position aliased to 'position') plus the
 # loaded 1h bars / bisect keys / bar count, and returns:
@@ -2032,6 +2084,128 @@ def _grade_balthasar_row(r, bars, ts_keys, n):
     }, None
 
 
+def _grade_action_row(r, bars, ts_keys, n):
+    """Blind-review SYMMETRIC seat grader — one anchored predicate for ALL THREE
+    co-equal seats (governing principle P1), grading each seat's RAW proposed action
+    (r['action'] from {seat}_r0_action) against the shared 72h forward sim. This is
+    NOT a per-role special-case ladder (the old per-seat regime/verdict/risk graders);
+    it collapses them onto TWO axes, each matched to what the action actually controls:
+
+      grid-run/stop — graded on GRID ECONOMICS (grid-vs-hold alpha):
+        MAINTAIN / RECONFIGURE  correct iff the forward grid harvested above costs
+                                -> sim alpha_pct >  FEE_FLOOR
+        HALT                    correct iff running it would have bled vs hold
+                                -> sim alpha_pct < -FEE_FLOOR
+      exposure-direction — graded on a BAND-DEPTH PATH BREAK (not grid alpha; a
+        de-risk through a rally must score wrong, which the alpha axis would miss;
+        and not bare drift sign — a -0.01% wiggle does not vindicate parking the
+        book). Band + break definitions are the SHARED grid.forward_sim helpers
+        (stance_band / path_breaks), the same predicate backfill_stance_grades
+        uses, so the two graders cannot diverge again (fixed 2026-07-02; the old
+        seat predicate here was bare drift<0 while the stance grader required a
+        band break — the prior "Matches the stance grader" claim was false):
+        STAND_ASIDE / PAUSE_LONGS  correct iff a down-break happened (some forward
+                                   close < decision*(1-band))
+        PAUSE_SHORTS               correct iff an up-run happened (some forward
+                                   close > decision*(1+band))
+        band from the row's own world_state grid geometry (fallback 0.05).
+
+    Anchored ONLY to FEE_FLOOR (exogenous: 2*MAKER_FEE, the round-trip break-even) and
+    the forward price direction — no thresholds fit to data — and it reuses the exact
+    forward_sim truth-standard every other grader already uses. OBSERVABILITY ONLY:
+    the grade is mirrored to Langfuse and never feeds back into a council decision or
+    vote weight (the tally stays flat). Ungradeable iff the 72h window is not yet
+    fully covered by candles, or no action was authored (non-responder / arbiter-era
+    row -> NULL, neither right nor wrong)."""
+    from grid.forward_sim import simulate, FEE_FLOOR, WINDOW_H
+    action = r.get('action')
+    if not action:
+        return None, 'no_action'
+    i = _decision_bar_index(ts_keys, r['timestamp'])
+    if i is None or i + WINDOW_H >= n:
+        return None, 'not_matured_72h'
+    d = simulate(bars, i)
+    a, drift = d['alpha_pct'], d['drift_pct']
+    if action in ('MAINTAIN', 'RECONFIGURE'):
+        correct = a > FEE_FLOOR
+        note = (f"deployed ({action}); forward grid alpha {a:+.2f}% vs fee floor "
+                f"{FEE_FLOOR:.2f}% over {WINDOW_H}h")
+    elif action == 'HALT':
+        # grid-STOP decision: correct iff running the grid would have bled vs hold.
+        correct = a < -FEE_FLOOR
+        note = (f"halted; forward grid alpha {a:+.2f}% vs -{FEE_FLOOR:.2f}% "
+                f"bleed floor over {WINDOW_H}h")
+    elif action in ('STAND_ASIDE', 'PAUSE_LONGS', 'PAUSE_SHORTS'):
+        # withhold/shed exposure: graded on a band-depth PATH BREAK via the
+        # SHARED forward_sim helpers — the same predicate the stance grader
+        # uses (see docstring; keeps the two graders from diverging again).
+        from grid.forward_sim import stance_band, path_breaks
+        import json as _json
+        spacing = lv = None
+        try:
+            _gs = (_json.loads(r.get('world_state') or '{}')
+                   .get('grid_state') or {})
+            spacing, lv = _gs.get('spacing_pct'), _gs.get('levels')
+        except (TypeError, ValueError):
+            pass
+        band = stance_band(spacing, lv)
+        decision_price = bars[i][3]
+        closes = [b[3] for b in bars[i + 1: i + 1 + WINDOW_H]]
+        down_break, up_run = path_breaks(closes, decision_price, band)
+        if action == 'PAUSE_SHORTS':
+            correct = up_run
+            note = (f"paused shorts; up_run={up_run} "
+                    f"(band {band*100:.1f}%, drift {drift:+.2f}%) over {WINDOW_H}h")
+        else:
+            correct = down_break
+            verb = 'stood aside' if action == 'STAND_ASIDE' else 'paused longs'
+            note = (f"{verb} ({action}); down_break={down_break} "
+                    f"(band {band*100:.1f}%, drift {drift:+.2f}%) over {WINDOW_H}h")
+    else:
+        return None, 'unknown_action'
+    return {
+        'bucket': 'action', 'correct': bool(correct), 'basis': 'sim',
+        'estimated': False, 'label': action, 'raw_outcome': note,
+    }, None
+
+
+def _score_action_seat(conn, seat, bars, ts_keys, cutoff):
+    """Blind-review seat accuracy — UNIFORM across all three co-equal seats (P1):
+    grade each seat's RAW action ({seat}_r0_action) via _grade_action_row over the 72h
+    forward sim. Same back-compat shape as _score_casper, deliberately WITHOUT the
+    arbiter-era role breakdowns (Melchior by_verdict / Balthasar reality-counterfactual)
+    — those don't apply to a single co-equal action. Rows with no action
+    ({seat}_r0_action NULL: arbiter-era or a non-responder) are not selected, so
+    eligible_calls==0 means "no blind-review data — use the legacy scorer". Uses the
+    SAME _grade_action_row the observer/Langfuse seat scores use, so the dashboard
+    accuracy panel and the Langfuse scores cannot diverge. `seat` is a fixed member of
+    _VALID_AGENT_IDS (never user input), so the column interpolation is safe."""
+    n = len(bars)
+    col = f"{seat}_r0_action"
+    rows = conn.execute(
+        f"SELECT {col} AS action, timestamp, world_state FROM debate_records "
+        f"WHERE timestamp >= ? AND {col} IS NOT NULL",
+        (cutoff,)
+    ).fetchall()
+    scored = correct = not_matured = 0
+    for r in rows:
+        grade, _reason = _grade_action_row(dict(r), bars, ts_keys, n)
+        if grade is None:
+            not_matured += 1
+            continue
+        scored += 1
+        if grade['correct']:
+            correct += 1
+    acc = round(correct / scored * 100.0, 2) if scored else None
+    return {
+        'eligible_calls': len(rows),
+        'role_basis': 'action_realized_72h',
+        'scored': scored, 'correct': correct, 'accuracy_pct': acc,
+        'excluded': not_matured,
+        'excluded_reasons': {'not_matured_72h': not_matured},
+    }
+
+
 def _score_casper(conn, bars, ts_keys, cutoff):
     """Casper — regime-realized, PnL-independent, 72h horizon. A call is correct
     iff casper_r0_position == the forward-realized regime label (forward_sim:
@@ -2040,7 +2214,7 @@ def _score_casper(conn, bars, ts_keys, cutoff):
     ambiguous: correct iff the realized label is also UNCERTAIN (no abstention
     exclusion). A row whose 72h forward window is not yet fully covered by candles
     is NOT scored (excluded as not-matured), never counted wrong. Grading delegates
-    to _grade_casper_row (the single source of truth shared with get_agent_recall)."""
+    to _grade_casper_row (the single source of truth for this seat's grade)."""
     n = len(bars)
     rows = conn.execute(
         '''SELECT casper_r0_position AS position, timestamp
@@ -2079,8 +2253,8 @@ def _score_melchior(conn, bars, ts_keys, cutoff):
                                      config on expected daily PnL AND pnl_6h>=0.
     Rows whose position is not one of the three verdicts (e.g. Letta-era
     MAINTAIN/RECENTRE action vocabulary) are excluded as non-verdict. Grading
-    delegates to _grade_melchior_row (the single source of truth shared with
-    get_agent_recall)."""
+    delegates to _grade_melchior_row (the single source of truth for this
+    seat's grade)."""
     n = len(bars)
     rows = conn.execute(
         '''SELECT melchior_r0_position AS position, timestamp,
@@ -2133,7 +2307,7 @@ def _score_balthasar(conn, bars, ts_keys, cutoff):
 
     Applied-vs-overridden is recovered from balthasar_r0_position + final_risk_action
     + geometry_veto + the hard_rule_overrides tags. Grading delegates to
-    _grade_balthasar_row (the single source of truth shared with get_agent_recall)."""
+    _grade_balthasar_row (the single source of truth for this seat's grade)."""
     n = len(bars)
     rows = conn.execute(
         '''SELECT balthasar_r0_position AS position, timestamp,
@@ -2217,12 +2391,20 @@ def get_agent_accuracy(agent_id, days=7):
     try:
         bars = load_1h(conn)
         ts_keys = [b[0][:19] for b in bars]     # normalised ascending bisect keys
-        if agent_id == 'casper':
-            role = _score_casper(conn, bars, ts_keys, cutoff)
-        elif agent_id == 'melchior':
-            role = _score_melchior(conn, bars, ts_keys, cutoff)
-        else:  # balthasar
-            role = _score_balthasar(conn, bars, ts_keys, cutoff)
+        # Era dispatch: if the seat has any blind-review rows ({seat}_r0_action) in the
+        # window, score them UNIFORMLY via the action grader — the SAME predicate the
+        # observer/Langfuse seat scores use, so the two surfaces can't diverge. Only
+        # when there is NO blind-review data do we fall back to the legacy per-role
+        # scorer (arbiter-era history). is_action gates the role-specific output below.
+        role = _score_action_seat(conn, agent_id, bars, ts_keys, cutoff)
+        is_action = role['eligible_calls'] > 0
+        if not is_action:
+            if agent_id == 'casper':
+                role = _score_casper(conn, bars, ts_keys, cutoff)
+            elif agent_id == 'melchior':
+                role = _score_melchior(conn, bars, ts_keys, cutoff)
+            else:  # balthasar
+                role = _score_balthasar(conn, bars, ts_keys, cutoff)
     finally:
         conn.close()
 
@@ -2235,7 +2417,7 @@ def get_agent_accuracy(agent_id, days=7):
         'excluded': role['excluded'],
         'excluded_reasons': role['excluded_reasons'],
     }
-    if agent_id == 'balthasar':
+    if agent_id == 'balthasar' and not is_action:
         out['reality_graded'] = role['reality_graded']
         out['counterfactual_graded'] = role['counterfactual_graded']
         # Back-compat scalars: REALITY basis ONLY (never blended w/ counterfactual).
@@ -2248,119 +2430,74 @@ def get_agent_accuracy(agent_id, days=7):
             "counterfactual_graded and are deliberately NOT summed into them."
         )
     else:
+        # Uniform path: every blind-review seat (and legacy Casper/Melchior). The
+        # arbiter-era role extras (Melchior by_verdict, Balthasar reality/counterfactual
+        # split) apply ONLY to legacy rows, never to the co-equal action grade.
         out['scored'] = role['scored']
         out['positive_outcomes'] = role['correct']
         out['accuracy_pct'] = role['accuracy_pct']
-        if agent_id == 'melchior':
+        if agent_id == 'melchior' and not is_action:
             out['by_verdict'] = role['by_verdict']
     return out
 
 
-# --- per-agent recall: the "Journal" (deterministic, prompt-injected) ---
-
-# SELECT column lists per seat — exactly the columns that seat's grade helper reads,
-# with its r0 position aliased to 'position'. id + cycle_id + config_version are
-# common (filtering / exclusion); timestamp drives ordering and the date header.
-_RECALL_COLS = {
-    'casper': "casper_r0_position AS position, timestamp",
-    'melchior': ("melchior_r0_position AS position, timestamp, "
-                 "fills_6h, pnl_6h, unrealized_pnl_6h, world_state"),
-    'balthasar': ("balthasar_r0_position AS position, timestamp, "
-                  "fills_6h, pnl_6h, unrealized_pnl_6h, geometry_veto, "
-                  "final_grid_action, final_risk_action, hard_rule_overrides"),
-}
-_RECALL_POS_COL = {
-    'casper': 'casper_r0_position',
-    'melchior': 'melchior_r0_position',
-    'balthasar': 'balthasar_r0_position',
-}
-_RECALL_GRADER = {
-    'casper': _grade_casper_row,
-    'melchior': _grade_melchior_row,
-    'balthasar': _grade_balthasar_row,
-}
-_RECALL_HEADER = "=== YOUR RECALL — your own past calls, scored by outcome (private) ==="
-_RECALL_EMPTY_SENTINEL = _RECALL_HEADER + "\n(no validated history yet)"
+# --- per-agent recall: the "Journal" — DELETED 2026-07-05 ---
+# The arbiter-era get_agent_recall (+ its _RECALL_* tables and render helpers)
+# was silently orphaned by the 2026-06-25/26 blind-review redesign; its role
+# is filled by the sync-ratio ledger outcomes (magi/sync_ratio.py), the
+# council track record, and the ENTRY PLUG precedents (magi/entry_plug.py).
+# The per-row grade helpers (_grade_*_row) LIVE ON — get_agent_accuracy and
+# observer's seat grading still call them. RECALL_MAX_ITEMS /
+# RECALL_LOOKBACK_DAYS and _RECALL_EXCLUDE_ID/_RECALL_EXCLUDE_CYCLE_ID also
+# live on — get_council_ledger uses the same bounds and exclusions.
 
 
-def _render_grade_word(grade):
-    """Map a grade dict to the Journal's grade vocabulary. estimated grades (the
-    decision-time proxy / counterfactual ones) are rendered estimated_*; outcome-
-    realized grades are plain correct/incorrect."""
-    if grade['estimated']:
-        return 'estimated_correct' if grade['correct'] else 'estimated_incorrect'
-    return 'correct' if grade['correct'] else 'incorrect'
+_LEDGER_HEADER = ("=== COUNCIL LEDGER — the council's own recent decisions and how "
+                  "they turned out (shared, authorship-free) ===")
+_LEDGER_EMPTY_SENTINEL = _LEDGER_HEADER + "\n(no prior council decisions yet)"
 
 
-def _render_recall_block(entries):
-    """Render the per-seat recall entries into the literal, deterministically-ordered
-    block injected into the seat's prompt. No now()-timestamps; chronological order.
-    Empty -> the explicit sentinel (never an error). The grading_basis is surfaced as
-    a parenthetical when it is not plain reality, so 'estimated' vs 'sim' vs
-    'counterfactual' is legible on the line itself."""
+def _render_ledger_block(entries):
+    """Render the council-ledger entries into a deterministic, prompt-ready block
+    injected IDENTICALLY to all three seats. Authorship-free by construction — it
+    carries the decision + the authorship-free vote multiset + the matured outcome,
+    never which seat proposed what. Empty -> the explicit sentinel."""
     if not entries:
-        return _RECALL_EMPTY_SENTINEL
-    lines = [_RECALL_HEADER]
+        return _LEDGER_EMPTY_SENTINEL
+    lines = [_LEDGER_HEADER]
     for e in entries:
-        basis_suffix = '' if e['grading_basis'] == 'reality' else f" ({e['grading_basis']})"
+        outcome = e['outcome'] or "outcome pending"
         lines.append(
-            f"[{e['date']} {e['label']}] {e['raw_outcome']} | {e['grade']}{basis_suffix}"
+            f"[{e['date']}] decision={e['decision']} ({e['consensus']}) | "
+            f"votes [{e['vote_multiset']}] | {outcome}"
         )
     return "\n".join(lines)
 
 
-def get_agent_recall(agent_id, config_version, as_of=None):
-    """Per-agent recall — the deterministic "Journal". A pure SQLite read (NO model
-    call, NO vendor cost): the same inputs produce byte-identical output. Each seat
-    recalls ONLY its own past calls, scored by ITS OWN per-role metric — there is no
-    cross-agent history. The live consumer is council_v2.run_council, which injects
-    each seat's block as prompt context.
+def get_council_ledger(config_version, as_of=None):
+    """The COUNCIL'S OWN memory — a pure SQLite read (NO model call), replay-safe:
+    the same inputs produce byte-identical output. Unlike the per-seat Journal
+    (get_agent_recall, deleted 2026-07-05), this is ONE shared, authorship-free block injected IDENTICALLY
+    to all three seats in Phase 1 (the blind-review council is co-equal — no seat gets
+    a privileged view of the past). It stores only what the council needs to recall
+    its OWN past: the decision, the authorship-free vote multiset, the consensus class,
+    and the matured 24h outcome. Nothing here is added for auditing or monitoring.
 
-    LAYERING: config_version is a PARAMETER supplied by the caller, not computed here.
-    The decision layer (council_v2) owns the fingerprint and passes the current
-    version down; this data-layer function is a pure "filter by the version I'm given"
-    read and does NOT import council_v2 or orchestrator. If the caller passes None
-    (could not establish the boundary), recall is EMPTY — a fail-safe miss, never a
-    cross-config injection.
+    Source: the additive `council_json` column (written by the blind-review council)
+    joined with the existing matured-outcome columns (fills_24h / pnl_24h, set later
+    by the backfill path). config_version is a PARAMETER supplied by the caller (the
+    decision layer owns the fingerprint); None -> EMPTY ledger (fail-safe miss, never
+    cross-config recall). Same boundary/lookback/count discipline the per-seat Journal used:
+      (a) config boundary — only rows whose config_version EQUALS the argument.
+      (b) council-only — only rows that carry a council_json (pre-redesign rows have
+          NULL council_json and are skipped — no arbiter-relay history leaks in).
+      (c) bounds — most-recent RECALL_MAX_ITEMS rows within RECALL_LOOKBACK_DAYS.
 
-    Scoping filters, applied IN ORDER:
-      (a) config boundary — include only rows whose config_version EQUALS the
-          `config_version` argument. A row written under different personas/models/
-          rules/disclosure is a different regime and must not be recalled as if it
-          taught the current one. config_version is None -> recall is EMPTY.
-      (b) scored-only — a row is included ONLY if THAT seat's grade helper produces a
-          grade (delegated to _grade_*_row; ungraded rows are skipped, never
-          reimplemented here).
-      (c) bounds — the most-recent RECALL_MAX_ITEMS graded rows within
-          RECALL_LOOKBACK_DAYS of `as_of`.
-      (d) hard-exclude the Stage-3 integration-test artifact (id 270 /
-          cyc_1780949300) by both keys.
-
-    as_of (str ISO or datetime) anchors the lookback window and the recency cut;
-    None -> MAX(timestamp) in debate_records (DB-derived, so still deterministic —
-    never utcnow()).
-
-    Returns a dict:
-      {agent_id, as_of, config_version, entries, block}
-    where each entry carries THREE fields plus presentation:
-      raw_outcome   — ALWAYS present: the ground-truth one-liner (the spine).
-      grade         — correct | incorrect | estimated_correct | estimated_incorrect.
-      grading_basis — reality | sim | counterfactual (reality and counterfactual are
-                      kept SEPARATE, never blended).
-    `block` is the rendered, prompt-ready text (the empty sentinel when no entry
-    survives the filters)."""
-    if agent_id not in _VALID_AGENT_IDS:
-        raise ValueError(f"unknown agent_id: {agent_id!r}")
-
-    cfg_version = config_version     # (a) boundary supplied by caller; None -> empty
-
+    Returns {as_of, config_version, entries, block}; `block` is the rendered text
+    (empty sentinel when nothing survives the filters)."""
+    cfg_version = config_version
     conn = get_conn()
     try:
-        from grid.forward_sim import load_1h
-        bars = load_1h(conn)
-        ts_keys = [b[0][:19] for b in bars]
-        n = len(bars)
-
         if as_of is None:
             row = conn.execute(
                 "SELECT MAX(timestamp) AS ts FROM debate_records").fetchone()
@@ -2375,48 +2512,99 @@ def get_agent_recall(agent_id, config_version, as_of=None):
             except ValueError:
                 lower = None
             if lower is not None:
-                pos_col = _RECALL_POS_COL[agent_id]
-                sql = (
-                    f"SELECT {_RECALL_COLS[agent_id]} "
-                    f"FROM debate_records "
-                    f"WHERE config_version = ? "
-                    f"  AND timestamp >= ? AND timestamp <= ? "
-                    f"  AND {pos_col} IS NOT NULL "
-                    f"  AND id != ? "
-                    f"  AND (cycle_id IS NULL OR cycle_id != ?) "
-                    f"ORDER BY timestamp DESC, id DESC"
-                )
                 rows = conn.execute(
-                    sql,
+                    "SELECT timestamp, council_json, fills_24h, "
+                    "       outcome_24h_backfilled, stance, final_grid_action, "
+                    "       world_state "
+                    "FROM debate_records "
+                    "WHERE config_version = ? "
+                    "  AND timestamp >= ? AND timestamp <= ? "
+                    "  AND council_json IS NOT NULL "
+                    "  AND id != ? "
+                    "  AND (cycle_id IS NULL OR cycle_id != ?) "
+                    "ORDER BY timestamp DESC, id DESC",
                     (cfg_version, lower, as_of_s,
                      _RECALL_EXCLUDE_ID, _RECALL_EXCLUDE_CYCLE_ID),
                 ).fetchall()
-                grader = _RECALL_GRADER[agent_id]
-                for r in rows:                  # most-recent first
-                    grade, _reason = grader(r, bars, ts_keys, n)
-                    if grade is None:           # (b) scored-only: skip ungraded
+                # Sync-ratio outcome facts (magi/sync_ratio.py): the factual
+                # 72h cost-vs-alternative line replaces the equity-scoped
+                # pnl_24h figure (banned as a verdict — inventory-beta-
+                # dominated; operator directive 2026-07-02/04). Bars loaded
+                # once, lazily; ANY grading failure degrades to "outcome
+                # pending" — never a crashed convene.
+                _sr_bars = _sr_keys = None
+                for r in rows:                      # most-recent first
+                    try:
+                        cj = json.loads(r['council_json']) if r['council_json'] else None
+                    except (ValueError, TypeError):
+                        cj = None
+                    if not isinstance(cj, dict):     # (b) council-only: skip unparseable
                         continue
+                    line = None
+                    try:
+                        from magi.sync_ratio import outcome_line, load_1h
+                        if _sr_bars is None:
+                            _sr_bars = load_1h(conn)
+                            _sr_keys = [b[0] for b in _sr_bars]
+                        line = outcome_line(
+                            {'timestamp': r['timestamp'], 'stance': r['stance'],
+                             'final_grid_action': r['final_grid_action'],
+                             'world_state': r['world_state']},
+                            _sr_bars, _sr_keys)
+                    except Exception:
+                        line = None                  # degrade, never raise
+                    fills = r['fills_24h'] if r['outcome_24h_backfilled'] else None
+                    parts = ([f"24h fills: {fills}"] if fills is not None else [])
+                    parts.append(line or "72h outcome pending")
+                    outcome = "; ".join(parts)
                     entries.append({
                         'date': (r['timestamp'] or '')[:10],
-                        'label': grade['label'],
-                        'raw_outcome': grade['raw_outcome'],
-                        'grade': _render_grade_word(grade),
-                        'grading_basis': grade['basis'],
+                        'decision': cj.get('decision'),
+                        'vote_multiset': cj.get('vote_multiset', ''),
+                        'consensus': cj.get('consensus'),
+                        'outcome': outcome,
+                        'graded': bool(line),   # matured sync-ratio line present
                     })
-                    if len(entries) >= RECALL_MAX_ITEMS:   # (c) bound count
+                    if len(entries) >= RECALL_MAX_ITEMS:    # (c) bound count
                         break
-                entries.reverse()               # inject oldest -> newest
+                entries.reverse()                   # inject oldest -> newest
     finally:
         conn.close()
 
     return {
-        'agent_id': agent_id,
         'as_of': (as_of if isinstance(as_of, str)
                   else (as_of.isoformat() if as_of else None)),
         'config_version': cfg_version,
         'entries': entries,
-        'block': _render_recall_block(entries),
+        'block': _render_ledger_block(entries),
     }
+
+
+def record_memory_injection(cycle_id, config_version, ledger_entries,
+                            graded_entries, track_buckets, block_text,
+                            items_json):
+    """Flight-recorder row for the seats' shared memory block (one per council
+    cycle). Best-effort by contract: callers wrap it — a logging failure must
+    never block a convene. INSERT OR REPLACE keyed on cycle_id so a retried
+    cycle overwrites rather than duplicates. block_sha is a short content hash
+    so byte-level liveness ("the block really changed / really rendered") is
+    checkable from a snapshot without storing the full text."""
+    import hashlib
+    conn = get_conn()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO memory_injections "
+            "(cycle_id, timestamp, config_version, ledger_entries, "
+            " graded_entries, track_buckets, block_chars, block_sha, items_json) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (cycle_id, datetime.utcnow().isoformat(), config_version,
+             int(ledger_entries), int(graded_entries), int(track_buckets),
+             len(block_text or ""),
+             hashlib.sha256((block_text or "").encode("utf-8")).hexdigest()[:16],
+             items_json))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def get_capitulation_rate(agent_id, days=7):

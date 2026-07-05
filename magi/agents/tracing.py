@@ -186,6 +186,73 @@ def set_trace_tags(trace_id: str, tags: list):
         log.warning("set_trace_tags(%s) failed: %s", trace_id, e)
 
 
+def set_trace_session(trace_id: str, session_id: str):
+    """Set the sessionId on an EXISTING trace via the same trace-create MERGE the
+    tags use (SDK 4.7.1 has no public trace-update method). Grouping cycles into a
+    session — one per paper run — is what turns the loose per-cycle traces into a
+    navigable run timeline in Langfuse's Sessions view instead of isolated islands.
+    Fire-and-forget like everything in this module."""
+    if not trace_id or not session_id:
+        return
+    try:
+        import os
+        import uuid
+        from datetime import datetime, timezone
+        import requests
+        base = (os.environ.get("LANGFUSE_BASE_URL") or "").rstrip("/")
+        pub = os.environ.get("LANGFUSE_PUBLIC_KEY")
+        sec = os.environ.get("LANGFUSE_SECRET_KEY")
+        if not (base and pub and sec):
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        batch = {"batch": [{
+            "id": str(uuid.uuid4()),
+            "type": "trace-create",
+            "timestamp": now,
+            "body": {"id": trace_id, "sessionId": str(session_id)},
+        }]}
+        requests.post(f"{base}/api/public/ingestion", json=batch,
+                      auth=(pub, sec), timeout=3)
+    except Exception as e:  # noqa: BLE001 - tracing never breaks the caller
+        log.warning("set_trace_session(%s) failed: %s", trace_id, e)
+
+
+_SCORE_CONFIG_MAP = {"loaded": False, "map": {}}
+
+
+def _score_config_map(base, pub, sec):
+    """Cached {score_name: configId} from Langfuse score-configs so push_trace_scores
+    can attach configId — which enables the CATEGORICAL numeric mapping in Score
+    Analytics and validates each value against the config. Fetched once per process;
+    any failure returns {} (scores still post, just without a config link). Skips
+    archived configs; on a duplicate name the first non-archived wins."""
+    if _SCORE_CONFIG_MAP["loaded"]:
+        return _SCORE_CONFIG_MAP["map"]
+    m = {}
+    try:
+        import requests
+        page = 1
+        while page <= 5:
+            r = requests.get(f"{base}/api/public/score-configs",
+                             auth=(pub, sec), params={"limit": 100, "page": page}, timeout=5)
+            if r.status_code >= 300:
+                break
+            j = r.json()
+            for c in j.get("data", []):
+                if c.get("isArchived"):
+                    continue
+                m.setdefault(c["name"], c["id"])
+            if page >= (j.get("meta", {}).get("totalPages") or 1):
+                break
+            page += 1
+    except Exception as e:  # noqa: BLE001 - never break the caller
+        log.warning("score-config map fetch failed: %s — scores post without configId", e)
+        m = {}
+    _SCORE_CONFIG_MAP["loaded"] = True
+    _SCORE_CONFIG_MAP["map"] = m
+    return m
+
+
 def push_trace_scores(trace_id: str, scores: dict, comment: str | None = None):
     """Attach scores to an EXISTING trace via the public REST API (the SDK's
     score path needs an active span context; the outcome backfill runs hours
@@ -212,11 +279,15 @@ def push_trace_scores(trace_id: str, scores: dict, comment: str | None = None):
         sec = os.environ.get("LANGFUSE_SECRET_KEY")
         if not (base and pub and sec):
             return True
+        cfg_map = _score_config_map(base, pub, sec)
         delivered = True
         for name, value in scores.items():
             if value is None:
                 continue
-            body = {"traceId": trace_id, "name": name}
+            # Idempotency key: a stable id = "<trace>-<name>" so a convergent-delivery
+            # retry UPDATES the score instead of creating a duplicate (POST does not
+            # dedupe on its own). One score per name per trace, so this is unique.
+            body = {"traceId": trace_id, "name": name, "id": f"{trace_id}-{name}"}
             if isinstance(value, bool):
                 body["value"] = 1 if value else 0
                 body["dataType"] = "BOOLEAN"
@@ -228,8 +299,17 @@ def push_trace_scores(trace_id: str, scores: dict, comment: str | None = None):
                 body["dataType"] = "NUMERIC"
             if comment:
                 body["comment"] = comment
+            cfg_id = cfg_map.get(name)
+            if cfg_id:
+                body["configId"] = cfg_id
             resp = requests.post(f"{base}/api/public/scores", json=body,
                                  auth=(pub, sec), timeout=3)
+            # Fail-safe: a configId validation reject (e.g. an unforeseen category)
+            # must NEVER drop the score — retry once WITHOUT the config so it lands.
+            if resp.status_code >= 300 and cfg_id:
+                body.pop("configId", None)
+                resp = requests.post(f"{base}/api/public/scores", json=body,
+                                     auth=(pub, sec), timeout=3)
             if resp.status_code >= 300:
                 delivered = False
                 log.warning("push_trace_scores(%s): %s dropped (HTTP %s)",

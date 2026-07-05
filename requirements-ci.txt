@@ -1,0 +1,8 @@
+# Minimal dependency set for the CI property suite (tests/test_properties.py).
+# Deliberately NOT requirements.txt: the suite targets light-import money-path
+# modules only (notify / aggregate / forward_sim / pnl), so CI never installs
+# the google-adk/langfuse chain. Verified 2026-07-02 in a clean venv.
+pytest
+hypothesis
+requests
+python-dotenv

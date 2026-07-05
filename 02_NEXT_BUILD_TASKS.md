@@ -1,5 +1,360 @@
 # Next Build Tasks
 
+> **TOP OF QUEUE 2026-07-04 (EVENING) — LEARNING LOOP REBUILT + DEPLOYED; these
+> are the open follow-ups (full account: `01_CURRENT_STATE.md` 2026-07-04
+> EVENING block; the discovery was that the per-seat Journal had been dead
+> since the 06-25/26 redesign and the ledger fed the seats the banned equity
+> metric):**
+> 1. **Promote MAGI-02 P7_learning_loop_alive** (operator action): after the
+>    first post-deploy cycles verify clean, flip its status proposed→approved in
+>    `magi02/predicates.json` and set `effective_from` to the actual deploy
+>    timestamp. Until then it runs report-only by design.
+> 2. **Watch the first post-deploy cycles:** every council cycle must write a
+>    `memory_injections` row (non-empty block); the ledger shows honest empty
+>    sentinels at the new config boundary, then "72h outcome pending" lines,
+>    then the first matured sync-ratio facts ~72h after deploy. Any cycle
+>    without a flight-recorder row = the exact failure P7 exists to catch.
+> 3. **Frozen ENTRY PLUG superiority test** (pre-registered in
+>    `optimize/ireul/trials.jsonl`, criteria immutable): at ≥30 matured
+>    episodes under one config_version, weighted precedent selection must beat
+>    recency selection paired on the same cycles, else precedents stand down to
+>    the deterministic floor. Do NOT run early, do NOT tune constants.
+> 4. **Rally-window accuracy review** (carried from the morning): now runnable
+>    on the v2 cost basis — the 72h-matured stance record vs both graders
+>    (hit-rate 0/7 vs cost-based net +$0.03 tells the asymmetry story).
+> 5. Carried unchanged: MAGI-02 first miner run (Ollama not on the desktop
+>    yet); chaos-drill layer 4. ~~dead-arbiter-module deletion~~ ✅ **DONE
+>    2026-07-05 (operator-approved):** `balthasar_claude.py` /
+>    `casper_gemini.py` / `melchior_deepseek.py` deleted; `GridVote`/`RiskVote`
+>    deleted from `magi/agents/schemas.py`; `RegimeVote` MOVED into
+>    `optimize/casper/agent.py` (its only remaining importer — the offline
+>    tuning scaffold, which now evals a seat shape that no longer runs live);
+>    `Geometry` KEPT (nested in the live `CandidateDecision`);
+>    `get_agent_recall` + its recall-only helpers (`_RECALL_COLS`/`_POS_COL`/
+>    `_GRADER`/`_HEADER`/`_EMPTY_SENTINEL`, `_render_grade_word`,
+>    `_render_recall_block`) deleted from `database.py`. NOT deleted, verified
+>    live: the per-row graders `_grade_*_row` (called by `get_agent_accuracy`
+>    → dashboard, and observer seat grading), `RECALL_MAX_ITEMS`/
+>    `RECALL_LOOKBACK_DAYS` + `_RECALL_EXCLUDE_*` (used by
+>    `get_council_ledger`). ~~engine hygiene items~~ ✅ **DONE 2026-07-05**
+>    (see the STILL OPEN block below, now closed). Verified: CI-equivalent
+>    ruff clean, 7/7 property tests pass, all live modules import, dashboard
+>    imports OK, `validate_schema` PASS; deployed via a verified QUIET restart
+>    (no startup council cycle).**
+
+> **PLAN 2026-07-02 — PROACTIVE BUG-CATCHING ARCHITECTURE (operator-approved;
+> build sequence locked; "no spend, stop on surprises" directive).**
+> WHY: every recent bug (replenishment council-bypass, ntfy never-delivering,
+> empty-book NameError, startup-gate episode bypass, grader mismatch, workoff
+> gap) was found REACTIVELY — operator notices a symptom → session reads code →
+> stumbles on the defect — while the evidence sat in the data for days. This
+> plan replaces that with four standing layers, designed OFF-BOX-FIRST (the
+> 1.9GB droplet runs the bot; auditing runs elsewhere; the live decision path
+> gains ZERO inline checks and no latency):
+>
+> 1. **CI gate (GitHub Actions — runs on GitHub's hardware, operator has Pro:
+>    3,000 min/mo).** On every push: (a) `ruff check --select F,E9` over the
+>    whole repo — catches the undefined-name/syntax class (today's engine
+>    NameError was a one-second F821 catch sitting unflagged since 06-26) with
+>    NO project deps; (b) a pytest+Hypothesis PROPERTY suite over the
+>    light-import money-path modules (notify title sanitization vs arbitrary
+>    unicode, aggregate ballot sanitizer vs arbitrary orders, forward_sim
+>    band/break properties, pnl FIFO matcher vs arbitrary fill sequences) —
+>    properties are stated in advance from the system's own rules, and
+>    Hypothesis EXPLORES states nobody enumerated (the forward-looking fix for
+>    the "hindsight-only" critique). Heavy-import modules (engine/scheduler
+>    integration) are deliberately OUT of CI scope v1 — they need the full dep
+>    chain + DB fixtures and belong to the drill layer.
+> 2. **On-box survival invariants (the ONE on-box piece, by design).**
+>    `magi/invariants.py`: a small table of read-only, millisecond SQL checks
+>    riding the existing 10-min observer tick, for promises that deserve
+>    SAME-CYCLE detection: no open BUY while pause_longs/STAND_ASIDE stands
+>    (the June replenishment bypass = one SQL line, critical → ntfy); workoff
+>    ladder active but no resting sells despite headroom (ladder promise);
+>    unconsumed fired W event older than 2h (stuck wake wire). Alerts via the
+>    existing `insert_alert` (category `invariant_violation`; dedup built in).
+> 3. **MAGI-02 (desktop falsifier + promise miner; named for the Matsushiro
+>    backup MAGI that cross-examined the primary).** Lives in repo as
+>    `magi02/`; DEVELOPED+TESTED on the droplet against the live observer.db,
+>    DEPLOYED to the operator's desktop via `git pull` + `install.sh` (one-time,
+>    minutes; auth choice at install: dedicated READ-ONLY GCS key for the
+>    backup bucket, or rsync-over-SSH from the droplet). Nightly: pull the GCS
+>    observer.db snapshot (the daily 04:10 backup), run the PREDICATE LEDGER
+>    (`magi02/predicates.yaml` — each predicate = a falsifiable claim mined
+>    from the DOCS with its doc citation + a read-only SQL check; statuses
+>    proposed/approved — ONLY operator-approved predicates can alert, because
+>    published research on LLM spec-extraction confirms models fabricate specs
+>    and oversimplify boundaries). The MINER reads `git diff` of the docs and
+>    drafts NEW proposed predicates via LOCAL Ollama (zero API spend, private);
+>    stub mode until the desktop install. This is the layer that catches
+>    workoff-class gaps: promises that live in PROSE nobody thought to test.
+> 4. **Chaos drills (LAST; needs the desktop present to build).** A desktop
+>    CLONE of the stack (repo + snapshot, paper mode, sandbox DB) gets
+>    scheduled fault injection — killed seat mid-cycle, malformed ballot,
+>    restart-during-throttle-during-breach, frozen input, crash between
+>    decision and apply — graded on TWO conditions: survival AND detection
+>    (a silently-survived drill is a detection gap). Running on the clone
+>    kills the contamination risk (drill rows never touch the validation
+>    run's debate_records/grading/PnL scopes) and the droplet-load risk.
+>
+> COSTS (verified, sources in session): box load ≈ 0 (CI on GitHub, MAGI-02 +
+> drills on desktop, on-box invariants are ms-scale SQL); recurring spend ≈ 0
+> (local models; Actions inside the Pro allowance); remaining prices = upfront
+> build, the contamination engineering in layer 4, and operator triage
+> attention (mitigated: predicates gated on approval; any check that
+> false-positives twice is demoted to digest).
+> OSS verdicts (checked 2026-07-02): ruff/Hypothesis/pytest adopted as-is;
+> Great Expectations / Soda Core evaluated and REJECTED for this (warehouse-
+> scale frameworks vs one SQLite file — a thin runner is less machinery, and
+> CLAUDE.md forbids new frameworks); Chaos Toolkit evaluated — orchestration
+> shell only, our faults are domain-specific; LLM-spec-mining has NO dominant
+> OSS tool yet (active research: SpecGen/KBSpec/ICPC-2025) → magi02 is a
+> build, with research-confirmed failure modes driving the approval gate.
+> SEQUENCE: docs (this block) → CI gate → on-box invariants (needs ONE quiet
+> restart, verified quiet-capable at 20:14Z) → magi02 package (droplet-built,
+> desktop-installed tonight by operator) → drills (separate session).
+> STATUS 2026-07-02 ~21:45Z: layers 1–3 LIVE. CI green on GitHub (2 runs,
+> ~20s each); invariants riding the observer tick (loaded via a second quiet
+> restart, clean); MAGI-02 DEPLOYED on the operator's desktop — Windows+WSL,
+> rsync mode with a dedicated WSL ed25519 key, scheduled via Windows Task
+> Scheduler ("MAGI-02 nightly", 5AM local, WakeToRun/StartWhenAvailable —
+> NOT WSL cron, which sleeps with WSL; the whole command ships in-repo as
+> magi02/nightly.sh because pasted PowerShell one-liners hard-wrap and
+> break). Verified unattended end-to-end: a real Start-ScheduledTask run
+> logged 6/6 predicates HOLD at 21:40:51Z. OPEN: first miner run (Ollama
+> not yet installed on the desktop) and layer 4 drills.
+
+> **TOP OF QUEUE 2026-07-02 (LATER SAME SESSION) — FOUR FOLLOW-UPS SHIPPED
+> (operator-approved; deployed via restart, cycle verified clean):**
+> 1. **ntfy emoji crash FIXED** (`magi/notify.py`): titles are sanitized to
+>    latin-1 (em-dashes mapped to '-') before the header POST — the 06-27 wake
+>    notification delivered for the FIRST time (verified 2xx + a clean live wake
+>    push at 18:10 UTC). Body stays UTF-8.
+> 2. **tape_verdict RESTORED + kept current collector-independently.**
+>    `history.db` restored from the GCS snapshot (2026-06-17, integrity ok),
+>    then the 15-day tail + all internal gaps refilled from Bitstamp (27,644
+>    real bars, 0 residual — series gap-free 2016-12-16 → now). TWO warehouse
+>    changes: `cmd_refill` now also treats MAX(ts_begin)→now as a gap (LEAD
+>    detection couldn't see past the last row), and a new hourly `tail`
+>    subcommand (Bitstamp fetch + incremental rollup + incremental signals)
+>    keeps signals_1h alive while the collector stays STOOD DOWN. New systemd
+>    timers: `tape-tail.timer` (hourly :07) and `tape-backup.timer` (daily
+>    04:10 UTC — this had been DEAD since ~06-17, meaning observer.db had NO
+>    GCS backup for 15 days; now restored). Verified: `_tape_verdict_block()`
+>    returns stale=False (verdict yellow, regime green, drawdown −2.1%) and the
+>    18:10 council cycle consumed it live. NOTE: trades/spread/flow stay frozen
+>    — only the collector being stood back up feeds those.
+> 3. **`Ranking` permutation guard ADDED** (`magi/agents/aggregate.py`):
+>    ballots are sanitized at the single `aggregate()` entry — duplicate labels
+>    keep first occurrence (unambiguous repair, counted; a dup used to
+>    double-score in Borda and flip pairwise positions), foreign labels
+>    dropped; a ballot still not covering every presented label exactly once is
+>    EXCLUDED like a non-responder (warn alert `ranking_ballot_excluded`), and
+>    <2 surviving ballots returns the existing winner=None (reconcile →
+>    NO_CONSENSUS) path. Counts HOW ballots tally, never touches what seats
+>    chose. Unit-tested across clean/dup/repairable/foreign/under-2 shapes.
+> 4. **Grader-predicate mismatch FIXED** — ONE shared definition
+>    (`grid/forward_sim.py:stance_band` + `path_breaks`) now backs BOTH the
+>    stance grader and the seat action grader: STAND_ASIDE/PAUSE_LONGS correct
+>    iff a band-depth down-break happened (band = spacing × max(1, levels//2),
+>    row's own world_state geometry, 0.05 fallback), PAUSE_SHORTS iff an
+>    up-run. The old seat predicate (bare drift<0) credited a −0.01% wiggle;
+>    the "Matches the stance grader" comment was false. SCORING-BASIS CHANGE:
+>    matured STAND_ASIDE rows now score 0/6 for Casper/Melchior (no 5% break
+>    happened — price rallied), where drift<0 had flattered them.
+> **FIXED (operator go, later same session): startup gate is now EPISODE-AWARE.**
+> Root cause verified row-by-row in `magi_gate_events`: the gate re-fires W1
+> hourly during a standing breach; the running wake wire suppresses re-fires of
+> an already-answered episode (`_t2_episode_already_answered` →
+> `wake_episode_answered`), but rows written inside the 60-min post-cycle
+> throttle sit unmarked up to an hour, and startup condition (b) grabbed ANY
+> unconsumed fired row — so 2 of today's 3 restart wakes (17:10, 18:10) re-asked
+> the breach question the 11:00 W1 cycle had already answered. Condition (c)
+> (price outside band) had the same blind spot and would have fired once (b) was
+> clean — BOTH now run the SAME episode guard the wake wire uses (b: on the
+> event's own recorded direction+band, consuming answered rows with the wire's
+> sentinel; c: on the current side+band). A NEW breach (fresh band after a
+> rebuild, or flipped side) still wakes on restart, and the daily floor still
+> re-judges standing conditions. VERIFIED: offline (guard True for the standing
+> above-breach, False for flipped-side / different-band) and LIVE — the 20:14 UTC
+> restart with price 1.083 outside [0.965, 1.067] logged "breach episode is
+> already council-answered — staying quiet" and fired NO council cycle: the
+> first genuinely quiet restart during a standing breach.
+
+> **TOP OF QUEUE 2026-07-02 — PnL DECOMPOSITION + STAND_ASIDE WORK-OFF LADDER
+> SHIPPED (CORRECTION 2026-07-04: COMMITTED as `dab17a1` and pushed — the
+> "uncommitted" note this block originally carried went stale the same day;
+> operator-approved; deployed via restart; ladder armed at the 2026-07-03T00:00 UTC
+> daily wake via `system_state['workoff_armed_after_utc']`). See
+> `01_CURRENT_STATE.md` 2026-07-02 block for full detail. Remaining from this
+> session:**
+> - ~~Restart both services~~ DONE same session (startup wakes fired as
+>   disclosed; a latent engine NameError was exposed and fixed — see below).
+> - ~~Watch the first armed ladder cycle~~ ✅ **DONE — VERIFIED 2026-07-04** against
+>   the live journal and book. The ladder armed on the 2026-07-03 00:00 UTC daily
+>   cycle (stance still STAND_ASIDE); the 00:08 observer tick seeded 5 sell rungs
+>   $1.112→$1.221 (~2.44% apart, floor headroom logged 12.55→5.95 XRP as each rung
+>   committed). Two rungs then FILLED into the rally ($1.112 on 07-03 13:08,
+>   $1.139 on 07-03 20:04), each fill immediately topping up a fresh rung above
+>   ($1.247, then $1.269) — the designed re-arm behavior. Book as of 07-04: 5 open
+>   sells $1.166–$1.269, headroom 3.0 XRP (≈2 more fills before the ladder stops
+>   topping up at the `[XRP_BUFFER_FLOOR]` — expected, not a defect). The
+>   stance-exit stop is NOT yet exercised (no DEPLOY vote has occurred) — that
+>   remains a watch point, folded into the item below.
+> - **72h stance grading now has teeth both ways:** with `alpha_vs_hold` live, a
+>   wrong persistent STAND_ASIDE shows up as realized distribution into a rally
+>   (negative alpha), not silent paper regret — fold into the next accuracy review.
+>   **CURRENCY 2026-07-04 — no longer hypothetical.** XRP rallied from ~$1.03
+>   (06-26 restart) to ~$1.15 while the council held STAND_ASIDE continuously
+>   since 06-26. Paper `alpha_vs_hold` reads **−$0.47** (headline equity Δ +$3.26
+>   is inventory beta +$3.73; realized harvest $0 — sells only, zero round trips).
+>   Under the unified band-break grader, matured STAND_ASIDE rows through this
+>   rally score 0/6 for Casper/Melchior. The 07-04 00:00 cycle split three ways
+>   (Casper MAINTAIN, Melchior HALT, Balthasar STAND_ASIDE; applied MAINTAIN,
+>   stance unchanged) — the stance-EXIT question is live. Run the accuracy review
+>   once these rally-window rows mature.
+> - **FIXED during the restart (same session): engine `NameError` crash.** The
+>   2026-06-26 GRID INTEGRITY guard fix (`grid/engine.py` ~1637) calls
+>   `get_system_state` but the module never imported it — latent because the guard
+>   path only runs when the post-action book looks degenerate, and 2026-07-02 was
+>   the first cycle ever with a fully EMPTY book. The 16:57 UTC startup council
+>   cycle crashed `apply_magi_decision` on it (decision itself stood: STAND_ASIDE,
+>   2x STAND_ASIDE + 1x MAINTAIN, clear Condorcet; grid/pause actions had already
+>   no-opped). One-line fix: added `get_system_state` to the module-level
+>   `from database import (...)`.
+> - ~~NEW BUG: wake-notification ntfy send crashes on emoji~~ ✅ **FIXED later the
+>   SAME session** (item 1 of the "FOUR FOLLOW-UPS SHIPPED" block above, committed
+>   `429b6aa`): titles are sanitized to latin-1 before the header POST; the wake
+>   notification delivered for the first time at 18:10 UTC 07-02 (verified 2xx).
+>   (Original finding kept for the record: the `ℹ️` title failed latin-1 header
+>   encoding in `magi/notify.py` — `UnicodeEncodeError` at the 16:57 UTC startup
+>   wake — so the 2026-06-27 feature had never actually delivered until this fix.)
+>
+> **OPEN FOLLOW-UPS carried from 2026-06-28: ALL THREE CLOSED later this same
+> session (tape_verdict restored, grader predicates unified, Ranking permutation
+> guard added — see the block above this one).**
+
+> **TOP OF QUEUE 2026-06-28 — AUDIT + 3 FIXES SHIPPED (committed this session).**
+> A real audit (4 parallel finders + own verification) found & fixed:
+> 1. **HIGH — replenishment council-bypass FIXED.** `scheduler.py`'s post-fill grid
+>    replenishment re-armed a BUY on every sell fill checking only price-drift — never
+>    `pause_longs`/stance/exposure-cap — so the council's STAND_ASIDE was silently
+>    undone between cycles (re-arming longs into the downtrend; verified firing
+>    06-26/06-27, cancelled by luck). Now gated on `pause_longs` OR
+>    `down_walk_streak>=DOWN_WALK_CAP_STREAK` (buys) and `pause_shorts` (sells).
+> 2. **MED — `roc_6h` nulled by gate_monitor FIXED.** A 2nd writer to `indicators`
+>    passed an empty 6h list → overwrote poll_cycle's value with NULL hourly. Now
+>    resamples 6h from the 1h bars (`_resample_6h_from_1h`); verified live.
+> 3. **MED — freshness monitor ADDED.** `world_state_schema.alert_on_stale_inputs`,
+>    edge-triggered, ALERT-ONLY (`warn`, magi_alerts `stale_council_input`); catches
+>    silently null/stale council inputs that shape-only drift validation misses.
+>
+> **OPEN FOLLOW-UPS — ✅ ALL THREE CLOSED 2026-07-02 (see the "FOUR FOLLOW-UPS
+> SHIPPED" block above; kept here for the record):**
+> - ~~tape_verdict dead~~ RESTORED from the GCS snapshot + refilled gap-free,
+>   kept current by the hourly `tape-tail.timer`. Live proof: the guard caught a
+>   real duplicate ballot on 07-02 and a **W2 gate wake fired 07-03 11:00 UTC**
+>   (the verdict arm is feeding the gate again).
+> - ~~Grader predicate mismatch~~ FIXED — one shared band-break predicate
+>   (`grid/forward_sim.py:stance_band`/`path_breaks`) backs both graders.
+> - ~~`Ranking` schema permutation~~ GUARDED — ballots sanitized at `aggregate()`;
+>   first live catch 07-02 17:44 (`ranking_ballot_excluded`, order=['A','A','B']).
+
+> **TOP OF QUEUE 2026-06-26 — PERSONA REWRITE VALIDATED; ENGINE RESTARTED ON PAPER.**
+> The blind-review persona rewrite (item 1 of the 2026-06-25 block below) is now
+> **VALIDATED** and `magi.service` is **RUNNING on paper again** (restarted
+> 2026-06-26). Done this session, in order:
+> 1. **Persona rewrite VALIDATED.** A pre-restart audit found the rewritten personas
+>    referenced world_state paths that DON'T EXIST (`indicators.bearish_trend`,
+>    `indicators.drawdown_from_high_7d` — the latter is TOP-LEVEL, not under
+>    `indicators`) and `validate_schema` was FAILing (10 ERROR). Fixed (paths
+>    repointed/dropped, schema consumer lists synced) → `validate_schema` PASS. Then
+>    `run_council` on `cyc_1782417183`'s stored downtrend `world_state` flipped
+>    MAINTAIN → **STAND_ASIDE** (2× STAND_ASIDE + 1× HALT, clear Condorcet). Only the
+>    DOWNTREND regime is validated; benign/ranging + RECONFIGURE are exercised by the
+>    live paper run.
+> 2. **Stale-counter data bug FIXED.** `get_trajectory_context` floors the lookback at
+>    `paper_run_started_utc`; `melchior_blocked_cycles` no longer miscounts
+>    `THESIS_HOLDS`; `reset_paper_book.py` clears `down_walk_last_centre`/`_ts`.
+> 3. **Engine GRID INTEGRITY guard FIXED** (found by the live restart, NOT the audit —
+>    a thoroughness miss, see `CLAUDE.md` §8). On a STAND_ASIDE the engine cancelled
+>    buys (correct) but the post-action guard (`engine.py` ~1611) tried to
+>    "emergency-rebuild" the one-sided book — which would re-add buys into the downtrend
+>    AND errored on a missing `spacing_pct`. Now the guard leaves a council-mandated
+>    one-sided book (PAUSE_LONGS / STAND_ASIDE / non-DEPLOY stance) alone; a genuine
+>    DEPLOY-stance degeneracy rebuilds with the effective spacing.
+> 4. **Off-schedule wake alert ADDED.** `run_magi_cycle` pages the operator via ntfy
+>    (existing MAGI topic) on any wake that is NOT the daily 20:00 ET floor or a manual
+>    run (startup, 25h backstop, W1/W2). Priority 3 (buzz; bump to 5 for DND bypass).
+> 5. **Paper restart done.** Clean reset → fresh 2.5%/5-level grid ~$1.016 → startup
+>    council STAND_ASIDE → sells-only protective book. The stance is re-judged at the
+>    next daily floor (and W1/backstop); it stays sells-only until the council votes
+>    DEPLOY on a recovered regime.
+>
+> ~~**STILL OPEN (hygiene / follow-ups):** delete dead arbiter modules ... the
+> `engine.py:1328` fallback ... ONE_GRID detects-but-does-not-enforce~~
+> ✅ **ALL THREE CLOSED 2026-07-05 (operator-approved; deployed via quiet
+> restart):** (1) dead arbiter modules + `GridVote`/`RiskVote` deleted,
+> `RegimeVote` moved into `optimize/casper/agent.py` (details in the
+> 2026-07-04 top-of-queue block, item 5). (2) The no-grid-state fallback in
+> `apply_magi_decision` now routes through DECISION GEOMETRY: with no stored
+> grid state it builds ONLY when the action is a rebuild type
+> (RECENTRE/TIGHTEN/WIDEN) carrying `melchior_geometry` with a valid spacing
+> (clamped to the 1.5–2.5% band, levels clamped 4–12) AND no side is paused
+> (a paused side means the council is protecting the book — a fresh two-sided
+> build would be a council bypass); anything else logs an error, records
+> `clamp_reason=no_grid_state_no_geometry`, and builds nothing (the first-boot
+> scorer path owns the from-nothing build). (3) ONE_GRID now ENFORCES: any
+> violation writes a critical `magi_alerts` row (`one_grid_violation` → ntfy
+> page) instead of a log line only, and the anchor-entry check re-cancels the
+> book once and ABORTS the build if still dirty (never stacks a second grid);
+> the post-rebuild check stays page-only by design — auto-repairing a
+> partially-placed grid is not safely automatable. All paths
+> smoke-verified (violation→alert+abort; geometry fallback builds/refuses/
+> clamps correctly incl. under PAUSE_LONGS).
+> ~~W2's off-schedule re-judge is DARK while the tape collector is stood down~~
+> **NO LONGER TRUE as of 2026-07-02:** `tape_verdict` was restored (GCS snapshot +
+> hourly Bitstamp-fed `tape-tail.timer`), so W2's verdict arm is live again — a real
+> W2 wake fired 2026-07-03 11:00 UTC. The STAND_ASIDE exit is no longer
+> daily-floor-only. (Trades/spread/flow tape arms remain frozen until the collector
+> itself is stood back up.)
+>
+> The 2026-06-25 block below is the prior state — its items 1–2 are now DONE.
+
+> **TOP OF QUEUE 2026-06-25 (end of session) — council-layer open items, in order.
+> Engine SHUT DOWN by operator order; do NOT restart until at least (1) and (2) are
+> done and the operator directs it. Full context: `05_COUNCIL_REDESIGN.md` §7d,
+> `01_CURRENT_STATE.md` Session 2026-06-25, failure log in `CLAUDE.md` §8.**
+> 1. **VALIDATE the persona rewrite.** All three personas were rewritten
+>    blind-review-native to stop the council gridding into a downtrend, but the
+>    validation run was STOPPED. Re-run `run_council` on `cyc_1782417183`'s stored
+>    `world_state` (or fresh) and confirm the decision flips from MAINTAIN to
+>    protection (STAND_ASIDE/PAUSE_LONGS). Persona edits can fail to move haiku/
+>    deepseek/gemini behavior — until this passes, the fix is unproven. THIS GATES
+>    any restart.
+> 2. **Fix the stale-counter data bug.** `database.get_trajectory_context()` derives
+>    `regime_consecutive`/`cycles_since_structural_change`/`melchior_blocked_cycles`
+>    from the last 5 `magi_decisions` rows; `reset_paper_book.py` clears none of them
+>    (nor `down_walk_last_centre`/`down_walk_last_ts`). Floor the lookback at
+>    `paper_run_started_utc` (and clear the down_walk anchors in the reset). Also fix
+>    `melchior_blocked_cycles` (it string-compares `THESIS_HOLDS` to `'MAINTAIN'`).
+> 3. **Delete dead arbiter-era code:** `magi/agents/balthasar_claude.py`,
+>    `melchior_deepseek.py`, `casper_gemini.py`, and the `RegimeVote`/`GridVote`/
+>    `RiskVote` classes in `schemas.py` — imported by nothing live.
+> 4. **ONE_GRID invariant** (`engine.py:750`) detects-but-does-not-enforce — make it
+>    prevent a second grid, not just log.
+> 5. Strategy reality: the audit established the grid is net-NEGATIVE in trends (live
+>    −$10.27 / −15% equity; ~0 alpha vs hold at 2.5% in this downtrend). The persona
+>    rewrite is meant to make the COUNCIL stand aside in such regimes — confirm via (1).
+
+> **CURRENCY NOTE 2026-06-25 — the trading engine is currently SHUT DOWN (paper
+> hold), so the "watching" direction below is paused. This session reconnected the
+> dashboard, rebuilt the Langfuse instrumentation, and fixed the Casper propose 400 —
+> none of which ran the engine. See `05_COUNCIL_REDESIGN.md` §7 and "Session
+> 2026-06-25" in `01_CURRENT_STATE.md`. The blind-review council (`05`) supersedes the
+> arbiter-era council items below. The next real build decision is whether/when to
+> bring `magi.service` back up (out of scope until the operator directs it).**
+
 > **DIRECTION 2026-06-12 — RESTARTED ON PAPER; THE QUEUE IS NOW WATCHING, NOT
 > BUILDING.** F5 ran (PASS on its pre-committed criteria, then DEMOTED by the
 > operator to skeleton-floor evidence — the replay cannot model the judgment

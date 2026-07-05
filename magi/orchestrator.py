@@ -654,6 +654,57 @@ def _council_stance_block() -> dict:
     return out
 
 
+def _workoff_block(price) -> dict:
+    """STAND_ASIDE work-off ladder state (2026-07-02) for the council's eyes —
+    the same standing-mandate keys scheduler.maintain_workoff_ladder acts on.
+    While the standing stance is STAND_ASIDE (and the ladder is armed), the
+    engine maintains a sells-only resting ladder above market, so the seats
+    must know their stance is actively distributing inventory, not passively
+    waiting. worked_off_xrp_since_stance = sell fills since the stance was
+    set — realized distribution the seats should weigh against re-deploying.
+    Never raises."""
+    out = {"active": False, "rungs_resting": 0,
+           "xrp_headroom_above_floor": None,
+           "worked_off_xrp_since_stance": None}
+    try:
+        from database import get_conn
+        stance = get_system_state('council_stance', default='') or ''
+        armed_after = get_system_state('workoff_armed_after_utc',
+                                       default='') or ''
+        conn = get_conn()
+        try:
+            last_cycle = conn.execute(
+                'SELECT MAX(timestamp) FROM debate_records').fetchone()[0]
+            out["rungs_resting"] = conn.execute(
+                "SELECT COUNT(*) FROM grid_orders "
+                "WHERE status='open' AND side='sell'").fetchone()[0]
+            inv = conn.execute(
+                'SELECT xrp_held FROM inventory '
+                'ORDER BY timestamp DESC LIMIT 1').fetchone()
+            since = get_system_state('council_stance_since', default='') or ''
+            if since:
+                worked = conn.execute(
+                    "SELECT COALESCE(SUM(size), 0) FROM grid_orders "
+                    "WHERE status='filled' AND side='sell' "
+                    "AND COALESCE(filled_at, timestamp) >= ?",
+                    (since,)).fetchone()[0]
+                out["worked_off_xrp_since_stance"] = round(float(worked), 4)
+        finally:
+            conn.close()
+        out["active"] = bool(
+            stance == 'STAND_ASIDE'
+            and last_cycle
+            and (not armed_after or last_cycle >= armed_after)
+        )
+        if inv and price:
+            floor_xrp = HARD_RULES['min_xrp_buffer_usd'] / price
+            out["xrp_headroom_above_floor"] = round(
+                float(inv['xrp_held'] or 0) - floor_xrp, 4)
+    except Exception as e:
+        log.warning("workoff block read failed (emitting inert): %s", e)
+    return out
+
+
 def build_world_state() -> dict:
     """Snapshot of all market/portfolio context for the cycle."""
     from grid.engine import GridEngine
@@ -798,6 +849,9 @@ def build_world_state() -> dict:
         "tape_verdict":             _tape_verdict_block(),
         "exposure_cap":             _exposure_cap_block(),
         "council_stance":           _council_stance_block(),
+        # 2026-07-02: STAND_ASIDE work-off ladder state — the stance now
+        # actively distributes inventory; the seats must see that.
+        "workoff":                  _workoff_block(price),
     }
 
     # Gate trip-wire events since the last cycle. List of dicts:
@@ -816,8 +870,14 @@ def build_world_state() -> dict:
     # blocks the cycle. Trading continues; the operator is paged via the
     # existing ntfy hook on critical-severity magi_alerts rows.
     try:
-        from magi.world_state_schema import alert_on_runtime_drift
+        from magi.world_state_schema import (
+            alert_on_runtime_drift, alert_on_stale_inputs,
+        )
         alert_on_runtime_drift(ws)
+        # Completeness/freshness companion: catches shape-valid but silently
+        # null/stale council inputs (the roc_6h gap drift validation can't see).
+        # Alert-only at 'warn' (dashboard); never blocks the cycle.
+        alert_on_stale_inputs(ws)
     except Exception as e:
         log.warning("schema runtime validator raised (non-fatal): %s", e)
 
@@ -826,15 +886,40 @@ def build_world_state() -> dict:
 
 # --- Hard-rule enforcement ---
 
+def _seat_degraded_in_row(row, agent: str) -> bool:
+    """Per-row, per-seat degradation predicate — ERA-AWARE (the blind-review and
+    arbiter eras record a degraded seat differently; mirrors the dispatch in
+    database._score_action_seat / dashboard._fetch_agent_health):
+
+      blind-review row (council_json present): the seat is degraded iff its own
+        {agent}_r0_action is NULL. The blind-review council writes NO SAFE_DEFAULTS
+        sentinel — a non-responding seat is simply absent (columns NULL). A row where
+        ALL three actions are NULL but council_json is present is a total council crash,
+        which correctly flags all three (→ tier-2 collapse → HALT).
+      arbiter-era row (council_json NULL): the legacy SAFE_DEFAULTS fingerprint —
+        conviction ≈ 0 AND crux LIKE '(no response)%' (magi/council.py:SAFE_DEFAULTS).
+    """
+    if row['council_json'] is not None:                  # blind-review cycle
+        return row[f'{agent}_r0_action'] is None
+    # arbiter-era cycle: legacy sentinel
+    conv = row[f'{agent}_r0_conviction']
+    crux = row[f'{agent}_r0_crux'] or ''
+    conv_zero = (conv is None) or (abs(float(conv)) < 1e-9)
+    return conv_zero and crux.startswith('(no response)')
+
+
 def _check_council_degradation() -> dict:
     """
     Inspect the last 2 historical debate_records rows (already-written cycles
     only — enforce_hard_rules runs BEFORE the current cycle's row is inserted)
-    and return per-agent degradation state.
+    and return per-agent degradation state. An agent is degraded iff it is
+    degraded in BOTH of the last 2 rows (persistence requirement, unchanged).
 
-    Degradation fingerprint matches magi/council.py:SAFE_DEFAULTS and the
-    dashboard AGENT HEALTH tile: an R0 vote with conviction == 0.0 AND
-    crux LIKE '(no response)%' is a parse-failure / model-degradation marker.
+    Degradation detection is ERA-AWARE (see _seat_degraded_in_row): the
+    blind-review council does NOT write the arbiter-era SAFE_DEFAULTS sentinel
+    (conviction=0 AND crux '(no response)%') — a non-responding seat is absent
+    (columns NULL). So a blind-review row degrades a seat on a NULL
+    {seat}_r0_action; an arbiter-era row keeps the legacy sentinel.
 
     Returns:
         {
@@ -853,7 +938,8 @@ def _check_council_degradation() -> dict:
     try:
         conn = get_conn()
         rows = conn.execute(
-            "SELECT cycle_id, "
+            "SELECT cycle_id, council_json, "
+            "       casper_r0_action,    melchior_r0_action,    balthasar_r0_action, "
             "       casper_r0_conviction,   casper_r0_crux, "
             "       melchior_r0_conviction, melchior_r0_crux, "
             "       balthasar_r0_conviction, balthasar_r0_crux "
@@ -869,15 +955,7 @@ def _check_council_degradation() -> dict:
     out['evaluable'] = True
     out['cycle_ids_checked'] = [r['cycle_id'] for r in rows]
     for agent in ('casper', 'melchior', 'balthasar'):
-        both_degraded = True
-        for r in rows:
-            conv = r[f"{agent}_r0_conviction"]
-            crux = r[f"{agent}_r0_crux"] or ''
-            conv_zero = (conv is None) or (abs(float(conv)) < 1e-9)
-            if not (conv_zero and crux.startswith('(no response)')):
-                both_degraded = False
-                break
-        if both_degraded:
+        if all(_seat_degraded_in_row(r, agent) for r in rows):
             out['degraded_agents'].append(agent)
     out['degraded_count'] = len(out['degraded_agents'])
     return out
@@ -1927,6 +2005,11 @@ def _compose_config_fingerprint(cons: dict) -> tuple[str, dict]:
         "served_models": half.get("served_models") or {},
         "casper_model_version_observed": half.get("casper_model_version_observed"),
         "veto_mode": half.get("veto_mode"),
+        # What memory the seats read (sync-ratio outcomes + track record) —
+        # changes what the council sees, so it joins the hash (same pattern as
+        # veto_mode / constraint_disclosure). Absent on pre-schema halves ->
+        # hashes as null, exactly the old version. See council_v2._MEMORY_SCHEMA.
+        "memory_schema": half.get("memory_schema"),
         # Floor half — folded in here (in scope; council_v2 can't see it).
         "hard_rules": dict(HARD_RULES),
         "spacing_fee": {
@@ -1970,6 +2053,9 @@ def _build_debate_record(cycle_id: str, trigger: str, world_state: dict,
         record[f"{agent}_r0_position"]   = (
             r0.get("verdict") if agent == "melchior" else r0.get("position")
         )
+        # Raw proposed action (lossless) for the symmetric blind-review seat grader.
+        # NULL on a non-responding seat and on arbiter-era rows (no action authored).
+        record[f"{agent}_r0_action"]     = r0.get("action")
         try:
             record[f"{agent}_r0_conviction"] = float(r0.get("conviction") or 0.0)
         except (TypeError, ValueError):
@@ -2066,6 +2152,14 @@ def _build_debate_record(cycle_id: str, trigger: str, world_state: dict,
     record["config_snapshot"] = (
         json.dumps(_cfg_snap, sort_keys=True, default=str)
         if isinstance(_cfg_snap, (dict, list)) else _cfg_snap
+    )
+    # council_json: the blind-review council's own memory for this cycle — already a
+    # JSON STRING when carried from council_v2 ({decision, vote_multiset, consensus,
+    # reconciled}); binds straight to the TEXT column. A dict is tolerated and encoded
+    # here. NULL on the pre-redesign arbiter relay (which carried no council_json).
+    _cj = cons.get("council_json")
+    record["council_json"] = (
+        json.dumps(_cj, default=str) if isinstance(_cj, (dict, list)) else _cj
     )
     # Per-agent freshness-retry flags from council.py's R0 validator. None of
     # the agents will carry the key if world_state wasn't passed through, so

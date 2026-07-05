@@ -145,6 +145,108 @@ def _first_boot_geometry():
     return float(rank1['spacing_pct']), int(rank1['levels'])
 
 
+def maintain_workoff_ladder(engine, market_price):
+    """STAND_ASIDE inventory work-off ladder (2026-07-02).
+
+    The council's STAND_ASIDE action promises "cancel buys, work inventory off"
+    (magi/agents/schemas.py:CandidateDecision), but the fill replenisher above
+    can only re-arm the OPPOSITE side of a fill — under STAND_ASIDE no buys
+    exist, so once the grid's pre-existing sell rungs fill, the book goes empty
+    and the bulk of the inventory sits unmanaged (verified 2026-07-02: 6.6 of
+    ~30 XRP worked off, then inert). This maintains a resting sells-only ladder
+    ABOVE market while the STANDING stance is STAND_ASIDE: maker-only resting
+    rungs (no taker anchor), ORDER_SIZE_XRP per rung, ladder depth capped at
+    the grid's level count, and never committing XRP past the
+    [XRP_BUFFER_FLOOR] headroom (min_xrp_buffer_usd). Bootstrap and re-arm are
+    the same operation: top the resting sell count back up to target, anchored
+    to current market. Reads the council's standing mandate and existing
+    protective state only; makes no market call of its own (same class as the
+    replenishment posture gate).
+
+    Activation gate: inert until a council cycle exists at/after
+    system_state['workoff_armed_after_utc'] (operator-approved arming point,
+    set 2026-07-02 to the next daily wake) — the ladder starts from the
+    system's own decision loop, never from a code deploy. A missing key means
+    no gate (armed).
+
+    Exit: any standing stance other than STAND_ASIDE makes this a no-op;
+    resting rungs are left to the normal decision path (a DEPLOY rebuild
+    replaces the book via rule 6; HOLD keeps resting orders by definition).
+    """
+    from database import (get_system_state, get_conn,
+                          get_current_grid_state)
+    from config import ORDER_SIZE_XRP
+    from magi.orchestrator import HARD_RULES
+
+    if not market_price:
+        return
+    stance = (get_system_state('council_stance', default='') or '').strip()
+    if stance != 'STAND_ASIDE':
+        return
+
+    armed_after = (get_system_state('workoff_armed_after_utc',
+                                    default='') or '').strip()
+    conn = get_conn()
+    try:
+        last_cycle = conn.execute(
+            'SELECT MAX(timestamp) FROM debate_records').fetchone()[0]
+        if not last_cycle or (armed_after and last_cycle < armed_after):
+            return
+        inv = conn.execute(
+            'SELECT xrp_held FROM inventory ORDER BY timestamp DESC LIMIT 1'
+        ).fetchone()
+        resting = [float(r['price']) for r in conn.execute(
+            "SELECT price FROM grid_orders "
+            "WHERE status='open' AND side='sell'").fetchall()]
+    finally:
+        conn.close()
+
+    grid_state = get_current_grid_state() or {}
+    spacing = grid_state.get('spacing_pct')
+    levels = int(grid_state.get('levels') or 0) or 5
+    if not spacing or not inv:
+        return
+    if grid_state.get('pause_shorts'):
+        # [XRP_BUFFER_FLOOR] (or the council) has the sell side off — honor it.
+        return
+
+    xrp_held = float(inv['xrp_held'] or 0)
+    floor_xrp = HARD_RULES['min_xrp_buffer_usd'] / market_price
+    committed = len(resting) * ORDER_SIZE_XRP
+    affordable_new = int((xrp_held - floor_xrp - committed) / ORDER_SIZE_XRP)
+    target = min(levels, len(resting) + max(0, affordable_new))
+    needed = target - len(resting)
+    if needed <= 0:
+        return
+
+    placed = 0
+    k = 1
+    tolerance = spacing * market_price * 0.5
+    while placed < needed and k <= levels + len(resting):
+        rung = round(market_price * (1 + spacing * k), 5)
+        if all(abs(rung - p) > tolerance for p in resting):
+            try:
+                result = engine.place_order('sell', rung, ORDER_SIZE_XRP)
+            except Exception as e:
+                log.warning(f"[WORKOFF] place failed @ {rung:.5f}: {e}")
+                break
+            if result.get('status') in ('open', 'filled'):
+                placed += 1
+                resting.append(rung)
+                log.info(
+                    f"[WORKOFF] SELL rung placed @ {rung:.5f} "
+                    f"(STAND_ASIDE work-off; {len(resting)}/{target} resting, "
+                    f"floor headroom {(xrp_held - floor_xrp - len(resting)*ORDER_SIZE_XRP):.2f} XRP)"
+                )
+            else:
+                log.warning(
+                    f"[WORKOFF] rung rejected @ {rung:.5f}: "
+                    f"status={result.get('status')}"
+                )
+                break
+        k += 1
+
+
 def run_observer_cycle():
     """Run data collection cycle, shadow tick, and paper fill simulation."""
     log.info("--- OBSERVER CYCLE ---")
@@ -213,6 +315,23 @@ def run_observer_cycle():
                             "replacement orders"
                         )
                     elif spacing_pct:
+                        # Honor the council's protective posture (and the engine's
+                        # exposure cap) before re-arming a side. The council cancels
+                        # buys at decision time (STAND_ASIDE/PAUSE_LONGS); without
+                        # this gate the next opposite-side fill silently re-creates
+                        # them between council cycles — re-arming the grid into the
+                        # downtrend the posture exists to avoid. Reads existing
+                        # protective state only; makes no market call of its own.
+                        from config import DOWN_WALK_CAP_STREAK
+                        from database import get_system_state
+                        pause_longs = bool(grid_state.get('pause_longs'))
+                        pause_shorts = bool(grid_state.get('pause_shorts'))
+                        try:
+                            _streak = int(get_system_state('down_walk_streak',
+                                                           default='0') or 0)
+                        except (TypeError, ValueError):
+                            _streak = 0
+                        buys_off = pause_longs or _streak >= DOWN_WALK_CAP_STREAK
                         replacements = 0
                         for order in filled:
                             try:
@@ -226,6 +345,24 @@ def run_observer_cycle():
                                         market_price * (1 + spacing_pct), 5
                                     )
                                     replacement_side = 'sell'
+
+                                if replacement_side == 'buy' and buys_off:
+                                    log.info(
+                                        f"[GRID REPLENISH] {order['side'].upper()} fill "
+                                        f"@ {(order.get('fill_price') or order['price']):.4f} "
+                                        f"— buy re-arm SUPPRESSED "
+                                        f"(pause_longs={pause_longs}, "
+                                        f"down_walk_streak={_streak}): honoring "
+                                        f"protective posture, not re-arming into the trend"
+                                    )
+                                    continue
+                                if replacement_side == 'sell' and pause_shorts:
+                                    log.info(
+                                        f"[GRID REPLENISH] {order['side'].upper()} fill "
+                                        f"@ {(order.get('fill_price') or order['price']):.4f} "
+                                        f"— sell re-arm SUPPRESSED (pause_shorts)"
+                                    )
+                                    continue
 
                                 fill_ref = order.get('fill_price') or order['price']
                                 drift_pct = abs(market_price - fill_ref) / market_price
@@ -268,6 +405,19 @@ def run_observer_cycle():
                             "[GRID REPLENISH] No grid state found — skipping "
                             "replacement orders"
                         )
+            # STAND_ASIDE work-off ladder — runs every observer cycle (not
+            # just on fills) because the bootstrap case is an EMPTY book.
+            try:
+                maintain_workoff_ladder(engine, price)
+            except Exception as e:
+                log.error(f"[WORKOFF] ladder maintenance error: {e}")
+            # Survival invariants (plan layer 2) — AFTER ladder maintenance
+            # so the workoff check never races the top-up it verifies.
+            try:
+                from magi.invariants import check_invariants
+                check_invariants()
+            except Exception as e:
+                log.error(f"[INVARIANTS] check error: {e}")
     except Exception as e:
         log.error(f"Shadow tick error: {e}")
 
@@ -277,6 +427,152 @@ def run_observer_cycle():
         update_grid_config_outcome(min_hours_active=2.0)
     except Exception as e:
         log.warning(f"Grid config outcome update failed: {e}")
+
+
+def _build_wake_alert(trigger):
+    """Compose a graded, self-explaining off-schedule wake notification.
+
+    Returns (title, body, severity, category). Severity is keyed to the
+    SYSTEM STATE that woke the council, never to a fitted threshold — the
+    DND-bypassing 'critical' tier is reserved for the exposure cap being
+    engaged (a genuine structural 'forced sells-only into a fall' state),
+    not for an ordinary dip. Drawdown is shown as CONTEXT only (the docs
+    rejected drawdown as a trigger: >=6%-from-7d-high is ~60% of all hours).
+
+    Severity ladder:
+      critical  (p5, bypasses DND) — exposure cap engaged
+      attention (p4)               — W2 evidence flip, or W1 DOWNWARD breach
+      warning   (p3)               — W1 UPWARD breach (benign for a protective book)
+      info      (p2)               — startup / max-silence backstop
+
+    The body cites the STANDING stance (pre-cycle, from system_state) and
+    labels it as such — at notification time the council has not yet voted,
+    so it must not claim the new decision. Every read is best-effort; on any
+    failure this returns the plain legacy message at 'warning' severity so a
+    data hiccup never silences the page. The caller wraps the whole thing,
+    so a notify failure can never affect the cycle.
+    """
+    # --- safe fallback (today's bare message) -------------------------------
+    fallback = (
+        "MAGI woken off-schedule",
+        (f"trigger={trigger} — council convened outside the daily "
+         f"20:00 ET floor. Open dashboard."),
+        'warning',
+        'offschedule_wake',
+    )
+    try:
+        import json
+        from database import get_conn, get_system_state
+        from config import DOWN_WALK_CAP_STREAK
+
+        # Standing posture + structural context (pre-cycle).
+        stance = get_system_state('council_stance', default='UNKNOWN') or 'UNKNOWN'
+        try:
+            streak = int(get_system_state('down_walk_streak', default=0) or 0)
+        except (TypeError, ValueError):
+            streak = 0
+
+        # Latest drawdown (context only).
+        dd = None
+        conn = get_conn()
+        try:
+            row = conn.execute(
+                "SELECT details FROM magi_gate_events WHERE trigger_id='T16' "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if row and row['details']:
+                dd = json.loads(row['details']).get('drawdown_pct')
+
+            # Detail of the W-event that caused this wake (if a gate wake).
+            wdet = {}
+            if trigger.startswith('gate_wake:'):
+                wid = trigger.split(':', 1)[1]
+                wrow = conn.execute(
+                    "SELECT details FROM magi_gate_events WHERE trigger_id=? "
+                    "AND fired=1 ORDER BY id DESC LIMIT 1", (wid,)
+                ).fetchone()
+                if wrow and wrow['details']:
+                    wdet = json.loads(wrow['details']) or {}
+        finally:
+            conn.close()
+
+        # drawdown_pct is a positive magnitude of decline from the 7d high;
+        # always render it as a decline so it can't read like a gain.
+        if not isinstance(dd, (int, float)):
+            dd_txt = "dd n/a"
+        elif abs(dd) < 0.05:
+            dd_txt = "at 7d high"
+        else:
+            dd_txt = f"dd -{abs(dd):.1f}%"
+        cap_on = streak >= DOWN_WALK_CAP_STREAK
+
+        # --- non-gate wakes -------------------------------------------------
+        if trigger == 'startup':
+            return ("ℹ️ MAGI woke — service restart",
+                    f"Startup council cycle running. Standing stance {stance}. "
+                    f"Operational — no action expected.",
+                    'info', 'offschedule_wake')
+        if trigger == 'backstop_silence':
+            return ("ℹ️ MAGI woke — 25h heartbeat",
+                    f"Max-silence backstop fired (no cycle in 25h). Standing "
+                    f"stance {stance}. Routine check.",
+                    'info', 'offschedule_wake')
+
+        # --- W2: evidence under the stance shifted --------------------------
+        if trigger == 'gate_wake:W2':
+            if cap_on or wdet.get('cap_engaged'):
+                return ("\U0001f6a8 MAGI woke — EXPOSURE CAP engaged",
+                        f"W2: cap engaged (down-walk x{streak}) → grid forced "
+                        f"sells-only. Standing stance {stance}, {dd_txt}. "
+                        f"Check dashboard.",
+                        'critical', 'offschedule_wake')
+            verdict = wdet.get('verdict')
+            vtxt = f"tape {verdict}" if verdict else "evidence shift"
+            return ("⚠️ MAGI woke — stance evidence shifted",
+                    f"W2: {vtxt}. Standing stance {stance}, {dd_txt}. "
+                    f"Re-judging — worth a look.",
+                    'attention', 'offschedule_wake')
+
+        # --- W1: price left the grid band and stayed out --------------------
+        if trigger == 'gate_wake:W1':
+            direction = wdet.get('direction')
+            consec = wdet.get('consecutive')
+            bars = f"{consec} bars" if consec else "held"
+            # Distance of the last close past the breached band edge.
+            dist_txt = ""
+            try:
+                closes = wdet.get('closes') or []
+                last = float(closes[-1]) if closes else None
+                if last is not None and direction == 'above' and wdet.get('upper'):
+                    dist_txt = f"~{(last/float(wdet['upper'])-1)*100:.1f}% above band, "
+                elif last is not None and direction == 'below' and wdet.get('lower'):
+                    dist_txt = f"~{(1-last/float(wdet['lower']))*100:.1f}% below band, "
+            except (TypeError, ValueError, ZeroDivisionError, IndexError):
+                dist_txt = ""
+
+            if cap_on:
+                return ("\U0001f6a8 MAGI woke — EXPOSURE CAP engaged",
+                        f"W1 breach while cap engaged (down-walk x{streak}) → "
+                        f"sells-only. Standing stance {stance}, {dd_txt}. "
+                        f"Check dashboard.",
+                        'critical', 'offschedule_wake')
+            if direction == 'below':
+                return ("⚠️ MAGI woke — price broke band ↓",
+                        f"W1: price {dist_txt}{bars} — into the downtrend. "
+                        f"Standing stance {stance}, {dd_txt}. Worth a look.",
+                        'attention', 'offschedule_wake')
+            # Upward (or unknown-direction) breach: benign for a protective book.
+            arrow = "↑" if direction == 'above' else "·"
+            return (f"ℹ️ MAGI woke — price poke {arrow} (minor)",
+                    f"W1: price {dist_txt}{bars}. Standing stance {stance}, "
+                    f"cap off, {dd_txt}. Minor — likely no action.",
+                    'warning', 'offschedule_wake')
+
+        # Unknown off-schedule trigger: legacy message, but tag the trigger.
+        return fallback
+    except Exception as e:
+        log.warning(f"wake-alert compose failed, using plain message: {e!r}")
+        return fallback
 
 
 def run_magi_cycle(trigger='scheduled'):
@@ -291,6 +587,27 @@ def run_magi_cycle(trigger='scheduled'):
     self_model, concepts the stateless seats don't have.)
     """
     log.info(f"--- MAGI CYCLE (trigger={trigger}) ---")
+
+    # Off-schedule wake alert (phone via ntfy, existing MAGI topic). The daily
+    # 20:00 ET floor ('scheduled') is the expected once-a-day cycle, and an
+    # operator-initiated 'manual' run is self-evident; EVERY other trigger means
+    # the council was woken autonomously off-schedule — the startup gate
+    # ('startup'), the 25h max-silence backstop ('backstop_silence'), or a
+    # W-series gate wake ('gate_wake:W1' / 'gate_wake:W2'). Those are exactly the
+    # cases the operator asked to be paged on. Best-effort: wrapped so a notify
+    # failure can never affect the cycle.
+    if trigger not in ('scheduled', 'manual'):
+        try:
+            from magi.notify import send_ntfy
+            title, body, severity, category = _build_wake_alert(trigger)
+            send_ntfy(
+                title=title,
+                body=body,
+                severity=severity,
+                category=category,
+            )
+        except Exception as e:
+            log.warning(f"off-schedule wake ntfy failed (non-blocking): {e}")
 
     # Record cycle time for the gate-wake throttle. Set for EVERY cycle
     # (scheduled, startup, manual, gate wake) so an off-schedule wake can't
@@ -984,30 +1301,80 @@ def main():
                     log.warning("startup gate: fingerprint check failed "
                                 "(%s) — skipping condition (a)", e)
 
-                # (b) unconsumed fired wake-class events
+                # (b) unconsumed fired wake-class events — EPISODE-AWARE
+                # (2026-07-02). The gate re-fires W1 hourly during a standing
+                # breach; the running wake wire suppresses re-fires for an
+                # already-answered episode (_t2_episode_already_answered →
+                # 'wake_episode_answered'), but a row written inside the
+                # 60-min post-cycle throttle sits unmarked for up to an hour,
+                # and this check used to grab ANY unconsumed fired row — so a
+                # restart in that window re-asked a question the council had
+                # already answered (2026-07-02: two of three restart wakes
+                # were exactly this). Now each pending W1 runs the SAME
+                # episode guard the wake wire uses, on the event's own
+                # recorded direction+band; answered episodes are consumed
+                # with the wire's own sentinel and stay quiet. W2 carries no
+                # band/direction — a pending W2 still wakes. Fails open
+                # (wake) on any parse error.
                 if startup_wake_reason is None:
+                    import json as _json
                     ph = ",".join("?" for _ in WAKE_CLASS_TRIGGERS)
-                    pend = conn.execute(
-                        f"SELECT trigger_id FROM magi_gate_events "
+                    pend_rows = conn.execute(
+                        f"SELECT trigger_id, details FROM magi_gate_events "
                         f"WHERE consumed_in_cycle IS NULL AND fired=1 "
-                        f"AND trigger_id IN ({ph}) LIMIT 1",
+                        f"AND trigger_id IN ({ph}) ORDER BY timestamp",
                         tuple(WAKE_CLASS_TRIGGERS),
-                    ).fetchone()
-                    if pend:
+                    ).fetchall()
+                    for pe in pend_rows:
+                        answered = False
+                        if pe['trigger_id'] == 'W1':
+                            try:
+                                det = _json.loads(pe['details'] or '{}')
+                                d = det.get('direction')
+                                u, l = float(det['upper']), float(det['lower'])
+                                if d:
+                                    answered = _t2_episode_already_answered(
+                                        conn, d, u, l)
+                            except (KeyError, TypeError, ValueError):
+                                pass  # fails open → wake
+                        if answered:
+                            log.info(
+                                "Startup gate: pending W1 suppressed — "
+                                "breach episode already answered by a "
+                                "council cycle (consuming with the wake "
+                                "wire's sentinel)")
+                            _consume_wake_gate_event(
+                                'W1', 'wake_episode_answered')
+                            continue
                         startup_wake_reason = (
-                            f"unconsumed wake event {pend['trigger_id']} "
+                            f"unconsumed wake event {pe['trigger_id']} "
                             f"pending from before restart")
+                        break
 
-                # (c) price outside the current grid band
+                # (c) price outside the current grid band — EPISODE-AWARE
+                # (2026-07-02, same defect as (b)): out-of-band asks the W1
+                # breach question, and if a council cycle already answered it
+                # for this same side+band, a restart must not re-ask — the
+                # daily floor still re-judges. A NEW breach (fresh band after
+                # a rebuild, or flipped side) has no answered match → wakes.
                 if startup_wake_reason is None:
                     try:
                         _, b_upper, b_lower = _grid_band(conn)
                         px = engine.get_current_price()
                         if (b_upper is not None and px is not None
                                 and (px > b_upper or px < b_lower)):
-                            startup_wake_reason = (
-                                f"price {px} outside grid band "
-                                f"[{b_lower:.4f}, {b_upper:.4f}]")
+                            side = "above" if px > b_upper else "below"
+                            if _t2_episode_already_answered(
+                                    conn, side, b_upper, b_lower):
+                                log.info(
+                                    "Startup gate: price %s outside band "
+                                    "[%.4f, %.4f] but the breach episode "
+                                    "is already council-answered — staying "
+                                    "quiet", px, b_lower, b_upper)
+                            else:
+                                startup_wake_reason = (
+                                    f"price {px} outside grid band "
+                                    f"[{b_lower:.4f}, {b_upper:.4f}]")
                     except Exception as e:
                         log.warning("startup gate: band check failed (%s) "
                                     "— skipping condition (c)", e)
@@ -1020,8 +1387,9 @@ def main():
         else:
             log.info(
                 "Startup council gate: quiet restart — config unchanged, "
-                "no pending wake events, price in band. No startup cycle "
-                "(daily floor / 25h backstop / W-wakes carry the cadence)."
+                "no unanswered wake events, no unanswered band breach. "
+                "No startup cycle (daily floor / 25h backstop / W-wakes "
+                "carry the cadence)."
             )
     except Exception as e:
         log.warning(f"Startup gate check failed, running cycle anyway: {e}")

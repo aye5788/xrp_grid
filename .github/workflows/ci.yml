@@ -1,0 +1,40 @@
+# Proactive bug-catching layer 1 (see 02_NEXT_BUILD_TASKS.md PLAN 2026-07-02).
+# Two jobs, both cheap (~2-3 min total, well inside the Pro 3,000 min/month):
+#
+#   static  — ruff over the whole repo, BUG CLASSES ONLY (F821/F822/F823/E9:
+#             undefined names, broken __all__, use-before-assign, syntax).
+#             This is the check that would have caught the 2026-06-26 engine
+#             NameError the day it was written. Style rules deliberately OFF.
+#
+#   properties — the Hypothesis suite over light-import money-path modules
+#             (notify title sanitization, aggregate ballot guard, forward_sim
+#             band/break totality, pnl FIFO matcher). Installs ONLY
+#             requirements-ci.txt — never the google-adk chain.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install ruff
+      - run: >
+          ruff check --select F821,F822,F823,E9
+          --exclude archive,local_assistant,optimize .
+
+  properties:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install -r requirements-ci.txt
+      - run: python -m pytest tests/ -q

@@ -1,5 +1,15 @@
 # CLAUDE.md
 
+> ⚠️ **DECISION LAYER REDESIGNED 2026-06-24 — READ `05_COUNCIL_REDESIGN.md` FIRST.**
+> The council was rebuilt from the *arbiter relay* into a **blind-review,
+> equal-seats** council (no arbiter; Balthasar is now `claude-haiku-4-5`, not
+> sonnet). It lives on branch **`council-redesign`** (`fc62b93`, pushed; **not**
+> merged to `main`). The council/decision-layer descriptions in §2–§3 below and in
+> `00`/`01`/`02` are **stale** — `05_COUNCIL_REDESIGN.md` is authoritative for the
+> council and lists exactly what's superseded, the current state, and the one known
+> bug (Casper's Gemini propose 400). Everything else here (engine, hard rules, gate,
+> data, paper/live) is still accurate.
+
 This file loads automatically at the start of every Claude Code session
 in this repo. It encodes operating context and intent. State (what is
 built, what is broken, what is next) lives in the five handoff docs at
@@ -27,7 +37,114 @@ disagree, the handoff docs win for state; this file wins for how to work.
 > timeouts; pytz dropped from scheduler). LETTA FULLY
 > DECOUPLED. Decision layer = the hand-rolled arbiter orchestrator
 > (`magi/council_v2.py`), live on a GATE-PRIMARY cadence.**
-> `magi.service` and `magi-dashboard.service` are **active + enabled**. The engine is
+> **As of 2026-07-04 (CURRENT — supersedes the 2026-06-28 block below): `magi.service`
+> is RUNNING on paper, uninterrupted since the 2026-07-02 20:54 UTC restart. The
+> 2026-07-02 sessions shipped and DEPLOYED (all committed + pushed on
+> `council-redesign`): (a) PnL DECOMPOSITION (`harvest` / `alpha_vs_hold` /
+> `inventory_hold_delta` — never cite equity `total` alone) + the STAND_ASIDE
+> WORK-OFF LADDER (`scheduler.maintain_workoff_ladder`, sells-only maker rungs above
+> market, floor-capped, operator-gated arming) as `dab17a1`; (b) the 06-28 Open list
+> ALL CLOSED as `429b6aa` — ntfy emoji-title crash fixed (wake notifications deliver
+> for the first time), `tape_verdict` RESTORED (GCS snapshot + gap-free Bitstamp
+> refill + hourly `tape-tail.timer`; W2's verdict arm is LIVE again — real W2 wake
+> fired 07-03 11:00 UTC), grader predicates UNIFIED (one band-break definition backs
+> both stance and seat graders; matured STAND_ASIDE rows in a rally now honestly
+> score 0/6), `Ranking` ballots sanitized at `aggregate()` (first live catch of a
+> duplicate ballot 07-02); (c) episode-aware startup gate (`4da7b53`) — restarts
+> during an already-answered breach stay QUIET; (d) the proactive bug-catching
+> architecture layers 1–3 LIVE (CI ruff+Hypothesis gate on GitHub; on-box
+> `magi/invariants.py` riding the observer tick; MAGI-02 off-box falsifier deployed
+> on the operator's desktop, 6/6 predicates verified unattended). LADDER VERIFIED
+> LIVE 07-03/07-04: armed at the 07-03 00:00 UTC daily cycle, seeded 5 rungs, fills
+> topped up correctly, headroom respected. MARKET: XRP rallied ~$1.03 → ~$1.15 while
+> the council held STAND_ASIDE since 06-26 — paper `alpha_vs_hold` = −$0.47 (equity
+> +$3.26 is inventory beta; harvest $0, zero round trips); the 07-04 daily cycle
+> split 3 ways (Casper MAINTAIN / Melchior HALT / Balthasar STAND_ASIDE) — the
+> stance-EXIT question and the rally-window accuracy review are the live watch
+> items. LATER SAME DAY (2026-07-04 evening — DEPLOYED): the operator-driven audit
+> of a Journal-redesign proposal exposed that **the LEARNING LOOP had been DEAD
+> since the council redesign** — the per-seat Journal (`get_agent_recall`) lost its
+> only caller at the 06-25/26 rebuild and the replacement shared ledger fed the
+> seats raw equity `pnl_24h` (the banned metric) with none of the graded outcomes;
+> four audits missed it (money-path scoped; doc claim trusted, never re-verified).
+> REBUILT + DEPLOYED same day: (a) **SYNC RATIO** (`magi/sync_ratio.py`) — v2
+> cost-based grading, each decision's dollar edge vs the rejected alternative via
+> the shared forward sim (acceptance table over the paper run: 7 matured
+> stand-asides netted +$0.03 vs deploying; the 07-01 rally decision alone SAVED
+> $0.28 — the caution was free insurance, where hit-rate grading scored the same
+> rows 0/7); (b) the ledger outcome line now carries those FACTS (no pass/fail
+> verdicts — seats weigh the asymmetry; binary grades remain operator-facing
+> observability only); (c) the cumulative condition-bucketed **COUNCIL TRACK
+> RECORD** block; (d) **ENTRY PLUG** (`magi/entry_plug.py`) — reliability-weighted
+> NOTEWORTHY PRECEDENTS from outside the recency window, weights recomputed
+> deterministically from history (no mutable state; 5/5 synthetic mechanics
+> checks; frozen superiority test pre-registered for ≥30 matured episodes);
+> (e) `memory_injections` flight-recorder table — every cycle records what the
+> seats were shown; (f) MAGI-02 **P7_learning_loop_alive** (proposed — operator
+> promotion pending) + **P1 refined** (its 07-03 FAIL was a formalization
+> false-positive: sweep-consumption by scheduled/W2 cycles counted as "wakes";
+> now only genuine `gate_wake:W1` cycles count). Config fingerprint gained
+> `memory_schema=sync_ratio_v1` → one-time version bump at deploy; council
+> memory restarts at the new boundary and fills as cycles mature (~72h). Open:
+> promote P7 + set its effective_from (operator), watch the first post-deploy
+> cycles, MAGI-02 first miner run (Ollama not on the desktop yet), chaos-drill
+> layer 4, dead-arbiter-module deletion + engine hygiene items (see `02`).**
+> **As of 2026-06-28 (supersedes the 2026-06-26 block below): `magi.service`
+> is RUNNING on paper. A real audit (4 parallel finders + own verification) found &
+> fixed 3 bugs (committed): (1) HIGH — the observer grid-replenishment (`scheduler.py`)
+> re-armed a BUY on every sell fill ignoring `pause_longs`/stance/exposure-cap — a
+> council-BYPASS that silently undid STAND_ASIDE between cycles (verified firing
+> 06-26/06-27; cancelled by luck) — now gated on the council's protective flags
+> (`pause_longs` OR exposure-cap for buys, `pause_shorts` for sells; reads existing
+> state, makes no market call). (2) MED — `roc_6h` was nulled hourly by `gate_monitor`'s
+> empty-6h-list recompute (a 2nd writer to the `indicators` table); fixed to resample
+> 6h from the 1h bars, verified live. (3) MED — added alert-only
+> `world_state_schema.alert_on_stale_inputs` (catches shape-valid-but-null/stale council
+> inputs that drift-validation can't see). Aggregation/anonymizer/engine-guards/
+> paper-fills re-VERIFIED SOUND. Tape `history.db` is gone from the box → `tape_verdict`
+> dead. §8 lesson: the first audit pass was a status-check that MISSED the live
+> council-bypass — again. Detail: `01` (latest) + `05` (2026-06-28 TL;DR). Open:
+> grader-predicate mismatch, `Ranking` permutation guard, tape restore/demote.**
+> **As of 2026-06-26 (supersedes the 2026-06-25 block below): the trading
+> engine `magi.service` is RUNNING ON PAPER again (restarted 2026-06-26, `enabled` +
+> `active`); the dashboard is up at `https://api.ethobs.uk`. The blind-review persona
+> rewrite is VALIDATED — a pre-restart audit found the rewritten personas read
+> world_state paths that DON'T EXIST (`indicators.bearish_trend`,
+> `indicators.drawdown_from_high_7d`) and `validate_schema` was FAILing; fixed (paths
+> repointed/dropped + schema consumer lists synced → `validate_schema` PASS), and
+> `run_council` on the stored downtrend world_state then flipped MAINTAIN →
+> STAND_ASIDE (2× STAND_ASIDE + 1× HALT, clear Condorcet). On the live restart the
+> startup council voted STAND_ASIDE on the real downtrend → buys cancelled, the book
+> is sells-only (the correct protective posture). FIXED this session: the stale-counter
+> bug (`get_trajectory_context` floors at `paper_run_started_utc`;
+> `melchior_blocked_cycles` no longer miscounts `THESIS_HOLDS`; `reset_paper_book.py`
+> clears the down_walk anchors); and a SEPARATE engine bug found by the live restart
+> (NOT the audit — a thoroughness miss, see §8) — the post-action GRID INTEGRITY guard
+> (`engine.py` ~1611) tried to emergency-rebuild the council-mandated one-sided book
+> (re-adding buys into the downtrend) and errored on a missing `spacing_pct`; now the
+> guard leaves a PAUSE_LONGS/STAND_ASIDE/non-DEPLOY one-sided book alone and only
+> rebuilds a genuine DEPLOY-stance degeneracy (with the effective spacing). ADDED: an
+> off-schedule wake alert (ntfy, existing MAGI topic) on any council wake that is not
+> the daily 20:00 ET floor or a manual run (startup/backstop/W1/W2). Only the DOWNTREND
+> regime is validated so far; benign/ranging + RECONFIGURE are exercised by the live
+> paper run. The 2026-06-25 block below is now historical (its SHUT-DOWN /
+> NOT-validated / reset-INCOMPLETE claims are superseded).**
+> **As of 2026-06-25 (END of session): the trading engine `magi.service` is SHUT
+> DOWN by operator order; `magi-dashboard.service` IS running — waitress on :5000,
+> public at `https://api.ethobs.uk`. SEQUENCE this session: the engine was
+> briefly RESTARTED on paper (clean book reset → fresh 2.5%/5-level grid around
+> ~$1.03 → one blind-review council cycle, decision MAINTAIN), then a real audit
+> found the council grids into a confirmed XRP downtrend, and the operator ordered
+> it SHUT DOWN. The `magi.service` systemd unit now exists and is INSTALLED but
+> `disabled`/`inactive`. `reset_paper_book.py` (repo root, untracked) is the clean
+> reset; it is INCOMPLETE — it does not clear the trajectory/exposure counters
+> derived from `magi_decisions` (stale-counter bug, see `05`/`02`). The Casper
+> propose 400 is FIXED and the Langfuse instrumentation was rebuilt — see
+> `05_COUNCIL_REDESIGN.md` §7. **All three council personas were REWRITTEN
+> blind-review-native (§7d in `05`) to fix the root cause — they had been stale
+> arbiter-era — but the rewrite is NOT yet validated.** A full pre-restart audit ran
+> (5 dimensions) and a serious chain of Claude's own failures occurred — both
+> documented in §8 above and `05` §7d.** The engine is
 > in PAPER mode — the live toggle is disarmed (`.env` `MAGI_LIVE_CONFIRM=NO`,
 > `CONFIRM_LIVE` renamed `CONFIRM_LIVE.disarmed.20260609`), so no real Kraken orders
 > are placed; fills are SIMULATED against real market prices into a paper ledger
@@ -80,9 +197,23 @@ disagree, the handoff docs win for state; this file wins for how to work.
 > (1) Agents are **stateless**, NOT vendor-stateful — the "vendor owns memory/
 > self_model/thread history" line is REVERSED. Letta's stateful agent layer caused
 > thread-anchoring, the freshness-retry tax, and self_model corruption; statelessness
-> is the deliberate fix. The controlled, SQLite-sourced, prompt-injected **Journal
-> recall layer** is BUILT and wired into `council_v2` (committed `cebccb5`,
-> 2026-06-09 — deterministic, config-version-filtered, NOT vendor memory).
+> is the deliberate fix. ~~The controlled, SQLite-sourced, prompt-injected Journal
+> recall layer is BUILT and wired into council_v2 (committed cebccb5, 2026-06-09)~~
+> **FALSE AS OF THE REDESIGN — CORRECTED 2026-07-04:** that per-seat Journal was
+> silently ORPHANED when the blind-review redesign (06-25/26) rebuilt `run_council`
+> — `get_agent_recall` has had NO live caller since; the redesign's replacement
+> memory (a shared 6-item recency ledger) carried raw equity `pnl_24h` (the
+> banned-as-verdict metric) and NONE of the graded outcomes. The learning loop was
+> effectively DEAD for the whole blind-review paper run and four audits missed it
+> (each scoped to the money path; each trusted this very doc line). REPAIRED and
+> EXTENDED 2026-07-04 (deployed): the live memory is the council ledger with
+> factual 72h cost-vs-alternative outcomes (`magi/sync_ratio.py` — the v2
+> cost-based grading), the condition-bucketed COUNCIL TRACK RECORD, and the
+> reliability-weighted NOTEWORTHY PRECEDENTS (`magi/entry_plug.py`); every cycle's
+> injected memory is flight-recorded in `memory_injections` and watched by MAGI-02
+> predicate P7 so this class of silent death is falsifiable off-box, nightly.
+> Deterministic, config-version-filtered, recomputed-from-history (no mutable
+> state), NOT vendor memory — the original principles, now actually running.
 > (2) Cadence is **gate-driven**, not a 4h clock — IMPLEMENTED 2026-06-09 (BU-2),
 > REDESIGNED 2026-06-11 (Fix 4, after the wake-yield audit found 0/16
 > gate-woken cycles produced a council-originated change):
@@ -236,8 +367,11 @@ re-derive these.
   validator, the step/token sweep) are HISTORICAL — they describe the replaced layer.
   Seats are built in code from `magi/agents/personas/*.md` (instruction) +
   `magi/agents/schemas.py` (output_schema) via `magi/agents/schema_tools.py`; there are
-  no Letta blocks to provision and no vendor-side agent state. `agent_registry` may
-  still back the dashboard AGENT HEALTH chip but no longer maps to Letta UUIDs.
+  no Letta blocks to provision and no vendor-side agent state. `agent_registry` no
+  longer maps to Letta UUIDs and, as of 2026-06-25 (CS2), no longer backs the dashboard
+  AGENT HEALTH chip's model labels either — those come from `magi/agents/seats.py:MODELS`
+  (the table's `model` column had drifted stale: Balthasar `claude-sonnet-4-6` vs the
+  live `claude-haiku-4-5`).
 - **Invariants (learned the hard way — do NOT regress).**
   - **Seat schemas are always built via `magi/agents/schema_tools.py:schema_for_tool()`,
     never CrewAI `generate_model_description`.** CrewAI's strict pipeline forces every
@@ -388,9 +522,14 @@ re-derive these.
 - **Dashboard auth** is app-side: a Flask signed-cookie session in
   `dashboard.py` (`/login`, `/logout`, `before_request` gate; password in
   `.env:DASHBOARD_PASSWORD`, `SECRET_KEY` in `.env`; 365-day cookie).
-  nginx `auth_basic` was removed — the cloudflared tunnel hits Flask:5000
-  directly, so nginx was never in the public path. Token-authenticated
-  API calls (`X-Magi-Token`) bypass the login gate for automation.
+  Served by **waitress** (a real WSGI server, not Flask's dev `app.run()`) via
+  `magi-dashboard.service` (ExecStart uses `.venv`). The cloudflared tunnel hits
+  Flask:5000 directly (nginx is NOT in the public path). **Tunnel rebuilt 2026-06-25
+  (see `05` §7):** now a locally-managed `eth-observer` tunnel
+  (`e4d95b41…`) driven by on-disk `/etc/cloudflared/config.yml`, public at
+  `https://api.ethobs.uk` (the old embedded-token tunnel `0a3c34dc…` had been
+  deleted and its connector was dead). Token-authenticated API calls
+  (`X-Magi-Token`) bypass the login gate for automation.
 - **Letta-era operational facts removed 2026-06-06** (restart cost in Letta
   credits, the Letta SDK `model_settings` note, `provision_agents.py:AGENT_CONFIG`
   sync, the Letta Evals suites/`run_all.sh`) described the replaced agent layer.
@@ -474,9 +613,17 @@ re-derive these.
   or anything operationally sensitive. Dashboard chip panel
   (`AGENT HEALTH`, served above ALERTS) is the visual companion: green/
   yellow/red per agent computed from the last 3 R0 rows in
-  `debate_records`, where degraded = `conviction=0.0 AND crux LIKE
-  '(no response)%'` (same SAFE_DEFAULTS fingerprint as `council.py`).
-  API: `/api/agent_health`.
+  `debate_records`. **Degraded-detection is ERA-AWARE as of 2026-06-25 (CS2).**
+  The blind-review council does NOT write the arbiter-era SAFE_DEFAULTS sentinel
+  (`conviction=0.0 AND crux LIKE '(no response)%'`) — a non-responding seat is
+  simply absent and its `{seat}_r0_action` column reads NULL. So `_fetch_agent_health`
+  classifies each row: a blind-review row (any seat has a non-NULL `{seat}_r0_action`)
+  degrades a seat iff its OWN action is NULL while a peer responded; an arbiter-era
+  row keeps the legacy SAFE_DEFAULTS fingerprint. Model labels shown on the chips
+  come from `magi/agents/seats.py:MODELS` (the single source of truth), NOT the
+  `agent_registry` table — that table held arbiter-era models (Balthasar
+  `claude-sonnet-4-6`) and drifted stale when the redesign dropped Balthasar to
+  `claude-haiku-4-5`. API: `/api/agent_health`.
 - **Hard-rule precedence ladder** (added 2026-05-24).
   `enforce_hard_rules` runs its rules in a fixed order, and a LATER rule may
   overwrite an EARLIER rule's `grid_action` — survival/integrity rules outrank
@@ -701,6 +848,60 @@ Patterns that have cost real time. Lesson per item.
   framing in handoff docs did not match observed behavior. *Lesson:*
   when the docs describe a mechanism, verify it fires at expected
   frequency before assuming it is doing work.
+
+### Session 2026-06-25 — a compounding failure cascade (Claude's, documented at operator order)
+
+A pre-restart "audit" and the bring-up that followed went badly. The chain, owned
+plainly so it is not repeated:
+
+- **A status check was delivered as a "comprehensive audit."** Before arming the
+  paper restart, the audit validated that the code *ran* and handled the blind-review
+  era structurally, then declared **"no blockers, correctly built."** It never
+  validated the actual VALUES flowing into the council, nor the QUALITY of a real
+  decision against the design goal. This is the exact substitution §7 warns against —
+  shipped anyway. The real defects (below) were all missed by it. *Lesson:* an audit
+  that does not recompute the council's inputs against ground truth and measure a
+  real decision against `>50% accuracy / fee-positive / survive` is a status check.
+  Do not call it an audit.
+
+- **A non-existent "critical bug" was fabricated, and the operator shut the system
+  down over it.** Reviewing the first live cycle, `EMA200=1.56` (with price `1.03`)
+  was declared "impossible / corrupt indicators" — by assuming it was a **200-hour**
+  EMA and comparing it to the hourly range. It is a **200-DAY** EMA (`observer.py:159`
+  computes EMA/ADX/BB from daily candles); ~1.5 is correct for XRP's real multi-month
+  decline from ~$2.07. Independent recompute later matched it to the digit (EMA50
+  exact, EMA200 within 0.7%). A working paper system was halted over an alarm that was
+  itself the error. *Lesson:* verify a value's UNITS/timeframe and recompute it against
+  ground truth BEFORE declaring it impossible. A false alarm is worse than a missed one.
+
+- **The proposed "fix" was to bolt a hard rule the council could not override.** When
+  the audit (finally, under operator pressure) found the council grids into a
+  downtrend, the first instinct was a deterministic `PAUSE_LONGS` rule in
+  `enforce_hard_rules` — exactly the **static rule creep / council bypass** forbidden
+  by P1–P2 and the operator's standing mandate ("improve the council, never bypass
+  it"). *Lesson:* a bad council decision is fixed INSIDE the council (seats /
+  aggregation), never by a rule that strips its judgment.
+
+- **Anchoring + tunneling.** Each step fixated on one thing (one indicator's plumbing;
+  then "the personas are THE issue") to the exclusion of a systematic sweep, and only
+  swept the whole layer when the operator demanded it. *Lesson:* on a "is this the
+  only issue" question, enumerate and check every component before answering; do not
+  present the first root cause found as the whole truth.
+
+- **THE ACTUAL ROOT CAUSE (found on the real audit):** the council redesign rebuilt
+  the machinery (schemas, propose→review→aggregate, anonymizer — all verified sound)
+  but **left all three seat personas in their stale arbiter-era form** — wrong output
+  schema (`position`/`verdict`/`stance`/`geometry_veto`), dead R1-synthesis sections,
+  and protection logic that depends on **"Casper's regime read"** as an input a
+  blind-review seat never sees. So the seats improvised onto the real action space and
+  the protective seats (Casper by regime, Balthasar by capital-erosion) could not
+  reliably fire — Casper stood alone and was outvoted into a confirmed downtrend (the
+  #1 documented grid-bleed failure mode). Fixed by rewriting all three personas
+  blind-review-native (single `action` over the shared space; no peer context; each
+  reads the downtrend from world_state directly; only Melchior carries
+  RECONFIGURE/geometry). **The rewrite is NOT yet validated** — the validation run was
+  not completed. *Lesson:* a layer redesign is incomplete until the PERSONAS that
+  drive it are rewritten for it; matching them is foundational, not "prompt tuning."
 
 ## 9. Operator preferences
 

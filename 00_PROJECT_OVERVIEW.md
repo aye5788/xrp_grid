@@ -1,5 +1,14 @@
 # MAGI — XRP Grid Bot — Project Overview
 
+> **2026-06-28 — CURRENT (supersedes all status blocks below for live state).**
+> `magi.service` is RUNNING on paper (blind-review council; see `05` and the STATE
+> LEDGER in `01`). A 2026-06-28 audit fixed a HIGH council-bypass in the observer's
+> grid replenishment (re-armed buys ignoring the council's STAND_ASIDE), fixed `roc_6h`
+> being nulled hourly by `gate_monitor`, and added an alert-only council-input
+> freshness monitor (`alert_on_stale_inputs`). The tape warehouse `history.db` is GONE
+> from the box → `tape_verdict` is dead (restore from GCS). Everything below is older
+> context. Full detail: `01` (latest block) + `05` (2026-06-28 TL;DR).
+
 > **STATUS — AGENT LAYER MIGRATED TO GOOGLE ADK (in code, 2026-05-31); NOT RUN LIVE.**
 > MAGI is still shut down at the service level (stopped + disabled 2026-05-28; no
 > live orders). The council's agent-call layer has been **rebuilt off Letta onto
@@ -388,18 +397,19 @@ Verified against `systemctl` 2026-06-06. **The only things RUNNING are the marke
 stack** (a separate data-collection concern); **MAGI trading is fully stopped.** See the
 STATE LEDGER at the top of `01_CURRENT_STATE.md` for the full live-vs-experimental map.
 
-| Service | State NOW (2026-06-06) | Role |
+| Service | State NOW (2026-06-25) | Role |
 |---|---|---|
-| `magi.service` | **inactive + disabled** | MAGI trading (scheduler, observer, council cycles) — OFF since the 2026-05-28 shutdown; will NOT auto-start |
-| `magi-dashboard.service` | **active + enabled** | **REPURPOSED** — now serves the *tape monitor* dashboard (Flask :5000, public via cloudflared → api.ethobs.uk, app-side cookie auth), **NOT** the MAGI council/grid |
-| `tape-collector.service` | **active + enabled** | Live Kraken XRP/USD tape collector → `tape/market_tape.db` (standalone; imports nothing from `magi/`) |
-| `warehouse-append.timer` | **active** (hourly) | Appends live tape → `tape/history.db` warehouse |
-| `tape-backup.timer` / `warehouse-backup.timer` | **active** (daily) | gzip → GCS backups of the tape + warehouse |
+| `magi.service` | **inactive** | MAGI trading (scheduler, observer, council cycles) — engine deliberately SHUT DOWN (paper hold); will NOT auto-start |
+| `magi-dashboard.service` | **active + enabled** | Serves the **MAGI dashboard** (waitress :5000, public `https://api.ethobs.uk`, app-side cookie auth). Restored to MAGI 2026-06-09; the public tunnel was rebuilt 2026-06-25 — see `05_COUNCIL_REDESIGN.md` §7 |
+| `cloudflared.service` | **active + enabled** | Public tunnel `eth-observer` (`e4d95b41…`), locally-managed via on-disk `/etc/cloudflared/config.yml` (`api.ethobs.uk → localhost:5000`) |
+| `tape-collector.service` | **inactive** | Tape collector STOOD DOWN 2026-06-09 for the paper bring-up (code intact) |
+| `warehouse-append.timer` / `tape-backup.timer` / `warehouse-backup.timer` | **inactive** | Tape/warehouse timers stopped with the tape stand-down |
 | `letta.service` | inactive + disabled | Self-hosted Letta Docker — dormant, kept for rollback only |
 
-Only `magi.service` (the MAGI trading system) is stopped; it was stopped + disabled on
-2026-05-28 for the migration and will NOT auto-start on reboot. `magi-dashboard.service`
-still runs but now drives the **tape monitor**, not MAGI. Do not restart `magi.service`
+The MAGI **trading engine** (`magi.service`) is stopped (paper hold) and will NOT
+auto-start on reboot; `magi-dashboard.service` runs and drives the **MAGI dashboard**
+(restored to MAGI on 2026-06-09; the tape stack has been stood down since then). Do
+not restart `magi.service`
 without operator direction. (Historical restart command, reference only:
 `systemctl restart magi.service`.)
 

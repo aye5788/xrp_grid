@@ -423,6 +423,50 @@ def _decision_baseline_equity(cycle_id):
     return None
 
 
+# === LANGFUSE SCORE SCHEMA (B6, 2026-06-25) =========================================
+# Reference map of every score the observer mirrors to Langfuse. Two invariants hold
+# for ALL of them:
+#   * They attach to the cycle's TRACE (council-cycle:<cycle_id>), never to a single
+#     seat observation. Per-seat signals are told apart by NAME (casper_*/melchior_*/
+#     balthasar_*) — that naming is what makes them queryable, so per-observation
+#     attachment would add nothing.
+#   * They are OBSERVABILITY ONLY — nothing here feeds back into a council decision or
+#     vote weight.
+# The OWNING FUNCTION is the single source of truth for each family (named so this
+# comment cannot silently drift from the code):
+#
+#   family          names                                           type      when  owner
+#   outcome 1h      fills_1h, pnl_1h                                 NUM       1h    _push_outcome_scores
+#   reiteration 1h  hard_rule_overridden, council_changed,          BOOL/CAT/ 1h    _push_outcome_scores
+#                   judgment_changed, trigger_class, conviction_shift NUM
+#   decision 1h(B3) decision_action, consensus_type, reconciled,     CAT/BOOL/ 1h    _push_outcome_scores
+#                   vote_spread, vote_unanimous  (redesign rows only) NUM
+#   outcome 6h      fills_6h, pnl_6h, unrealized_pnl_6h, grid_alive_6h NUM/BOOL 6h   _push_outcome_scores
+#   outcome 24h     fills_24h, pnl_24h, unrealized_pnl_24h           NUM       24h   _push_outcome_scores
+#   seat accuracy   casper_correct, melchior_correct,               BOOL      72h   backfill_seat_accuracy_scores
+#                   balthasar_correct  (blind-review: symmetric                      (_grade_action_row; arbiter-era
+#                   action grade for ALL three co-equal seats)                       rows use legacy graders)
+#   stance          stance, stance_correct                          CAT/BOOL  72h   backfill_stance_grades
+#   effect          fee_share_7d, net_harvest_7d, wakes_per_day,     NUM/BOOL  daily push_daily_effect_scores
+#                   wake_yield, cap_*, matches_backtest
+#
+# Trace-level grouping: a trigger:<class> TAG (set_trace_tags) + a sessionId of one
+# session per paper run (set_trace_session, B4). Delivery is receipt-convergent (retries
+# until every POST is 2xx); a sustained outage raises the edge-triggered
+# 'langfuse_delivery_degraded' alert (B5, _note_langfuse_delivery) instead of silently
+# piling up. No score is ever lost — only delayed — under a Langfuse outage.
+# ====================================================================================
+def _vote_distinct_count(multiset):
+    """Distinct proposed-action count from an authorship-free vote multiset string
+    like '2x STAND_ASIDE, 1x MAINTAIN' -> 2 (each comma segment is one distinct
+    action; the aggregator never repeats an action). 1 == unanimous. None if the
+    string is empty/unparseable. Used for the vote_spread / vote_unanimous scores."""
+    if not multiset or not isinstance(multiset, str):
+        return None
+    segs = [s for s in (p.strip() for p in multiset.split(',')) if s]
+    return len(segs) or None
+
+
 def _push_outcome_scores(cycle_id: str, window: str) -> bool:
     """Mirror the cycle's matured {window} outcome metrics onto its Langfuse
     trace as scores, so decision quality is monitorable next to cost/latency/
@@ -447,7 +491,7 @@ def _push_outcome_scores(cycle_id: str, window: str) -> bool:
             "       casper_r0_position, melchior_r0_position, "
             "       balthasar_r0_position, "
             "       casper_r0_conviction, melchior_r0_conviction, "
-            "       balthasar_r0_conviction, "
+            "       balthasar_r0_conviction, council_json, "
             "       fills_1h, pnl_1h, "
             "       fills_6h, pnl_6h, unrealized_pnl_6h, grid_alive_6h, "
             "       fills_24h, pnl_24h, unrealized_pnl_24h "
@@ -524,12 +568,59 @@ def _push_outcome_scores(cycle_id: str, window: str) -> bool:
                               'balthasar_r0_conviction')
                 ]
                 scores['conviction_shift'] = round(sum(deltas) / 3, 4)
+            # B3: the council's OWN decision quality, from council_json (redesign rows
+            # only — NULL on arbiter-era rows, so these are simply absent there).
+            # Known at decision time; mirrored on the 1h touchpoint via the same
+            # convergent delivery. Observability only — never feeds a decision.
+            cj_raw = row['council_json']
+            if cj_raw:
+                try:
+                    cj = _json.loads(cj_raw)
+                except (ValueError, TypeError):
+                    cj = None
+                if isinstance(cj, dict):
+                    scores['decision_action'] = cj.get('decision') or 'unknown'
+                    scores['consensus_type'] = cj.get('consensus') or 'unknown'
+                    scores['reconciled'] = bool(cj.get('reconciled'))
+                    distinct = _vote_distinct_count(cj.get('vote_multiset'))
+                    if distinct is not None:
+                        scores['vote_spread'] = distinct
+                        scores['vote_unanimous'] = (distinct == 1)
         conn.close()
         from magi.agents import tracing
         return tracing.push_trace_scores(row['trace_id'], scores)
     except Exception as e:
         log.warning(f"backfill: score push for {cycle_id} {window} failed: {e}")
         return False
+
+
+def _note_langfuse_delivery(ok: bool):
+    """Edge-triggered Langfuse score-delivery health signal (B5). Score pushes are
+    receipt-convergent and retry silently every pass, so without this a prolonged
+    Langfuse outage piles up undelivered scores with NO operator signal (the exact
+    silent-loss gap). Writes ONE warn-level magi_alert on the transition INTO a
+    degraded state (not one per failed window per pass) and an info row on recovery,
+    edge-tracked via the system_state flag 'langfuse_delivery_degraded'. warn/info
+    are dashboard-only (no ntfy). No data is lost either way — the sweep converges
+    when Langfuse recovers; this only surfaces the lag so it is not invisible."""
+    from database import get_system_state, set_system_state, insert_alert
+    degraded = (get_system_state('langfuse_delivery_degraded', default='0') or '0') == '1'
+    if not ok and not degraded:
+        set_system_state('langfuse_delivery_degraded', '1')
+        try:
+            insert_alert('warn', 'langfuse_delivery_degraded',
+                         "Langfuse score delivery incomplete (429/outage) — scores are "
+                         "queued and converge when Langfuse recovers; no data lost, "
+                         "mirror lagging.")
+        except Exception:
+            pass
+    elif ok and degraded:
+        set_system_state('langfuse_delivery_degraded', '0')
+        try:
+            insert_alert('info', 'langfuse_delivery_recovered',
+                         "Langfuse score delivery recovered; mirror caught up.")
+        except Exception:
+            pass
 
 
 def push_pending_outcome_scores():
@@ -548,6 +639,8 @@ def push_pending_outcome_scores():
     under the rate limit in backlog situations; anything dropped converges
     on later passes. Never raises."""
     from database import get_pending_score_pushes, mark_outcome_scores_pushed
+    any_attempt = False
+    any_fail = False
     for window in ('1h', '6h', '24h'):
         try:
             pending = get_pending_score_pushes(window)
@@ -556,16 +649,24 @@ def push_pending_outcome_scores():
             continue
         for cycle_id in pending[:3]:
             try:
+                any_attempt = True
                 if _push_outcome_scores(cycle_id, window):
                     mark_outcome_scores_pushed(cycle_id, window)
                     log.info(f"score sweep: {cycle_id} {window} delivered")
                 else:
+                    any_fail = True
                     log.warning(
                         f"score sweep: {cycle_id} {window} not delivered — "
                         f"will retry next pass"
                     )
             except Exception as e:
+                any_fail = True
                 log.error(f"score sweep: {cycle_id} {window} failed: {e}")
+    # B5: edge-triggered delivery-health signal — only when we actually attempted a
+    # push this pass (no pending work must not flip the state). Surfaces a sustained
+    # Langfuse outage on the dashboard instead of retrying silently forever.
+    if any_attempt:
+        _note_langfuse_delivery(ok=not any_fail)
 
 
 def push_daily_effect_scores():
@@ -765,8 +866,15 @@ def backfill_seat_accuracy_scores():
     neither right nor wrong). LIMIT 5 per pass keeps the score POSTs far
     under the Langfuse rate limit.
     """
+    # Blind-review rows (a {seat}_r0_action is present) grade ALL THREE co-equal seats
+    # with the one symmetric forward-realized action grader (_grade_action_row) — the
+    # equal-seats P1 fix: every seat's own proposed ACTION graded on the same anchored
+    # predicate. The legacy per-role graders (_grade_melchior_row verdict,
+    # _grade_balthasar_row risk) are kept ONLY for arbiter-era rows, which carry no
+    # action columns; Casper's retired regime grader stays unused for those (its
+    # casper_r0_position is a regime, deliberately ungraded).
     from database import (
-        get_conn, _grade_casper_row, _grade_melchior_row, _grade_balthasar_row,
+        get_conn, _grade_melchior_row, _grade_balthasar_row, _grade_action_row,
     )
     from magi.agents import tracing
 
@@ -784,6 +892,7 @@ def backfill_seat_accuracy_scores():
             "SELECT cycle_id, timestamp, trace_id, "
             "       casper_r0_position, melchior_r0_position, "
             "       balthasar_r0_position, "
+            "       casper_r0_action, melchior_r0_action, balthasar_r0_action, "
             "       fills_6h, pnl_6h, unrealized_pnl_6h, world_state, "
             "       geometry_veto, final_grid_action, final_risk_action, "
             "       hard_rule_overrides "
@@ -802,21 +911,31 @@ def backfill_seat_accuracy_scores():
         n = len(bars)
         TRANSIENT = {'not_matured_72h', 'missing_outcome'}
 
+        _SEATS = ('casper', 'melchior', 'balthasar')
         for row in candidates:
             r = dict(row)
-            seat_rows = {
-                'casper': {**r, 'position': r['casper_r0_position']},
-                'melchior': {**r, 'position': r['melchior_r0_position']},
-                'balthasar': {**r, 'position': r['balthasar_r0_position']},
-            }
-            graders = {
-                'casper': _grade_casper_row,
-                'melchior': _grade_melchior_row,
-                'balthasar': _grade_balthasar_row,
-            }
+            # Era dispatch: a blind-review row carries at least one {seat}_r0_action.
+            # Grade all three co-equal seats on their raw action (symmetric, P1);
+            # arbiter-era rows have no action columns -> legacy role-specific graders
+            # (Casper's regime grader stays retired there).
+            is_blind_review = any(r.get(f'{s}_r0_action') for s in _SEATS)
+            if is_blind_review:
+                probe = 'action'
+                seat_rows = {s: {**r, 'action': r.get(f'{s}_r0_action')} for s in _SEATS}
+                graders = {s: _grade_action_row for s in _SEATS}
+            else:
+                probe = 'position'
+                seat_rows = {
+                    'melchior': {**r, 'position': r['melchior_r0_position']},
+                    'balthasar': {**r, 'position': r['balthasar_r0_position']},
+                }
+                graders = {
+                    'melchior': _grade_melchior_row,
+                    'balthasar': _grade_balthasar_row,
+                }
             grades, all_resolved = {}, True
             for seat, grader in graders.items():
-                if seat_rows[seat]['position'] is None:
+                if seat_rows[seat].get(probe) is None:
                     continue  # seat never voted — permanently ungradeable
                 grade, reason = grader(seat_rows[seat], bars, ts_keys, n)
                 if grade is not None:
@@ -925,15 +1044,12 @@ def backfill_stance_grades():
                 continue
 
             gs = ws.get('grid_state') or {}
-            try:
-                spacing = float(gs.get('spacing_pct') or 0)
-                levels = int(gs.get('levels') or 0)
-            except (TypeError, ValueError):
-                spacing, levels = 0.0, 0
-            if spacing > 0:
-                band = spacing * max(1, levels // 2)
-            else:
-                band = 0.05  # fallback: max spacing 2.5% × 2 pairs
+            # Band + break predicates live in grid.forward_sim (stance_band /
+            # path_breaks) — SHARED with database._grade_action_row so the
+            # stance grader and the seat action grader cannot diverge
+            # (2026-07-02; they had: the seat grader was bare drift<0).
+            from grid.forward_sim import stance_band, path_breaks
+            band = stance_band(gs.get('spacing_pct'), gs.get('levels'))
 
             start = _parse_iso_safe(r['timestamp'])
             if start is None:
@@ -953,8 +1069,7 @@ def backfill_stance_grades():
             if len(closes) < 48:
                 continue  # window not fully covered yet; retry next pass
 
-            down_break = min(closes) < decision_price * (1 - band)
-            up_run = max(closes) > decision_price * (1 + band)
+            down_break, up_run = path_breaks(closes, decision_price, band)
             stance = r['stance']
             if stance == 'DEPLOY':
                 correct = not down_break

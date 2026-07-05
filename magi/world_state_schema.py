@@ -122,20 +122,24 @@ FIELDS = {
     "indicators.ema_50": {
         "type": "float",
         "description": "50-period EMA, daily timeframe",
-        "consumers": ["casper"],
+        "consumers": ["casper", "melchior", "balthasar"],
         "casper_usage": "Step 1 EMA stack check vs ema_200",
+        "melchior_usage": "Step 2 TREND-CYCLING check — EMA stack vs ema_200",
+        "balthasar_usage": "Step 2 capital-erosion gate — bearish stack (ema_50 < ema_200)",
     },
     "indicators.ema_200": {
         "type": "float",
         "description": "200-period EMA, daily timeframe",
-        "consumers": ["casper"],
+        "consumers": ["casper", "balthasar"],
         "casper_usage": "Step 1 EMA stack reference + ema_distance_pct denominator",
+        "balthasar_usage": "Step 2 capital-erosion gate — ema_distance denominator + bearish stack",
     },
     "indicators.adx": {
         "type": "float",
         "description": "average directional index, daily timeframe",
-        "consumers": ["casper"],
+        "consumers": ["casper", "balthasar"],
         "casper_usage": "Step 1 conviction calibration (ADX >= 20 = high); Step 3 RANGING ADX < 20 check",
+        "balthasar_usage": "Step 2 capital-erosion gate — adx_neg > adx_pos corroborator",
     },
     "indicators.adx_pos": {
         "type": "float",
@@ -152,8 +156,9 @@ FIELDS = {
     "indicators.roc_6h": {
         "type": "float",
         "description": "6-hour rate of change (percent)",
-        "consumers": ["casper"],
+        "consumers": ["casper", "balthasar"],
         "casper_usage": "Step 1 condition 4a — momentum confirmation (>= +0.3 bullish, <= -0.3 bearish)",
+        "balthasar_usage": "Step 2 capital-erosion gate — roc_6h <= 0 momentum corroborator",
     },
     "indicators.bb_width": {
         "type": "float",
@@ -215,7 +220,8 @@ FIELDS = {
     "indicators.vol_regime": {
         "type": "str",
         "description": "volatility regime label — LOW / MEDIUM / HIGH",
-        "consumers": ["melchior", "balthasar"],
+        "consumers": ["casper", "melchior", "balthasar"],
+        "casper_usage": "context — Step 3 RANGING / conviction calibration (HIGH-vol context)",
         "melchior_usage": "Step 3 spacing-band gating (LOW/HIGH paths)",
         "balthasar_usage": "Step 4 market-context elevation when HIGH combined with skew",
     },
@@ -694,6 +700,14 @@ FIELDS = {
         "melchior_usage": "context — while engaged, a RECONFIGURE rebuilds sells-only; factor that into whether a rebuild is economically worth it",
         "balthasar_usage": "stance input — a rising streak (1-2) is the leading edge of the downtrend failure mode; engaged (>= threshold) means the engine is already refusing buys regardless of the vote",
     },
+    "workoff": {
+        "type": "dict",
+        "description": "STAND_ASIDE inventory work-off ladder state (active, rungs_resting, xrp_headroom_above_floor, worked_off_xrp_since_stance) — while the standing stance is STAND_ASIDE the engine maintains a sells-only resting ladder above market (ORDER_SIZE_XRP per rung, capped at the grid's level count, never past the XRP buffer floor), so 'work inventory off' is actually delivered rather than stopping when the old grid's rungs exhaust (gap verified 2026-07-02)",
+        "consumers": ["casper", "melchior", "balthasar"],
+        "casper_usage": "context — while active, a persisting STAND_ASIDE keeps distributing inventory into strength; weigh whether the trend evidence still justifies that ongoing distribution, not just the original stand-aside call",
+        "melchior_usage": "context — worked_off_xrp_since_stance is realized distribution at successively higher prices; factor the remaining headroom into whether re-deploying (DEPLOY/RECONFIGURE) now beats continuing to distribute",
+        "balthasar_usage": "stance input — STAND_ASIDE is not passive: it actively sells inventory down toward the buffer floor; re-justify that distribution from CURRENT evidence each cycle, and prefer exiting the stance over letting the ladder run on a thesis you no longer hold",
+    },
     "council_stance": {
         "type": "dict",
         "description": "the council's current standing stance (stance, since_utc, hours_in_stance) — what the arbiter voted last cycle and how long it has held",
@@ -928,6 +942,112 @@ def alert_on_runtime_drift(world_state: dict) -> bool:
     except Exception as e:
         log.error("failed to write schema_drift_runtime alert: %s", e)
     return True
+
+
+# ----------------------------------------------------------------------
+# Council-input freshness monitor (completeness, not shape)
+# ----------------------------------------------------------------------
+
+# Core regime/momentum inputs whose SILENT null/staleness blinds the protective
+# seats. alert_on_runtime_drift validates only SHAPE (path present / declared)
+# and is blind to a field that is present-but-null (roc_6h was null for ~3 days
+# unnoticed) or present-but-stale (tape_verdict). These are the council's trend
+# backbone — if one goes dark the council reasons without it in exactly the
+# regime where it matters most.
+_CRITICAL_COUNCIL_INPUTS = (
+    "indicators.ema_50",
+    "indicators.ema_200",
+    "indicators.adx",
+    "indicators.adx_pos",
+    "indicators.adx_neg",
+    "indicators.roc_6h",
+)
+
+# Consecutive build_world_state calls a field must stay degraded before we
+# alert — filters a single transient flicker; small so a real outage surfaces
+# within ~a day of council cadence.
+_STALE_INPUT_ALERT_STREAK = 2
+
+
+def _resolve_ws_path(world_state: dict, dotted: str):
+    cur = world_state
+    for seg in dotted.split("."):
+        if not isinstance(cur, dict) or seg not in cur:
+            return None
+        cur = cur[seg]
+    return cur
+
+
+def alert_on_stale_inputs(world_state: dict) -> list:
+    """Surface (dashboard-only) when a declared council-consumer input is
+    silently null/stale across consecutive cycles — the gap alert_on_runtime_drift
+    cannot see (it checks shape, not whether a field carries a value: the ~3-day
+    roc_6h outage produced zero alerts).
+
+    Edge-triggered per field via system_state['stale_input_streaks'] so a
+    sustained degradation alerts ONCE per episode, not every cycle, and clears
+    when the field recovers. ALERT-ONLY at 'warn' severity (dashboard, no ntfy):
+    a degraded input is a maintenance failure the personas already handle
+    ('stale = missing evidence, never negative evidence'), NEVER a trading stop.
+    Escalation path if a field needs a phone push: raise its severity to
+    'critical' here (queryable now via magi_alerts category 'stale_council_input').
+
+    Returns the list of currently-degraded field names (for logging/tests).
+    """
+    try:
+        import json as _json
+        from database import get_system_state, set_system_state, insert_alert
+    except Exception:
+        return []
+
+    degraded = []
+    for path in _CRITICAL_COUNCIL_INPUTS:
+        if _resolve_ws_path(world_state, path) is None:
+            degraded.append(path)
+    # tape_verdict: the degradation is present-but-stale, not null.
+    tv = world_state.get("tape_verdict")
+    if isinstance(tv, dict) and tv.get("stale"):
+        degraded.append("tape_verdict")
+
+    try:
+        prior = _json.loads(
+            get_system_state("stale_input_streaks", default="{}") or "{}"
+        )
+        if not isinstance(prior, dict):
+            prior = {}
+    except Exception:
+        prior = {}
+
+    # Only degraded fields keep a streak; recovered/healthy fields drop out of
+    # the dict, which resets them to 0 next cycle.
+    streaks = {}
+    for field in degraded:
+        streaks[field] = int(prior.get(field, 0)) + 1
+        # Edge-trigger: fire exactly on the cycle the streak REACHES the
+        # threshold (==), so a sustained outage alerts once, not every cycle.
+        if streaks[field] == _STALE_INPUT_ALERT_STREAK:
+            try:
+                insert_alert(
+                    severity="warn",
+                    category="stale_council_input",
+                    message=(
+                        f"council input '{field}' null/stale for "
+                        f"{streaks[field]} consecutive cycles — the council is "
+                        f"voting without it (alert-only; trading continues)"
+                    ),
+                )
+                log.warning(
+                    "stale council input: %s (streak %d)", field, streaks[field]
+                )
+            except Exception as e:
+                log.error("failed to write stale_council_input alert: %s", e)
+
+    try:
+        set_system_state("stale_input_streaks", _json.dumps(streaks))
+    except Exception as e:
+        log.error("failed to persist stale_input_streaks: %s", e)
+
+    return degraded
 
 
 # ----------------------------------------------------------------------
